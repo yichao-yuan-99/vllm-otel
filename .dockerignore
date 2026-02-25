@@ -1,0 +1,12 @@
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.swp
+*.swo
+last_post.txt
+last_wire.bin
+last_wire.txt
+*.tar.gz

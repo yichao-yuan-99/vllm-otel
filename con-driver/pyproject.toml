@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "con-driver"
+version = "0.1.0"
+description = "Concurrent launcher for Harbor trial runs."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "prometheus-client>=0.22.1",
+    "requests>=2.32.3",
+    "rich>=14.1.0",
+    "typer>=0.16.0",
+]
+
+[project.scripts]
+con-driver = "con_driver.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/con_driver"]

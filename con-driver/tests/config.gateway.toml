@@ -1,0 +1,19 @@
+[driver]
+driver_backend = "harbor"
+pool = "terminal-bench@2.0"
+pattern = "eager"
+max_concurrent = 1
+n_task = 2
+results_dir = "tests/output/con-driver"
+sample_without_replacement = true
+gateway = true
+gateway_url = "http://127.0.0.1:11457"
+gateway_job_output_root = "gateway-output"
+gateway_timeout_s = 30.0
+
+forwarded_args = [
+  "--agent", "terminus-2",
+  "--model", "hosted_vllm/Qwen3-Coder-30B-A3B-Instruct",
+  "--agent-kwarg", "api_base=http://127.0.0.1:11457/v1",
+  "--agent-kwarg", "model_info={\"max_input_tokens\":32768,\"max_output_tokens\":8192,\"input_cost_per_token\":0.0,\"output_cost_per_token\":0.0}",
+]
