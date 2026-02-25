@@ -6,6 +6,10 @@ This directory runs:
 - `vllm` (OpenAI-compatible server with OTEL packages) in Docker
 - `gateway` on the host (not in Docker)
 
+ROCm image build/push instructions:
+
+- `docker/README.rocm.md`
+
 ## 1) Create env file
 
 From repo root:
