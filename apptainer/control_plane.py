@@ -25,9 +25,9 @@ from urllib import request as urlrequest
 
 
 DEFAULT_JAEGER_IMAGE = "docker://jaegertracing/all-in-one:1.57"
-DEFAULT_VLLM_IMAGE = "docker://yichaoyuan/vllm-openai-otel:v0.14.1-otel-lp-rocm"
+DEFAULT_VLLM_IMAGE = "docker://yichaoyuan/vllm-openai-otel:v0.16.0-otel-lp-rocm"
 DEFAULT_JAEGER_SIF_NAME = "jaeger-all-in-one-1.57.sif"
-DEFAULT_VLLM_SIF_NAME = "vllm-openai-otel-v0.14.1-otel-lp-rocm.sif"
+DEFAULT_VLLM_SIF_NAME = "vllm-openai-otel-v0.16.0-otel-lp-rocm.sif"
 DEFAULT_STOP_WAIT_TIMEOUT_SECONDS = 180
 DEFAULT_STOP_POLL_INTERVAL_SECONDS = 2
 DEFAULT_TEST_PREFLIGHT_TIMEOUT_SECONDS = 30

@@ -6,7 +6,7 @@ This guide builds and pushes the ROCm image from:
 
 Target image tag:
 
-- `yichaoyuan/vllm-openai-otel:v0.14.1-otel-lp-rocm`
+- `yichaoyuan/vllm-openai-otel:v0.16.0-otel-lp-rocm`
 
 ## 1) Login
 
@@ -21,21 +21,21 @@ Run from repo root:
 ```bash
 docker build \
   -f docker/Dockerfile.rocm \
-  -t yichaoyuan/vllm-openai-otel:v0.14.1-otel-lp-rocm \
+  -t yichaoyuan/vllm-openai-otel:v0.16.0-otel-lp-rocm \
   .
 ```
 
 ## 3) Push
 
 ```bash
-docker push yichaoyuan/vllm-openai-otel:v0.14.1-otel-lp-rocm
+docker push yichaoyuan/vllm-openai-otel:v0.16.0-otel-lp-rocm
 ```
 
 ## 4) Optional Verify
 
 ```bash
-docker image inspect yichaoyuan/vllm-openai-otel:v0.14.1-otel-lp-rocm --format '{{.Id}}'
-docker pull yichaoyuan/vllm-openai-otel:v0.14.1-otel-lp-rocm
+docker image inspect yichaoyuan/vllm-openai-otel:v0.16.0-otel-lp-rocm --format '{{.Id}}'
+docker pull yichaoyuan/vllm-openai-otel:v0.16.0-otel-lp-rocm
 ```
 
 ## 5) Use in Compose
@@ -43,7 +43,7 @@ docker pull yichaoyuan/vllm-openai-otel:v0.14.1-otel-lp-rocm
 Set in `docker/.env`:
 
 ```bash
-VLLM_IMAGE_NAME=yichaoyuan/vllm-openai-otel:v0.14.1-otel-lp-rocm
+VLLM_IMAGE_NAME=yichaoyuan/vllm-openai-otel:v0.16.0-otel-lp-rocm
 ```
 
 Then start without forcing rebuild:

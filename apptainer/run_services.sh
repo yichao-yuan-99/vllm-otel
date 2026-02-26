@@ -65,7 +65,7 @@ set +a
 
 : "${APPTAINER_IMGS:=${HOME}/apptainer-images}"
 : "${JAEGER_IMAGE:=docker://jaegertracing/all-in-one:1.57}"
-: "${VLLM_IMAGE:=docker://yichaoyuan/vllm-openai-otel:v0.14.1-otel-lp-rocm}"
+: "${VLLM_IMAGE:=docker://yichaoyuan/vllm-openai-otel:v0.16.0-otel-lp-rocm}"
 : "${VLLM_SERVICE_PORT:=11451}"
 : "${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:=grpc://127.0.0.1:4317}"
 : "${OTEL_EXPORTER_OTLP_TRACES_INSECURE:=true}"
@@ -90,7 +90,7 @@ set +a
 : "${HF_HUB_CACHE:?Set HF_HUB_CACHE in your shell environment (or ${ENV_FILE})}"
 
 JAEGER_SIF_DEFAULT="${APPTAINER_IMGS}/jaeger-all-in-one-1.57.sif"
-VLLM_SIF_DEFAULT="${APPTAINER_IMGS}/vllm-openai-otel-v0.14.1-otel-lp-rocm.sif"
+VLLM_SIF_DEFAULT="${APPTAINER_IMGS}/vllm-openai-otel-v0.16.0-otel-lp-rocm.sif"
 JAEGER_SIF="${JAEGER_SIF:-${JAEGER_SIF_DEFAULT}}"
 VLLM_SIF="${VLLM_SIF:-${VLLM_SIF_DEFAULT}}"
 

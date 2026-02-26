@@ -1,4 +1,4 @@
-FROM vllm/vllm-openai-rocm:v0.14.1
+FROM vllm/vllm-openai-rocm:v0.16.0
 
 RUN python3 -m pip install --no-cache-dir \
   'opentelemetry-sdk>=1.26.0,<1.27.0' \
