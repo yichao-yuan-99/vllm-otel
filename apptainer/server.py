@@ -103,7 +103,6 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
 
         routes = {
-            "/pull": lambda: self.control_plane.pull(),
             "/start": lambda: self._start_command(payload),
             "/stop": lambda: self._stop_command(payload),
             "/stop/poll": lambda: self.control_plane.stop_poll(),
@@ -115,7 +114,6 @@ class RequestHandler(BaseHTTPRequestHandler):
             "/test": lambda: self.control_plane.test(),
             "/test/status": lambda: self.control_plane.test_status(),
             "/status": lambda: self.control_plane.status(),
-            "/command/pull": lambda: self.control_plane.pull(),
             "/command/start": lambda: self._start_command(payload),
             "/command/stop": lambda: self._stop_command(payload),
             "/command/stop/poll": lambda: self.control_plane.stop_poll(),
@@ -295,7 +293,15 @@ def main() -> int:
     parser = build_arg_parser()
     args = parser.parse_args()
 
-    control_plane = ControlPlane(args.config)
+    try:
+        control_plane = ControlPlane(args.config)
+        control_plane.validate_startup_requirements()
+    except ControlPlaneError as exc:
+        print(f"startup check failed: code={exc.code} message={exc.message}")
+        if exc.details:
+            print(json.dumps(exc.details, indent=2, sort_keys=True))
+        return 2
+
     host = args.host or control_plane.config.host
     port = args.port or control_plane.config.port
 

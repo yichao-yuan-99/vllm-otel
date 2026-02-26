@@ -12,6 +12,7 @@ The server keeps cluster partition + model allowlist config, submits `sbatch` jo
 
 - `apptainer/pyproject.toml`: Python package/dependency setup.
 - `apptainer/server_config.toml`: cluster partitions and allowed models.
+- `apptainer/pull_images.py`: pull Jaeger + vLLM OCI images to SIF files.
 - `apptainer/run/control_state.json`: active job state (auto-generated).
 - `apptainer/logs/`: slurm + jaeger + vllm logs (auto-generated).
 - `apptainer/run/old/` and `apptainer/logs/old/`: auto-archived stale files from prior server runs.
@@ -36,7 +37,17 @@ The server no longer reads `apptainer/.env` or `server.env_file`.
 Start is blocked when `weight_vram_gb > 0.75 * partition.total_vram_gb`.
 `cluster.startup_timeout_after_running = true` means startup timeout is counted only after Slurm state is `RUNNING`.
 
-## 2) Start server (login node)
+## 2) Pull images (required before server startup)
+
+```bash
+python3 apptainer/pull_images.py --config apptainer/server_config.toml
+```
+
+Use `--force` to re-pull and overwrite existing SIF files.
+
+The server now fails fast at startup if required SIF files are missing.
+
+## 3) Start server (login node)
 
 ```bash
 python3 apptainer/server.py --config apptainer/server_config.toml
@@ -44,13 +55,12 @@ python3 apptainer/server.py --config apptainer/server_config.toml
 
 Default bind is `0.0.0.0:23971`.
 
-## 3) Use client
+## 4) Use client
 
 ```bash
 python3 apptainer/client.py clientd-start --ssh-target <hpc-login-target>
 python3 apptainer/client.py clientd-status
 python3 apptainer/client.py status
-python3 apptainer/client.py pull
 python3 apptainer/client.py start -p mi3008x -m kimi_k2_5
 python3 apptainer/client.py start -p mi3008x -m kimi_k2_5 -b
 python3 apptainer/client.py up
@@ -67,7 +77,6 @@ Client default server URL is `http://127.0.0.1:23971`.
 
 ## Commands implemented
 
-- `pull`: pull Jaeger + vLLM OCI images to SIF under `APPTAINER_IMGS`.
 - `clientd-start`: start local SSH forwarding for server/vLLM/Jaeger ports via `ssh <target>`.
 - `clientd-stop`: stop local SSH forwarding daemon.
 - `clientd-status`: show whether forwarding daemon is running.
@@ -105,7 +114,6 @@ python3 apptainer/client_d.py stop
 
 All commands accept POST JSON:
 
-- `POST /pull`
 - `POST /start` with `{"partition": "...", "model": "...", "block": false}`
 - `POST /stop` with optional `{"block": false}`
 - `POST /stop/poll`

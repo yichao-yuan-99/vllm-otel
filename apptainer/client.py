@@ -359,14 +359,6 @@ def _cleanup_after_start_interrupt(ctx: typer.Context) -> None:
 
 
 @app.command()
-def pull(ctx: typer.Context) -> None:
-    """Pull Jaeger + vLLM OCI images into SIF files."""
-    payload = _run_command(ctx, "/pull")
-    _require_ok(payload)
-    _print_json(payload)
-
-
-@app.command()
 def start(
     ctx: typer.Context,
     partition: str = typer.Option(..., "--partition", "-p", help="Configured partition key."),

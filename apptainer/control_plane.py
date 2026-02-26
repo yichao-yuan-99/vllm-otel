@@ -205,44 +205,9 @@ class ControlPlane:
     def config(self) -> RuntimeConfig:
         return self._cfg
 
-    def pull(self) -> CommandResult:
+    def validate_startup_requirements(self) -> None:
         with self._lock:
-            self._require_command("apptainer")
-            self._cfg.apptainer_imgs.mkdir(parents=True, exist_ok=True)
-
-            actions: list[str] = []
-            if self._cfg.jaeger_sif.exists():
-                actions.append(f"skip existing {self._cfg.jaeger_sif}")
-            else:
-                self._run_checked(
-                    [
-                        "apptainer",
-                        "pull",
-                        str(self._cfg.jaeger_sif),
-                        self._cfg.jaeger_image,
-                    ],
-                    timeout_seconds=60 * 60,
-                )
-                actions.append(f"pulled {self._cfg.jaeger_image} -> {self._cfg.jaeger_sif}")
-
-            if self._cfg.vllm_sif.exists():
-                actions.append(f"skip existing {self._cfg.vllm_sif}")
-            else:
-                self._run_checked(
-                    ["apptainer", "pull", str(self._cfg.vllm_sif), self._cfg.vllm_image],
-                    timeout_seconds=2 * 60 * 60,
-                )
-                actions.append(f"pulled {self._cfg.vllm_image} -> {self._cfg.vllm_sif}")
-
-            return CommandResult(
-                code=0,
-                message="pull complete",
-                data={
-                    "actions": actions,
-                    "jaeger_sif": str(self._cfg.jaeger_sif),
-                    "vllm_sif": str(self._cfg.vllm_sif),
-                },
-            )
+            self._ensure_sif_files()
 
     def start(self, *, partition: str, model: str, block: bool = False) -> CommandResult:
         start_started_at = _utc_now_iso()
@@ -1002,10 +967,13 @@ class ControlPlane:
             missing.append(str(self._cfg.vllm_sif))
         if missing:
             raise ControlPlaneError(
-                message="missing SIF files; run pull first",
+                message="missing required SIF image files",
                 code=91,
                 http_status=400,
-                details={"missing": missing},
+                details={
+                    "missing": missing,
+                    "hint": "run python3 apptainer/pull_images.py --config apptainer/server_config.toml",
+                },
             )
 
     def _load_state(self) -> dict[str, Any]:
