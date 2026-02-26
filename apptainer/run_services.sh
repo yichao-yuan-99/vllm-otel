@@ -54,7 +54,7 @@ fi
 
 if [[ ! -f "${ENV_FILE}" ]]; then
   echo "error: env file not found: ${ENV_FILE}" >&2
-  echo "hint: cp ${SCRIPT_DIR}/.env.example ${SCRIPT_DIR}/.env" >&2
+  echo "hint: create ${SCRIPT_DIR}/.env and define required variables (see README)." >&2
   exit 1
 fi
 

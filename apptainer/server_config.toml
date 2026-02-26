@@ -1,0 +1,62 @@
+[server]
+host = "0.0.0.0"
+port = 23971
+
+[cluster]
+login_host = "login"
+job_name = "vllm_job"
+job_nodes = 1
+service_port = 11451
+jaeger_otlp_port = 4317
+jaeger_ui_port = 16686
+startup_timeout = 900
+run_dir = "apptainer/run"
+log_dir = "apptainer/logs"
+state_file = "apptainer/run/control_state.json"
+ssh_options = [
+  "-o", "ExitOnForwardFailure=yes",
+  "-o", "ServerAliveInterval=30",
+  "-o", "ServerAliveCountMax=3",
+]
+
+[partition.mi2508x]
+gpus_per_node = 8
+gpu_memory_gb = 64
+total_vram_gb = 512
+max_time = "04:00:00"
+
+[partition.mi3001x]
+gpus_per_node = 1
+gpu_memory_gb = 192
+total_vram_gb = 192
+max_time = "04:00:00"
+
+[partition.mi3008x]
+gpus_per_node = 8
+gpu_memory_gb = 192
+total_vram_gb = 1536
+max_time = "04:00:00"
+
+[partition.mi3258x]
+gpus_per_node = 8
+gpu_memory_gb = 256
+total_vram_gb = 2048
+max_time = "04:00:00"
+
+# NOTE: weight_vram_gb values should be set to your observed model memory usage.
+[models.qwen3_coder_30b]
+vllm_model_name = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+served_model_name = "Qwen3-Coder-30B-A3B-Instruct"
+weight_vram_gb = 70
+extra_args = []
+
+[models.kimi_k2_5]
+vllm_model_name = "moonshotai/Kimi-K2.5"
+served_model_name = "Kimi-K2.5"
+weight_vram_gb = 900
+extra_args = [
+  "--mm-encoder-tp-mode", "data",
+  "--trust-remote-code",
+  "--tool-call-parser", "kimi_k2",
+  "--reasoning-parser", "kimi_k2",
+]

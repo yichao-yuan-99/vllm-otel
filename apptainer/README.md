@@ -1,93 +1,124 @@
-# Apptainer on HPC (AMD MI325X, no Docker)
+# Apptainer HPC Control Plane (Server + Client)
 
-This directory provides an Apptainer-only workflow that mirrors `docker/docker-compose.yml` for:
+This directory now supports a login-node control plane for AMD HPC clusters:
 
-- Jaeger all-in-one (`jaegertracing/all-in-one:1.57`)
-- vLLM ROCm + OTEL image (`yichaoyuan/vllm-openai-otel:v0.14.1-otel-lp-rocm`)
+- `apptainer/server.py`: HTTP server on port `23971` by default.
+- `apptainer/client.py`: Typer CLI frontend that sends JSON POST commands.
+- `apptainer/client_d.py`: SSH tunnel daemon for client/server on different machines.
 
-It also runs both existing smoke tests:
+The server keeps cluster partition + model allowlist config, submits `sbatch` jobs, and manages one active vLLM service job at a time.
 
-- `docker/tests/dummy_otel_client.py`
-- `docker/tests/force_sequence_smoke_test.py`
+## Files
 
-## 1) Prepare env file
+- `apptainer/pyproject.toml`: Python package/dependency setup.
+- `apptainer/server_config.toml`: cluster partitions and allowed models.
+- `apptainer/run/control_state.json`: active job state (auto-generated).
+- `apptainer/logs/`: slurm + jaeger + vllm logs (auto-generated).
+- `apptainer/run/old/` and `apptainer/logs/old/`: auto-archived stale files from prior server runs.
 
-```bash
-cp apptainer/.env.example apptainer/.env
-```
-
-Edit `apptainer/.env` and set at least:
-
-- `VLLM_MODEL_NAME`
-- `VLLM_SERVED_MODEL_NAME`
-
-Assumption: `HF_HOME`, `HF_HUB_CACHE`, and optional `HF_TOKEN` are already exported in your shell (cluster module/profile env). You can still override them in `apptainer/.env` if needed.
-
-Load variables from `apptainer/.env` into the current shell when you want to use `${VLLM_SERVICE_PORT}` (and other vars) directly:
+## 1) Configure
 
 ```bash
-set -a
-source apptainer/.env
-set +a
+python3 -m pip install -e ./apptainer
 ```
 
-For MI325X x8, default is already:
+Edit `apptainer/server_config.toml`.
+Export runtime env vars in your shell before starting the server (for example: `HF_HOME`, `HF_HUB_CACHE`, optional `HF_TOKEN`, and any image overrides like `APPTAINER_IMGS`, `JAEGER_IMAGE`, `VLLM_IMAGE`).
+The server no longer reads `apptainer/.env` or `server.env_file`.
 
-- `VLLM_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`
-- `VLLM_TENSOR_PARALLEL_SIZE=8`
+`server_config.toml` includes the partition specs requested in `PROMPT.md` (`mi2508x`, `mi3001x`, `mi3008x`, `mi3258x`) and model entries with:
 
-## 2) Pull/convert OCI images to SIF
+- `vllm_model_name`
+- `served_model_name`
+- `weight_vram_gb`
+- `extra_args`
+
+Start is blocked when `weight_vram_gb > 0.75 * partition.total_vram_gb`.
+
+## 2) Start server (login node)
 
 ```bash
-bash apptainer/run_services.sh --env-file apptainer/.env pull
+python3 apptainer/server.py --config apptainer/server_config.toml
 ```
 
-By default SIF files are stored under `${APPTAINER_IMGS}`.
+Default bind is `0.0.0.0:23971`.
 
-## 3) Start Jaeger + vLLM
+## 3) Use client
 
 ```bash
-bash apptainer/run_services.sh --env-file apptainer/.env start
+python3 apptainer/client.py clientd-start --ssh-target <hpc-login-target>
+python3 apptainer/client.py clientd-status
+python3 apptainer/client.py status
+python3 apptainer/client.py pull
+python3 apptainer/client.py start -p mi3008x -m kimi_k2_5
+python3 apptainer/client.py start -p mi3008x -m kimi_k2_5 -b
+python3 apptainer/client.py up
+python3 apptainer/client.py wait-up --timeout-seconds 900
+python3 apptainer/client.py logs -n 200
+python3 apptainer/client.py test
+python3 apptainer/client.py stop
+python3 apptainer/client.py stop -b
+python3 apptainer/client.py stop-poll
+python3 apptainer/client.py clientd-stop
 ```
 
-Health checks used by the script:
+Client default server URL is `http://127.0.0.1:23971`.
 
-- Jaeger UI: `http://127.0.0.1:16686`
-- vLLM models API: `http://127.0.0.1:${VLLM_SERVICE_PORT}/v1/models`
+## Commands implemented
 
-## 4) Run smoke tests
+- `pull`: pull Jaeger + vLLM OCI images to SIF under `APPTAINER_IMGS`.
+- `clientd-start`: start local SSH forwarding for server/vLLM/Jaeger ports via `ssh <target>`.
+- `clientd-stop`: stop local SSH forwarding daemon.
+- `clientd-status`: show whether forwarding daemon is running.
+- `start`: submit `sbatch` job with reverse tunnels for:
+  - vLLM API: `127.0.0.1:11451`
+  - Jaeger OTLP gRPC: `127.0.0.1:4317`
+  - Jaeger UI/API: `127.0.0.1:16686`
+- `start --block/-b`: block until vLLM + Jaeger endpoints are up.
+- `start --block/-b`: streams per-step progress updates (`validate`, `submit`, `record`, `wait_services`).
+- `start`: fails fast if `cluster.service_port` is already occupied on login node.
+- `stop`: send `scancel` for active job (non-blocking by default).
+- `stop --block/-b`: block until it disappears from `squeue` (queries scoped to `-u $USER`).
+- `stop --block/-b`: streams per-step progress updates (`validate`, `cancel`, `wait_slurm`).
+- `stop-poll`: check whether a prior non-block `stop` has fully finished.
+- `up`: check whether both tunneled vLLM + Jaeger endpoints are currently up.
+- `wait-up`: block until both tunneled vLLM + Jaeger endpoints are up.
+- `logs`: tail slurm + jaeger + vllm logs.
+- `test`: run OTEL + force-sequence smoke tests, with live phase updates in the client.
+- `test`: includes a preflight check for `http://127.0.0.1:<service_port>/v1/models` and fails fast on wrong/non-vLLM endpoints.
+- `status`: show active job and configured partitions/models.
+
+You can also manage the tunnel directly:
 
 ```bash
-bash apptainer/run_services.sh --env-file apptainer/.env test
+python3 apptainer/client_d.py start --ssh-target <hpc-login-target>
+python3 apptainer/client_d.py status
+python3 apptainer/client_d.py stop
 ```
 
-This executes both tests inside the vLLM SIF with host networking:
+## HTTP API (server)
 
-1. OTEL client smoke test (expects spans exported to Jaeger OTLP gRPC `127.0.0.1:4317`)
-2. Force-sequence logits processor smoke test
+All commands accept POST JSON:
 
-## 5) Inspect status/logs
+- `POST /pull`
+- `POST /start` with `{"partition": "...", "model": "...", "block": false}`
+- `POST /stop` with optional `{"block": false}`
+- `POST /stop/poll`
+- `POST /start/status`
+- `POST /stop/status`
+- `POST /up`
+- `POST /wait-up` with optional `{"timeout_seconds": 900, "poll_interval_seconds": 2.0}`
+- `POST /logs` with optional `{"lines": 200}`
+- `POST /test`
+- `POST /test/status`
+- `POST /status`
 
-```bash
-bash apptainer/run_services.sh --env-file apptainer/.env status
-bash apptainer/run_services.sh --env-file apptainer/.env logs
-```
+Optional aliases are also available under `/command/<name>`.
 
-Runtime files are written to:
+## Legacy script
 
-- `apptainer/run/` (pid files)
-- `apptainer/logs/` (service logs)
+`apptainer/run_services.sh` remains available for non-Slurm local workflows.
 
-## 6) Stop services
+## Shutdown behavior
 
-```bash
-bash apptainer/run_services.sh --env-file apptainer/.env stop
-```
-
-## Notes
-
-- `pull` and `start` are intentionally separate; run `pull` once before first `start` (or whenever image tags change).
-- vLLM is launched with `--rocm` and exports both `HIP_VISIBLE_DEVICES` and `ROCR_VISIBLE_DEVICES`.
-- vLLM/aiter compile caches are redirected to `${TMPDIR:-/tmp}` by default (via `AITER_JIT_DIR`, `XDG_CACHE_HOME`, `VLLM_CACHE_ROOT`) to avoid filling `~/.cache`.
-- The same custom logits processor as Docker Compose is enabled:
-  - `forceSeq.force_sequence_logits_processor:ForceSequenceAdapter`
+When the control server exits gracefully (`Ctrl-C`/`SIGTERM`), it automatically attempts to stop any active allocated job (`server_exit` cleanup).

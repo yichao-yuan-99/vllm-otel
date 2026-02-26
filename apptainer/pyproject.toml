@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-otel-apptainer-control"
+version = "0.1.0"
+description = "Login-node control plane for Slurm + Apptainer vLLM"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "typer>=0.16.0",
+]
+
+[tool.setuptools]
+py-modules = ["server", "client", "client_d", "control_plane"]
