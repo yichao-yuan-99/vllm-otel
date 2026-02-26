@@ -34,6 +34,7 @@ The server no longer reads `apptainer/.env` or `server.env_file`.
 - `extra_args`
 
 Start is blocked when `weight_vram_gb > 0.75 * partition.total_vram_gb`.
+`cluster.startup_timeout_after_running = true` means startup timeout is counted only after Slurm state is `RUNNING`.
 
 ## 2) Start server (login node)
 
@@ -74,8 +75,11 @@ Client default server URL is `http://127.0.0.1:23971`.
   - vLLM API: `127.0.0.1:11451`
   - Jaeger OTLP gRPC: `127.0.0.1:4317`
   - Jaeger UI/API: `127.0.0.1:16686`
+- `start`: if model `extra_args` includes `--trust-remote-code`, force-sequence tokenizer bootstrap also enables remote code.
 - `start --block/-b`: block until vLLM + Jaeger endpoints are up.
 - `start --block/-b`: streams per-step progress updates (`validate`, `submit`, `record`, `wait_services`).
+- `start --block/-b`: startup timeout starts after Slurm reaches `RUNNING` (while `PENDING`, timeout is deferred).
+- `start --block/-b`: if interrupted (`Ctrl-C`), client automatically enters blocking stop cleanup and waits for cancellation.
 - `start`: fails fast if `cluster.service_port` is already occupied on login node.
 - `stop`: send `scancel` for active job (non-blocking by default).
 - `stop --block/-b`: block until it disappears from `squeue` (queries scoped to `-u $USER`).
@@ -83,6 +87,7 @@ Client default server URL is `http://127.0.0.1:23971`.
 - `stop-poll`: check whether a prior non-block `stop` has fully finished.
 - `up`: check whether both tunneled vLLM + Jaeger endpoints are currently up.
 - `wait-up`: block until both tunneled vLLM + Jaeger endpoints are up.
+- `wait-up`: supports `--defer-timeout-until-running/--timeout-from-submit`.
 - `logs`: tail slurm + jaeger + vllm logs.
 - `test`: run OTEL + force-sequence smoke tests, with live phase updates in the client.
 - `test`: includes a preflight check for `http://127.0.0.1:<service_port>/v1/models` and fails fast on wrong/non-vLLM endpoints.
@@ -107,7 +112,7 @@ All commands accept POST JSON:
 - `POST /start/status`
 - `POST /stop/status`
 - `POST /up`
-- `POST /wait-up` with optional `{"timeout_seconds": 900, "poll_interval_seconds": 2.0}`
+- `POST /wait-up` with optional `{"timeout_seconds": 900, "poll_interval_seconds": 2.0, "defer_timeout_until_running": true}`
 - `POST /logs` with optional `{"lines": 200}`
 - `POST /test`
 - `POST /test/status`

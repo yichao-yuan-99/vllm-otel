@@ -10,6 +10,7 @@ service_port = 11451
 jaeger_otlp_port = 4317
 jaeger_ui_port = 16686
 startup_timeout = 900
+startup_timeout_after_running = true
 run_dir = "apptainer/run"
 log_dir = "apptainer/logs"
 state_file = "apptainer/run/control_state.json"

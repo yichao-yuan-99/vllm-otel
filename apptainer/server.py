@@ -196,6 +196,10 @@ class RequestHandler(BaseHTTPRequestHandler):
     def _wait_up_command(self, payload: dict[str, Any]) -> CommandResult:
         timeout_seconds = payload.get("timeout_seconds", self.control_plane.config.startup_timeout)
         poll_interval_seconds = payload.get("poll_interval_seconds", 2)
+        defer_timeout_until_running = payload.get(
+            "defer_timeout_until_running",
+            self.control_plane.config.startup_timeout_after_running,
+        )
 
         if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int):
             raise ControlPlaneError(
@@ -211,9 +215,16 @@ class RequestHandler(BaseHTTPRequestHandler):
                 code=208,
                 http_status=400,
             )
+        if not isinstance(defer_timeout_until_running, bool):
+            raise ControlPlaneError(
+                message="wait-up.defer_timeout_until_running must be a boolean",
+                code=211,
+                http_status=400,
+            )
         return self.control_plane.wait_up(
             timeout_seconds=timeout_seconds,
             poll_interval_seconds=float(poll_interval_seconds),
+            defer_timeout_until_running=defer_timeout_until_running,
         )
 
     def _handle_with_result(self, action: Any) -> None:
@@ -237,11 +248,15 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def _write_json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # Client disconnected (common when CLI is interrupted with Ctrl-C).
+            self.log_message("client disconnected before response could be sent")
 
     def log_message(self, fmt: str, *args: Any) -> None:
         # Keep default HTTP logs concise.

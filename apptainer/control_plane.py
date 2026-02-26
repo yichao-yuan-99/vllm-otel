@@ -87,6 +87,7 @@ class RuntimeConfig:
     jaeger_otlp_port: int
     jaeger_ui_port: int
     startup_timeout: int
+    startup_timeout_after_running: bool
     ssh_options: list[str]
     partitions: dict[str, PartitionSpec]
     models: dict[str, ModelSpec]
@@ -423,6 +424,7 @@ class ControlPlane:
                 timeout_seconds=self._cfg.startup_timeout,
                 poll_interval_seconds=DEFAULT_WAIT_UP_POLL_INTERVAL_SECONDS,
                 expected_job_id=job_id,
+                defer_timeout_until_running=self._cfg.startup_timeout_after_running,
                 progress_callback=_on_wait_snapshot,
             )
             result_data["readiness"] = readiness
@@ -913,9 +915,12 @@ class ControlPlane:
         *,
         timeout_seconds: int | None = None,
         poll_interval_seconds: float = DEFAULT_WAIT_UP_POLL_INTERVAL_SECONDS,
+        defer_timeout_until_running: bool | None = None,
     ) -> CommandResult:
         if timeout_seconds is None:
             timeout_seconds = self._cfg.startup_timeout
+        if defer_timeout_until_running is None:
+            defer_timeout_until_running = self._cfg.startup_timeout_after_running
         if timeout_seconds <= 0:
             raise ControlPlaneError(
                 message="timeout_seconds must be > 0",
@@ -933,6 +938,7 @@ class ControlPlane:
             timeout_seconds=timeout_seconds,
             poll_interval_seconds=poll_interval_seconds,
             expected_job_id=None,
+            defer_timeout_until_running=defer_timeout_until_running,
         )
         return CommandResult(code=0, message="services are up", data=snapshot)
 
@@ -1243,16 +1249,43 @@ class ControlPlane:
         timeout_seconds: int,
         poll_interval_seconds: float,
         expected_job_id: str | None,
+        defer_timeout_until_running: bool,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         started = time.monotonic()
-        deadline = started + timeout_seconds
+        timeout_started = started if not defer_timeout_until_running else None
+        timeout_started_at_iso = _utc_now_iso() if timeout_started is not None else None
+        deadline = (timeout_started + timeout_seconds) if timeout_started is not None else None
         last_snapshot: dict[str, Any] | None = None
 
         while True:
             with self._lock:
                 snapshot = self._collect_readiness_snapshot()
             last_snapshot = snapshot
+
+            status_raw = snapshot.get("active_job_status")
+            status_text = status_raw if isinstance(status_raw, str) else None
+            if (
+                defer_timeout_until_running
+                and deadline is None
+                and (
+                    _is_slurm_running_state(status_text)
+                    or (
+                        expected_job_id is None
+                        and not _is_slurm_pending_state(status_text)
+                    )
+                )
+            ):
+                timeout_started = time.monotonic()
+                timeout_started_at_iso = _utc_now_iso()
+                deadline = timeout_started + timeout_seconds
+
+            snapshot["defer_timeout_until_running"] = defer_timeout_until_running
+            snapshot["timeout_started"] = deadline is not None
+            snapshot["timeout_status_gate"] = "RUNNING"
+            snapshot["timeout_started_at_status"] = status_text
+            snapshot["startup_timeout_started_at"] = timeout_started_at_iso
+
             if progress_callback is not None:
                 progress_callback(snapshot)
 
@@ -1260,6 +1293,16 @@ class ControlPlane:
                 active_job = snapshot.get("active_job")
                 active_job_id = active_job.get("job_id") if isinstance(active_job, dict) else None
                 if active_job_id != expected_job_id:
+                    if active_job_id is None:
+                        raise ControlPlaneError(
+                            message=(
+                                f"job {expected_job_id} disappeared while waiting for readiness; "
+                                "it may have been cancelled or exited"
+                            ),
+                            code=65,
+                            http_status=409,
+                            details={"expected_job_id": expected_job_id, "last_snapshot": snapshot},
+                        )
                     raise ControlPlaneError(
                         message=(
                             "active job changed while waiting for readiness "
@@ -1273,9 +1316,16 @@ class ControlPlane:
             if snapshot["ready"]:
                 waited_seconds = round(time.monotonic() - started, 3)
                 snapshot["waited_seconds"] = waited_seconds
+                if timeout_started is not None:
+                    snapshot["startup_waited_seconds"] = round(
+                        max(time.monotonic() - timeout_started, 0.0),
+                        3,
+                    )
+                else:
+                    snapshot["startup_waited_seconds"] = 0.0
                 return snapshot
 
-            if time.monotonic() >= deadline:
+            if deadline is not None and time.monotonic() >= deadline:
                 raise ControlPlaneError(
                     message=f"timed out waiting for services to be up after {timeout_seconds}s",
                     code=63,
@@ -1283,6 +1333,8 @@ class ControlPlane:
                     details={
                         "timeout_seconds": timeout_seconds,
                         "poll_interval_seconds": poll_interval_seconds,
+                        "defer_timeout_until_running": defer_timeout_until_running,
+                        "timeout_started_at_status": status_text,
                         "last_snapshot": last_snapshot,
                     },
                 )
@@ -1334,6 +1386,11 @@ class ControlPlane:
 
         ssh_options = " ".join(shlex.quote(opt) for opt in self._cfg.ssh_options)
         extra_args = " ".join(shlex.quote(arg) for arg in model_spec.extra_args)
+        force_seq_trust_remote_code = self._cfg.env.get("VLLM_FORCE_SEQ_TRUST_REMOTE_CODE")
+        if force_seq_trust_remote_code is None:
+            force_seq_trust_remote_code = (
+                "true" if _model_requests_trust_remote_code(model_spec.extra_args) else "false"
+            )
 
         script = textwrap.dedent(
             f"""\
@@ -1376,7 +1433,7 @@ class ControlPlane:
             OTEL_EXPORTER_OTLP_TRACES_ENDPOINT={shlex.quote(f'grpc://127.0.0.1:{self._cfg.jaeger_otlp_port}')}
             VLLM_COLLECT_DETAILED_TRACES={shlex.quote(self._cfg.env.get('VLLM_COLLECT_DETAILED_TRACES', 'all'))}
             VLLM_LOGITS_PROCESSORS={shlex.quote(self._cfg.env.get('VLLM_LOGITS_PROCESSORS', 'forceSeq.force_sequence_logits_processor:ForceSequenceAdapter'))}
-            VLLM_FORCE_SEQ_TRUST_REMOTE_CODE={shlex.quote(self._cfg.env.get('VLLM_FORCE_SEQ_TRUST_REMOTE_CODE', 'false'))}
+            VLLM_FORCE_SEQ_TRUST_REMOTE_CODE={shlex.quote(force_seq_trust_remote_code)}
 
             JOB_LOG_DIR={shlex.quote(str(self._cfg.log_dir))}
             mkdir -p "${{JOB_LOG_DIR}}" "${{AITER_JIT_DIR}}" "${{XDG_CACHE_HOME}}" "${{VLLM_CACHE_ROOT}}"
@@ -1688,6 +1745,14 @@ def load_runtime_config(config_path: Path) -> RuntimeConfig:
     jaeger_otlp_port = int(cluster_table.get("jaeger_otlp_port", 4317))
     jaeger_ui_port = int(cluster_table.get("jaeger_ui_port", 16686))
     startup_timeout = int(cluster_table.get("startup_timeout", int(merged_env.get("VLLM_STARTUP_TIMEOUT", "900"))))
+    startup_timeout_after_running_raw = cluster_table.get("startup_timeout_after_running", True)
+    if not isinstance(startup_timeout_after_running_raw, bool):
+        raise ControlPlaneError(
+            message="cluster.startup_timeout_after_running must be a boolean",
+            code=112,
+            http_status=500,
+        )
+    startup_timeout_after_running = startup_timeout_after_running_raw
 
     ssh_options_raw = cluster_table.get(
         "ssh_options",
@@ -1796,6 +1861,7 @@ def load_runtime_config(config_path: Path) -> RuntimeConfig:
         jaeger_otlp_port=jaeger_otlp_port,
         jaeger_ui_port=jaeger_ui_port,
         startup_timeout=startup_timeout,
+        startup_timeout_after_running=startup_timeout_after_running,
         ssh_options=ssh_options,
         partitions=partitions,
         models=models,
@@ -1828,6 +1894,32 @@ def error_payload(exc: ControlPlaneError) -> dict[str, Any]:
 
 def _safe_token(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", value)
+
+
+def _is_slurm_running_state(status: str | None) -> bool:
+    if status is None:
+        return False
+    normalized = status.strip().upper()
+    return normalized in {"R", "RUNNING", "CG", "COMPLETING"}
+
+
+def _is_slurm_pending_state(status: str | None) -> bool:
+    if status is None:
+        return False
+    normalized = status.strip().upper()
+    return normalized in {"PD", "PENDING"}
+
+
+def _model_requests_trust_remote_code(extra_args: list[str]) -> bool:
+    for arg in extra_args:
+        normalized = arg.strip().lower()
+        if normalized == "--trust-remote-code":
+            return True
+        if normalized.startswith("--trust-remote-code="):
+            value = normalized.split("=", 1)[1]
+            if value in {"1", "true", "yes", "on"}:
+                return True
+    return False
 
 
 def _utc_now_iso() -> str:

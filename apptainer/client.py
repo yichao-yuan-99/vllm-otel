@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import threading
+import time
 from typing import Any
 from urllib import error as urlerror
 from urllib import request as urlrequest
@@ -263,6 +264,100 @@ def _run_blocking_with_progress(
     return command_payload
 
 
+def _cleanup_after_start_interrupt(ctx: typer.Context) -> None:
+    typer.echo(
+        "[start] interrupt received; entering cleanup and attempting blocking stop.",
+        err=True,
+    )
+
+    def run_blocking_stop() -> dict[str, Any]:
+        return _run_blocking_with_progress(
+            ctx,
+            endpoint="/stop",
+            payload={"block": True},
+            progress_endpoint="/stop/status",
+            progress_tag="stop",
+            timeout_seconds=24.0 * 60.0 * 60.0,
+        )
+
+    try:
+        stop_payload = run_blocking_stop()
+    except KeyboardInterrupt:
+        typer.echo(
+            "[start] cleanup interrupted again; run `python3 apptainer/client.py stop -b`.",
+            err=True,
+        )
+        return
+
+    if stop_payload.get("ok"):
+        typer.echo("[start] cleanup complete: active job canceled.", err=True)
+        _print_json(stop_payload)
+        return
+
+    if stop_payload.get("code") != 21:
+        typer.echo("[start] cleanup stop returned an error:", err=True)
+        _print_json(stop_payload)
+        return
+
+    typer.echo(
+        "[start] no active job yet; waiting briefly for in-flight submission before retrying stop.",
+        err=True,
+    )
+    deadline = time.monotonic() + 120.0
+    last_line: str | None = None
+
+    while time.monotonic() < deadline:
+        progress_payload = _run_command(ctx, "/start/status")
+        data = progress_payload.get("data")
+        if isinstance(data, dict):
+            status = data.get("status")
+            phase = data.get("phase")
+            job_id = data.get("job_id")
+            message = data.get("message")
+            updated_at = data.get("updated_at")
+            line = (
+                f"[start-cleanup] status={status} phase={phase} job_id={job_id} "
+                f"updated_at={updated_at} message={message}"
+            )
+            if line != last_line:
+                typer.echo(line, err=True)
+                last_line = line
+
+            if status == "failed" and not job_id:
+                typer.echo("[start] start failed before submission; nothing to cancel.", err=True)
+                return
+
+            if isinstance(job_id, str) and job_id:
+                typer.echo(
+                    f"[start] detected submitted job {job_id}; retrying blocking stop.",
+                    err=True,
+                )
+                try:
+                    retry_payload = run_blocking_stop()
+                except KeyboardInterrupt:
+                    typer.echo(
+                        "[start] cleanup interrupted again; run `python3 apptainer/client.py stop -b`.",
+                        err=True,
+                    )
+                    return
+                if retry_payload.get("ok"):
+                    typer.echo("[start] cleanup complete: active job canceled.", err=True)
+                    _print_json(retry_payload)
+                elif retry_payload.get("code") == 21:
+                    typer.echo("[start] no active job found on retry; cleanup done.", err=True)
+                else:
+                    typer.echo("[start] cleanup stop returned an error on retry:", err=True)
+                    _print_json(retry_payload)
+                return
+
+        time.sleep(1.0)
+
+    typer.echo(
+        "[start] cleanup timed out waiting for submission; run `python3 apptainer/client.py stop -b` if needed.",
+        err=True,
+    )
+
+
 @app.command()
 def pull(ctx: typer.Context) -> None:
     """Pull Jaeger + vLLM OCI images into SIF files."""
@@ -285,14 +380,18 @@ def start(
 ) -> None:
     """Submit an sbatch job for a configured partition + model."""
     if block:
-        payload = _run_blocking_with_progress(
-            ctx,
-            endpoint="/start",
-            payload={"partition": partition, "model": model, "block": True},
-            progress_endpoint="/start/status",
-            progress_tag="start",
-            timeout_seconds=30.0 * 60.0,
-        )
+        try:
+            payload = _run_blocking_with_progress(
+                ctx,
+                endpoint="/start",
+                payload={"partition": partition, "model": model, "block": True},
+                progress_endpoint="/start/status",
+                progress_tag="start",
+                timeout_seconds=24.0 * 60.0 * 60.0,
+            )
+        except KeyboardInterrupt:
+            _cleanup_after_start_interrupt(ctx)
+            raise typer.Exit(code=130)
     else:
         payload = _run_command_with_timeout(
             ctx,
@@ -395,16 +494,27 @@ def wait_up(
         min=0.1,
         help="Polling interval in seconds.",
     ),
+    defer_timeout_until_running: bool = typer.Option(
+        True,
+        "--defer-timeout-until-running/--timeout-from-submit",
+        help="If set, startup timeout begins only after Slurm state reaches RUNNING.",
+    ),
 ) -> None:
     """Block until both tunneled vLLM and Jaeger endpoints are up."""
+    request_timeout_seconds = (
+        24.0 * 60.0 * 60.0
+        if defer_timeout_until_running
+        else max(float(timeout_seconds) + 30.0, 120.0)
+    )
     payload = _run_command_with_timeout(
         ctx,
         "/wait-up",
         payload={
             "timeout_seconds": timeout_seconds,
             "poll_interval_seconds": poll_interval_seconds,
+            "defer_timeout_until_running": defer_timeout_until_running,
         },
-        timeout_seconds=max(float(timeout_seconds) + 30.0, 120.0),
+        timeout_seconds=request_timeout_seconds,
     )
     _require_ok(payload)
     _print_json(payload)
