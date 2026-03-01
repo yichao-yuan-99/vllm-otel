@@ -1,0 +1,4 @@
+schema_version = 1
+
+[agents.terminus-2]
+agent_kwargs = { trajectory_config = { linear_history = true } }

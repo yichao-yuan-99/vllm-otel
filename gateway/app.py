@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 import hashlib
 import json
-import os
+import logging
 import shutil
 import tarfile
 import tempfile
@@ -27,6 +29,14 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import SpanKind
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from pydantic import BaseModel, Field
+
+from gateway.model_configs import ModelRegistry, load_model_registry
+from gateway.port_profiles import load_port_profile
+from gateway.reasoning_response_parser import ReasoningResponseParser
+from gateway.runtime_config import GatewayRuntimeSettings, load_runtime_settings
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def now_iso8601_utc() -> str:
@@ -98,6 +108,23 @@ def parse_json_if_possible(raw_body: bytes) -> Any:
         return {"raw_body": raw_body.decode("utf-8", errors="replace")}
 
 
+def listener_port_from_request(request: Request) -> int | None:
+    scope_server = request.scope.get("server")
+    if isinstance(scope_server, tuple) and len(scope_server) >= 2:
+        port = scope_server[1]
+        if isinstance(port, int):
+            return port
+
+    host_header = request.headers.get("host", "")
+    if ":" not in host_header:
+        return None
+    _, _, raw_port = host_header.rpartition(":")
+    try:
+        return int(raw_port)
+    except ValueError:
+        return None
+
+
 def write_json_file(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
 
@@ -122,10 +149,8 @@ def file_sha256_and_size(path: Path) -> tuple[str, int]:
     return hasher.hexdigest(), size
 
 
-def configure_tracer(service_name: str) -> trace.Tracer:
+def configure_tracer(service_name: str, *, endpoint: str, insecure: bool) -> trace.Tracer:
     provider = TracerProvider(resource=Resource.create({"service.name": service_name}))
-    endpoint = os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
-    insecure = os.getenv("OTEL_EXPORTER_OTLP_TRACES_INSECURE", "true").lower() == "true"
     if endpoint:
         provider.add_span_processor(
             BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint, insecure=insecure))
@@ -138,9 +163,12 @@ def configure_tracer(service_name: str) -> trace.Tracer:
 class GatewayConfig:
     vllm_base_url: str
     jaeger_api_base_url: str
-    request_timeout_seconds: float = 120.0
+    otlp_traces_endpoint: str
+    service_name: str = "vllm-gateway"
+    otlp_traces_insecure: bool = True
     artifact_compression: str = "none"
     job_end_trace_wait_seconds: float = 10.0
+    output_root: str | None = None
 
     def __post_init__(self) -> None:
         self.artifact_compression = normalize_artifact_compression(
@@ -150,19 +178,24 @@ class GatewayConfig:
             raise ValueError("job_end_trace_wait_seconds must be >= 0")
 
     @classmethod
-    def from_env(cls) -> "GatewayConfig":
+    def from_port_profile(
+        cls,
+        profile_id: int | str | None = None,
+        *,
+        runtime_settings: GatewayRuntimeSettings | None = None,
+    ) -> "GatewayConfig":
+        settings = runtime_settings or load_runtime_settings()
+        selected_profile_id = profile_id if profile_id is not None else settings.port_profile_id
+        profile = load_port_profile(selected_profile_id)
         return cls(
-            vllm_base_url=os.getenv("VLLM_BASE_URL", "http://localhost:11451"),
-            jaeger_api_base_url=os.getenv(
-                "JAEGER_API_BASE_URL", "http://localhost:16686/api/traces"
-            ),
-            request_timeout_seconds=float(
-                os.getenv("GATEWAY_REQUEST_TIMEOUT_SECONDS", "120")
-            ),
-            artifact_compression=os.getenv("GATEWAY_ARTIFACT_COMPRESSION", "none"),
-            job_end_trace_wait_seconds=float(
-                os.getenv("GATEWAY_JOB_END_TRACE_WAIT_SECONDS", "10")
-            ),
+            vllm_base_url=f"http://localhost:{profile.vllm_port}",
+            jaeger_api_base_url=f"http://localhost:{profile.jaeger_api_port}/api/traces",
+            otlp_traces_endpoint=f"grpc://localhost:{profile.jaeger_otlp_port}",
+            service_name=settings.service_name,
+            otlp_traces_insecure=settings.otlp_traces_insecure,
+            artifact_compression=settings.artifact_compression,
+            job_end_trace_wait_seconds=settings.job_end_trace_wait_seconds,
+            output_root=settings.output_root,
         )
 
 
@@ -180,6 +213,12 @@ Forwarder = Callable[
     Awaitable[ForwardResult],
 ]
 JaegerFetcher = Callable[[str], dict[str, Any]]
+ResponseTransformer = Callable[[str, Any, ForwardResult], ForwardResult]
+DisconnectWaiter = Callable[[], Awaitable[None]]
+
+
+class ClientDisconnectedError(RuntimeError):
+    pass
 
 
 @dataclass
@@ -236,7 +275,7 @@ class GatewayService:
             if key.lower() not in {"host", "content-length", "connection"}
         }
         target_url = f"{self.config.vllm_base_url.rstrip('/')}/{path.lstrip('/')}"
-        async with httpx.AsyncClient(timeout=self.config.request_timeout_seconds) as client:
+        async with httpx.AsyncClient(timeout=None) as client:
             response = await client.request(
                 method=method,
                 url=target_url,
@@ -254,6 +293,45 @@ class GatewayService:
             content_type=response.headers.get("content-type"),
             response_json=response_json,
         )
+
+    async def _forward_with_disconnect_support(
+        self,
+        method: str,
+        path: str,
+        headers: dict[str, str],
+        body: bytes,
+        *,
+        disconnect_waiter: DisconnectWaiter | None = None,
+    ) -> ForwardResult:
+        forward_task = asyncio.create_task(self.forwarder(method, path, headers, body))
+        disconnect_task: asyncio.Task[None] | None = None
+        if disconnect_waiter is not None:
+            disconnect_task = asyncio.create_task(disconnect_waiter())
+
+        try:
+            if disconnect_task is None:
+                return await forward_task
+
+            done, _ = await asyncio.wait(
+                {forward_task, disconnect_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if disconnect_task in done and not forward_task.done():
+                forward_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await forward_task
+                raise ClientDisconnectedError(
+                    "downstream client disconnected before the upstream response completed"
+                )
+            return await forward_task
+        except asyncio.CancelledError:
+            forward_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await forward_task
+            raise
+        finally:
+            if disconnect_task is not None and not disconnect_task.done():
+                disconnect_task.cancel()
 
     def _fetch_jaeger_trace(self, trace_id: str) -> dict[str, Any]:
         trace_url = f"{self.config.jaeger_api_base_url.rstrip('/')}/{trace_id}"
@@ -376,6 +454,10 @@ class GatewayService:
         path: str,
         headers: dict[str, str],
         body: bytes,
+        *,
+        request_payload: Any | None = None,
+        response_transformer: ResponseTransformer | None = None,
+        disconnect_waiter: DisconnectWaiter | None = None,
     ) -> ForwardResult:
         with self._lock:
             if not self.job_active:
@@ -388,7 +470,9 @@ class GatewayService:
                 run.active_agent_action_span = None
             root_context = run.root_context
 
-        request_payload = parse_json_if_possible(body)
+        parsed_request_payload = (
+            request_payload if request_payload is not None else parse_json_if_possible(body)
+        )
         request_id = str(uuid.uuid4())
         request_started = datetime.now(timezone.utc)
         request_started_iso = request_started.isoformat(timespec="milliseconds").replace(
@@ -403,23 +487,49 @@ class GatewayService:
         span.set_attribute("http.method", method.upper())
         span.set_attribute("http.target", path)
 
-        forward_result: ForwardResult
+        raw_forward_result: ForwardResult
         forward_headers = dict(headers)
         with trace.use_span(span, end_on_exit=False):
             TraceContextTextMapPropagator().inject(forward_headers)
             try:
-                forward_result = await self.forwarder(
-                    method, path, forward_headers, body
+                raw_forward_result = await self._forward_with_disconnect_support(
+                    method,
+                    path,
+                    forward_headers,
+                    body,
+                    disconnect_waiter=disconnect_waiter,
+                )
+            except ClientDisconnectedError as exc:
+                error_payload = {
+                    "error": "client_disconnected",
+                    "detail": str(exc),
+                }
+                raw_forward_result = ForwardResult(
+                    status_code=499,
+                    content=json.dumps(error_payload).encode("utf-8"),
+                    content_type="application/json",
+                    response_json=error_payload,
+                    error_message=str(exc),
                 )
             except Exception as exc:
                 error_payload = {"error": "vllm_forward_failed", "detail": str(exc)}
-                forward_result = ForwardResult(
+                raw_forward_result = ForwardResult(
                     status_code=502,
                     content=json.dumps(error_payload).encode("utf-8"),
                     content_type="application/json",
                     response_json=error_payload,
                     error_message=str(exc),
                 )
+            client_result = raw_forward_result
+            if response_transformer is not None:
+                try:
+                    client_result = response_transformer(
+                        path,
+                        parsed_request_payload,
+                        raw_forward_result,
+                    )
+                except Exception:
+                    LOGGER.exception("response transform failed for path=%s", path)
 
         request_ended = datetime.now(timezone.utc)
         request_ended_iso = request_ended.isoformat(timespec="milliseconds").replace(
@@ -434,25 +544,25 @@ class GatewayService:
         if getattr(span, "parent", None):
             parent_span_id = f"{span.parent.span_id:016x}"
 
-        response_summary: dict[str, Any] = {"status_code": forward_result.status_code}
-        if isinstance(forward_result.response_json, dict):
-            usage = forward_result.response_json.get("usage")
+        response_summary: dict[str, Any] = {"status_code": raw_forward_result.status_code}
+        if isinstance(raw_forward_result.response_json, dict):
+            usage = raw_forward_result.response_json.get("usage")
             if usage is not None:
                 response_summary["usage"] = usage
-            error = forward_result.response_json.get("error")
+            error = raw_forward_result.response_json.get("error")
             if error is not None:
                 response_summary["error"] = error
-        if forward_result.error_message:
-            response_summary["forward_error"] = forward_result.error_message
+        if raw_forward_result.error_message:
+            response_summary["forward_error"] = raw_forward_result.error_message
 
-        if isinstance(request_payload, dict):
-            model_name = str(request_payload.get("model", ""))
+        if isinstance(parsed_request_payload, dict):
+            model_name = str(parsed_request_payload.get("model", ""))
         else:
             model_name = ""
         response_payload = (
-            forward_result.response_json
-            if forward_result.response_json is not None
-            else parse_json_if_possible(forward_result.content)
+            raw_forward_result.response_json
+            if raw_forward_result.response_json is not None
+            else parse_json_if_possible(raw_forward_result.content)
         )
 
         record = {
@@ -470,8 +580,8 @@ class GatewayService:
             "http_method": method.upper(),
             "http_path": path,
             "model": model_name,
-            "status_code": forward_result.status_code,
-            "request": request_payload,
+            "status_code": raw_forward_result.status_code,
+            "request": parsed_request_payload,
             "response": response_payload,
             "response_summary": response_summary,
         }
@@ -488,7 +598,7 @@ class GatewayService:
                     kind=SpanKind.INTERNAL,
                 )
 
-        return forward_result
+        return client_result
 
     def end_job(self, status: str) -> dict[str, Any]:
         with self._lock:
@@ -652,8 +762,12 @@ def create_gateway_service(
     jaeger_fetcher: JaegerFetcher | None = None,
     service_name: str | None = None,
 ) -> GatewayService:
-    gateway_config = config or GatewayConfig.from_env()
-    tracer = configure_tracer(service_name or os.getenv("OTEL_SERVICE_NAME", "vllm-gateway"))
+    gateway_config = config or GatewayConfig.from_port_profile()
+    tracer = configure_tracer(
+        service_name or gateway_config.service_name,
+        endpoint=gateway_config.otlp_traces_endpoint,
+        insecure=gateway_config.otlp_traces_insecure,
+    )
     return GatewayService(
         config=gateway_config,
         tracer=tracer,
@@ -662,10 +776,52 @@ def create_gateway_service(
     )
 
 
-def create_app(service: GatewayService | None = None) -> FastAPI:
+def _build_reasoning_transformer(
+    *,
+    model_registry: ModelRegistry | None,
+) -> ResponseTransformer | None:
+    registry = model_registry or load_model_registry()
+    parser = ReasoningResponseParser(registry)
+
+    def transform(path: str, request_payload: Any, result: ForwardResult) -> ForwardResult:
+        if result.response_json is None:
+            return result
+        transformed_payload = parser.transform(path, request_payload, result.response_json)
+        if transformed_payload is result.response_json:
+            return result
+        transformed_content = json.dumps(transformed_payload, ensure_ascii=True).encode("utf-8")
+        return ForwardResult(
+            status_code=result.status_code,
+            content=transformed_content,
+            content_type="application/json",
+            response_json=transformed_payload,
+            error_message=result.error_message,
+        )
+
+    return transform
+
+
+def create_app(
+    service: GatewayService | None = None,
+    *,
+    gateway_parse_port: int | None = None,
+    model_registry: ModelRegistry | None = None,
+) -> FastAPI:
     app = FastAPI(title="vLLM Gateway", version="0.1.0")
-    gateway_service = service or create_gateway_service()
-    app.state.gateway_service = gateway_service
+    app.state.gateway_service = service
+    app.state.gateway_parse_port = gateway_parse_port
+    app.state.response_transformer = (
+        _build_reasoning_transformer(model_registry=model_registry)
+        if gateway_parse_port is not None
+        else None
+    )
+
+    def get_gateway_service() -> GatewayService:
+        existing_service = app.state.gateway_service
+        if existing_service is None:
+            existing_service = create_gateway_service()
+            app.state.gateway_service = existing_service
+        return existing_service
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -673,6 +829,7 @@ def create_app(service: GatewayService | None = None) -> FastAPI:
 
     @app.post("/job/start")
     async def job_start(payload: JobStartRequest) -> dict[str, Any]:
+        gateway_service = get_gateway_service()
         try:
             return gateway_service.start_job(payload.output_location)
         except ValueError as exc:
@@ -682,6 +839,7 @@ def create_app(service: GatewayService | None = None) -> FastAPI:
 
     @app.post("/job/end")
     async def job_end(payload: JobEndRequest) -> dict[str, Any]:
+        gateway_service = get_gateway_service()
         try:
             return gateway_service.end_job(payload.status)
         except ValueError as exc:
@@ -691,6 +849,7 @@ def create_app(service: GatewayService | None = None) -> FastAPI:
 
     @app.post("/agent/start")
     async def agent_start(payload: AgentStartRequest) -> dict[str, Any]:
+        gateway_service = get_gateway_service()
         try:
             return gateway_service.start_agent(payload.api_token)
         except ValueError as exc:
@@ -700,6 +859,7 @@ def create_app(service: GatewayService | None = None) -> FastAPI:
 
     @app.post("/agent/end")
     async def agent_end(payload: AgentEndRequest) -> dict[str, Any]:
+        gateway_service = get_gateway_service()
         try:
             return gateway_service.end_agent(
                 api_token=payload.api_token,
@@ -713,6 +873,7 @@ def create_app(service: GatewayService | None = None) -> FastAPI:
         methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     )
     async def proxy_v1(path: str, request: Request) -> Response:
+        gateway_service = get_gateway_service()
         token = extract_api_token(dict(request.headers))
         if not token:
             raise HTTPException(
@@ -721,10 +882,22 @@ def create_app(service: GatewayService | None = None) -> FastAPI:
             )
 
         body = await request.body()
+        request_payload = parse_json_if_possible(body)
         query = request.url.query
         target_path = f"v1/{path}"
         if query:
             target_path = f"{target_path}?{query}"
+
+        listener_port = listener_port_from_request(request)
+        response_transformer: ResponseTransformer | None = None
+        if listener_port == app.state.gateway_parse_port:
+            response_transformer = app.state.response_transformer
+
+        async def wait_for_disconnect() -> None:
+            while True:
+                if await request.is_disconnected():
+                    return
+                await asyncio.sleep(0.1)
 
         try:
             result = await gateway_service.proxy_request(
@@ -733,6 +906,9 @@ def create_app(service: GatewayService | None = None) -> FastAPI:
                 path=target_path,
                 headers=dict(request.headers),
                 body=body,
+                request_payload=request_payload,
+                response_transformer=response_transformer,
+                disconnect_waiter=wait_for_disconnect,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

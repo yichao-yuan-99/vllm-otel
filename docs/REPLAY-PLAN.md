@@ -65,6 +65,7 @@ Rules:
     }
   },
   "replay_target": {
+    "port_profile_id": "0",
     "gateway_url": "http://127.0.0.1:11457",
     "api_base": "http://127.0.0.1:11457/v1",
     "model": "hosted_vllm/Qwen3-Coder-30B-A3B-Instruct",
@@ -131,6 +132,12 @@ Rules:
      - model: parse `[backend].forwarded_args` for `--model <value>`
      - api_base: parse `[backend].forwarded_args` for
        `--agent-kwarg api_base=<url>`
+     - if `meta/config.toml[runtime].port_profile_id` is present, prefer the
+       shared port-profile convention to resolve:
+       - `replay_target.port_profile_id`
+       - `replay_target.gateway_url` using `gateway_port` (raw listener)
+       - `replay_target.api_base` using the raw gateway listener
+       - `replay_target.tokenize_endpoint`
      - if `forwarded_args` is missing/incomplete, fallback to per-launch command
        parsing in `meta/results.json[].command` with the same extraction logic.
    - For non-`harbor` backends:
@@ -153,7 +160,7 @@ Given a compiled plan:
 4. For each request in order:
    - send request
    - wait until response returns
-   - extract response text and require exact match with `expected_response_text`
+   - extract response text from the raw vLLM response payload and require exact match with `expected_response_text`
    - sleep `delta_agent_action_after_s`
 5. Continue until all worker requests complete.
 

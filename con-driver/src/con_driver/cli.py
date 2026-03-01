@@ -12,7 +12,11 @@ from typing import Any, Sequence
 
 import typer
 
-from con_driver.backends.harbor import HarborBackend, HarborBackendConfig
+from con_driver.backends.harbor import (
+    HarborBackend,
+    HarborBackendConfig,
+    resolve_harbor_runtime,
+)
 from con_driver.parsing import (
     assert_safe_harbor_args,
     parse_cli_kv,
@@ -40,6 +44,8 @@ _OPTIONS_WITH_VALUE = {
     "--n-task",
     "--results-dir",
     "--harbor-bin",
+    "--port-profile-id",
+    "--agent-name",
     "--seed",
     "--vllm-log-endpoint",
     "--vllm-log-interval-s",
@@ -66,6 +72,7 @@ def _run_driver(
     backend_name: str,
     config_path: Path | None,
     forwarded_args: list[str],
+    trial_env: dict[str, str],
     pool_raw: str,
     pattern: str,
     pattern_args_tokens: list[str],
@@ -84,6 +91,11 @@ def _run_driver(
     gateway_url: str,
     gateway_job_output_root: str,
     gateway_timeout_s: float,
+    port_profile_id: int | None,
+    resolved_agent_name: str | None,
+    resolved_model_name: str | None,
+    resolved_model_context_window: int | None,
+    agent_base_url: str | None,
 ) -> int:
     try:
         if max_concurrent <= 0:
@@ -161,6 +173,11 @@ def _run_driver(
             "seed": seed,
             "harbor_bin_tokens": harbor_bin_tokens,
             "forwarded_args": forwarded_args,
+            "port_profile_id": port_profile_id,
+            "resolved_agent_name": resolved_agent_name,
+            "resolved_model_name": resolved_model_name,
+            "resolved_model_context_window": resolved_model_context_window,
+            "agent_base_url": agent_base_url,
             "vllm_log_enabled": vllm_log_enabled,
             "vllm_log_endpoint": vllm_log_endpoint,
             "vllm_log_interval_s": vllm_log_interval_s,
@@ -187,6 +204,7 @@ def _run_driver(
                 effective_config=effective_config,
                 vllm_log=vllm_log_config,
                 gateway=gateway_config,
+                launch_env=dict(trial_env),
             ),
         )
 
@@ -364,6 +382,7 @@ def _resolve_command_prefix_tokens(
         f"Config key '{key_name}' must be a string or list of strings"
     )
 
+
 @app.callback()
 def run(
     ctx: typer.Context,
@@ -411,12 +430,22 @@ def run(
     results_dir: Path | None = typer.Option(
         None,
         "--results-dir",
-        help="Output directory containing downloads, logs, metadata, and trial dirs.",
+        help="Output directory containing run logs, metadata, and trial dirs.",
     ),
     harbor_bin: str | None = typer.Option(
         None,
         "--harbor-bin",
         help="Command prefix used to call Harbor, e.g. 'harbor' or 'uv run harbor'.",
+    ),
+    port_profile_id: int | None = typer.Option(
+        None,
+        "--port-profile-id",
+        help="Port profile numeric ID from configs/port_profiles.toml.",
+    ),
+    agent_name: str | None = typer.Option(
+        None,
+        "--agent-name",
+        help="Harbor agent name. Config keys 'agent' and 'agent_name' are also accepted.",
     ),
     seed: int | None = typer.Option(
         None,
@@ -558,6 +587,24 @@ def run(
             key="seed",
         )
 
+        port_profile_id_value = _coerce_int(
+            (
+                port_profile_id
+                if port_profile_id is not None
+                else config_values.get("port_profile_id")
+            ),
+            key="port_profile_id",
+        )
+
+        agent_name_value = _coerce_str(
+            (
+                agent_name
+                if agent_name is not None
+                else config_values.get("agent", config_values.get("agent_name"))
+            ),
+            key="agent",
+        )
+
         dry_run_value = _coerce_bool(
             dry_run if dry_run is not None else config_values.get("dry_run", False),
             key="dry_run",
@@ -583,28 +630,59 @@ def run(
             config_key="sample_without_replacement",
         )
 
-        vllm_log_value = _coerce_bool(
-            vllm_log if vllm_log is not None else config_values.get("vllm_log", False),
-            key="vllm_log",
+        gateway_value = _coerce_bool(
+            gateway if gateway is not None else config_values.get("gateway", True),
+            key="gateway",
         )
-        vllm_log_value = _resolve_required(
-            vllm_log_value,
-            option_name="--vllm-log/--no-vllm-log",
-            config_key="vllm_log",
+        gateway_value = _resolve_required(
+            gateway_value,
+            option_name="--gateway/--no-gateway",
+            config_key="gateway",
         )
 
-        vllm_log_endpoint_value = _coerce_str(
+        gateway_job_output_root_value = _coerce_str(
+            (
+                gateway_job_output_root
+                if gateway_job_output_root is not None
+                else config_values.get(
+                    "gateway_job_output_root",
+                    config_values.get("gateway_job_output_subdir", "gateway-output"),
+                )
+            ),
+            key="gateway_job_output_root",
+        )
+        gateway_job_output_root_value = _resolve_required(
+            gateway_job_output_root_value,
+            option_name="--gateway-job-output-root",
+            config_key="gateway_job_output_root",
+        )
+
+        gateway_timeout_s_value = _coerce_float(
+            (
+                gateway_timeout_s
+                if gateway_timeout_s is not None
+                else config_values.get("gateway_timeout_s", 3600.0)
+            ),
+            key="gateway_timeout_s",
+        )
+        gateway_timeout_s_value = _resolve_required(
+            gateway_timeout_s_value,
+            option_name="--gateway-timeout-s",
+            config_key="gateway_timeout_s",
+        )
+
+        configured_vllm_log_value = _coerce_bool(
+            vllm_log if vllm_log is not None else config_values.get("vllm_log"),
+            key="vllm_log",
+        )
+
+        configured_vllm_log_endpoint_value = _coerce_str(
             (
                 vllm_log_endpoint
                 if vllm_log_endpoint is not None
-                else config_values.get("vllm_log_endpoint", "http://localhost:12138/metrics")
+                else config_values.get("vllm_log_endpoint")
             ),
             key="vllm_log_endpoint",
-        )
-        vllm_log_endpoint_value = _resolve_required(
-            vllm_log_endpoint_value,
-            option_name="--vllm-log-endpoint",
-            config_key="vllm_log_endpoint",
         )
 
         vllm_log_interval_s_value = _coerce_float(
@@ -635,59 +713,13 @@ def run(
             config_key="vllm_log_timeout_s",
         )
 
-        gateway_value = _coerce_bool(
-            gateway if gateway is not None else config_values.get("gateway", True),
-            key="gateway",
-        )
-        gateway_value = _resolve_required(
-            gateway_value,
-            option_name="--gateway/--no-gateway",
-            config_key="gateway",
-        )
-
-        gateway_url_value = _coerce_str(
+        configured_gateway_url_value = _coerce_str(
             (
                 gateway_url
                 if gateway_url is not None
-                else config_values.get("gateway_url", "http://127.0.0.1:11457")
+                else config_values.get("gateway_url")
             ),
             key="gateway_url",
-        )
-        gateway_url_value = _resolve_required(
-            gateway_url_value,
-            option_name="--gateway-url",
-            config_key="gateway_url",
-        )
-
-        gateway_job_output_root_value = _coerce_str(
-            (
-                gateway_job_output_root
-                if gateway_job_output_root is not None
-                else config_values.get(
-                    "gateway_job_output_root",
-                    config_values.get("gateway_job_output_subdir", "gateway-output"),
-                )
-            ),
-            key="gateway_job_output_root",
-        )
-        gateway_job_output_root_value = _resolve_required(
-            gateway_job_output_root_value,
-            option_name="--gateway-job-output-root",
-            config_key="gateway_job_output_root",
-        )
-
-        gateway_timeout_s_value = _coerce_float(
-            (
-                gateway_timeout_s
-                if gateway_timeout_s is not None
-                else config_values.get("gateway_timeout_s", 30.0)
-            ),
-            key="gateway_timeout_s",
-        )
-        gateway_timeout_s_value = _resolve_required(
-            gateway_timeout_s_value,
-            option_name="--gateway-timeout-s",
-            config_key="gateway_timeout_s",
         )
 
         pattern_args_source = (
@@ -705,7 +737,7 @@ def run(
             key_name="harbor_bin",
         )
 
-        forwarded_args_from_config = []
+        forwarded_args_from_config: list[str] = []
         forwarded_args_from_config.extend(
             _parse_token_list(config_values.get("forwarded_args"), key="forwarded_args")
         )
@@ -713,6 +745,26 @@ def run(
         forwarded_args_from_config.extend(
             _parse_token_list(config_values.get("harbor_args"), key="harbor_args")
         )
+        harbor_runtime = resolve_harbor_runtime(
+            forwarded_args_from_config=forwarded_args_from_config,
+            forwarded_args_from_cli=forwarded_args_from_cli,
+            port_profile_id=port_profile_id_value,
+            agent_name=agent_name_value,
+            gateway_enabled=gateway_value,
+            configured_gateway_url=configured_gateway_url_value,
+            gateway_timeout_s=gateway_timeout_s_value,
+            configured_vllm_log=configured_vllm_log_value,
+            configured_vllm_log_endpoint=configured_vllm_log_endpoint_value,
+        )
+        synthesized_forwarded_args = harbor_runtime.forwarded_args
+        launch_env = harbor_runtime.trial_env
+        gateway_url_value = harbor_runtime.gateway_url
+        vllm_log_value = harbor_runtime.vllm_log_enabled
+        vllm_log_endpoint_value = harbor_runtime.vllm_log_endpoint
+        resolved_agent_name = harbor_runtime.resolved_agent_name
+        resolved_model_name = harbor_runtime.resolved_model_name
+        resolved_model_context_window = harbor_runtime.resolved_model_context_window
+        derived_agent_base_url = harbor_runtime.agent_base_url
 
     except Exception as exc:
         typer.echo(f"error: {exc}", err=True)
@@ -721,7 +773,8 @@ def run(
     exit_code = _run_driver(
         backend_name=backend_value,
         config_path=config,
-        forwarded_args=forwarded_args_from_config + forwarded_args_from_cli,
+        forwarded_args=synthesized_forwarded_args,
+        trial_env=launch_env,
         pool_raw=pool_value,
         pattern=pattern_value,
         pattern_args_tokens=pattern_args_tokens,
@@ -740,6 +793,11 @@ def run(
         gateway_url=gateway_url_value,
         gateway_job_output_root=gateway_job_output_root_value,
         gateway_timeout_s=gateway_timeout_s_value,
+        port_profile_id=port_profile_id_value,
+        resolved_agent_name=resolved_agent_name,
+        resolved_model_name=resolved_model_name,
+        resolved_model_context_window=resolved_model_context_window,
+        agent_base_url=derived_agent_base_url,
     )
     raise typer.Exit(code=exit_code)
 

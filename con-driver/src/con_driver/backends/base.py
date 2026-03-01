@@ -13,6 +13,10 @@ class TrialBackend(ABC):
     """Abstraction for trial launcher backends."""
 
     @abstractmethod
+    def dataset_cache_root(self) -> Path:
+        """Return the shared dataset cache root used by this backend."""
+
+    @abstractmethod
     async def prepare_task_pool(
         self,
         *,

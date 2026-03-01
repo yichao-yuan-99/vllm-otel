@@ -1,0 +1,35 @@
+schema_version = 1
+description = "Docker launch profiles for local GPU allocation and tensor parallel settings."
+default_profile = "h100_nvl_gpu23"
+
+[profiles.h100_nvl_gpu23]
+label = "H100 NVL GPUs 2,3"
+gpu_type = "NVIDIA H100 NVL"
+visible_devices = "2,3"
+per_gpu_memory_gb = 80
+total_gpu_memory_gb = 160
+tensor_parallel_size = 2
+
+[profiles.h100_nvl_gpu01]
+label = "H100 NVL GPUs 0,1"
+gpu_type = "NVIDIA H100 NVL"
+visible_devices = "0,1"
+per_gpu_memory_gb = 80
+total_gpu_memory_gb = 160
+tensor_parallel_size = 2
+
+[profiles.h100_nvl_gpu_all]
+label = "H100 NVL GPUs 0,1,2,3"
+gpu_type = "NVIDIA H100 NVL"
+visible_devices = "0,1,2,3"
+per_gpu_memory_gb = 80
+total_gpu_memory_gb = 320 
+tensor_parallel_size = 4
+
+[profiles.h100_nvl_gpu2_single]
+label = "H100 NVL GPU 2 only"
+gpu_type = "NVIDIA H100 NVL"
+visible_devices = "2"
+per_gpu_memory_gb = 80
+total_gpu_memory_gb = 80
+tensor_parallel_size = 1

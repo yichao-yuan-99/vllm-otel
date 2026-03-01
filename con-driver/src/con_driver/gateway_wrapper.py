@@ -87,7 +87,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--gateway-url", required=True)
     parser.add_argument("--api-token", required=True)
-    parser.add_argument("--timeout-s", type=float, default=30.0)
+    parser.add_argument("--timeout-s", type=float, default=3600.0)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     return parser
 

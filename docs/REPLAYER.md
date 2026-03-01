@@ -29,6 +29,9 @@ python -m replayer compile \
   --plan-out tests/output/replay-plan.json
 ```
 
+If the profiled job was recorded with `runtime.port_profile_id`, compile should
+reuse that port profile automatically. `--port-profile-id` may override it.
+
 Replay from compiled plan:
 
 ```bash
@@ -37,6 +40,11 @@ python -m replayer replay \
   --output-dir tests/output/replay-run \
   --gateway-lifecycle auto
 ```
+
+If the compiled plan includes `replay_target.port_profile_id`, replay should
+resolve `gateway_url`, `api_base`, and `tokenize_endpoint` from
+`configs/port_profiles.toml`. Replay should use `gateway_port` (raw listener),
+not `gateway_parse_port`. `--port-profile-id` may override the plan.
 
 ## Function 1: `compile_profile_to_plan`
 
@@ -54,6 +62,10 @@ Behavior:
 - validate required profile files
 - resolve backend-aware replay target fields
 - for `harbor`, extract gateway/model/api_base from `meta/config.toml` and fallback to `meta/results.json` command parsing when needed
+- when `runtime.port_profile_id` is present, resolve replay endpoints from the
+  shared port profile convention instead of hard-coding host ports
+- replay compares raw vLLM responses and does not apply reasoning-specific
+  parsing during deterministic comparison
 - resolve `T0` (job start) from `meta/run_manifest.json.started_at` with configured fallback
 - map trial -> gateway run by hashing original `api_token` (`sha256`) and matching `manifest.api_token_hash`
 - derive replay launch policy from recorded con-driver run config (`pattern`, `pattern_args`, `max_concurrent`, `seed`)

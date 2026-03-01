@@ -15,35 +15,27 @@ cd /scratch/yichaoy2/work/vllm-otel
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
-python -m pip install -r gateway/requirements.txt
+python -m pip install -e ./gateway
 python -m pip install -e ./con-driver
 ```
 
-## 2) Start Docker services (vLLM + Jaeger)
+## 2) Start Docker runtime (vLLM + Jaeger)
 
 ```bash
-cp -n docker/.env.example docker/.env
-docker compose -f docker/docker-compose.yml --env-file docker/.env up --build -d
+cp -n gateway/config.example.toml gateway/config.toml
+python3 servers/servers-docker/client.py start -m qwen3_coder_30b -p 0 -l h100_nvl_gpu23 -b
 ```
 
 ## 3) Start gateway on host (inside `.venv`)
 
 ```bash
-set -a
-source docker/.env
-set +a
-
-export OTEL_SERVICE_NAME="${GATEWAY_OTEL_SERVICE_NAME:-vllm-gateway}"
-export OTEL_EXPORTER_OTLP_TRACES_INSECURE="${GATEWAY_OTEL_EXPORTER_OTLP_TRACES_INSECURE:-true}"
-export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="${GATEWAY_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-grpc://127.0.0.1:4317}"
-export VLLM_BASE_URL="http://127.0.0.1:${VLLM_SERVICE_PORT:-11451}"
-export JAEGER_API_BASE_URL="${GATEWAY_JAEGER_API_BASE_URL:-http://127.0.0.1:16686/api/traces}"
-export GATEWAY_REQUEST_TIMEOUT_SECONDS="${GATEWAY_REQUEST_TIMEOUT_SECONDS:-120}"
-export GATEWAY_ARTIFACT_COMPRESSION="${GATEWAY_ARTIFACT_COMPRESSION:-none}"
-export GATEWAY_JOB_END_TRACE_WAIT_SECONDS="${GATEWAY_JOB_END_TRACE_WAIT_SECONDS:-10}"
-
-python -m uvicorn gateway.app:app --host 0.0.0.0 --port "${GATEWAY_PORT:-11457}"
+python -m gateway start --config gateway/config.toml --port-profile-id 0
 ```
+
+This starts both:
+
+- raw gateway on `gateway_port`
+- parsed gateway on `gateway_parse_port`
 
 ## 4) Run con-driver (inside `.venv`)
 

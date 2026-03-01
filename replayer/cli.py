@@ -6,6 +6,7 @@ import argparse
 import copy
 import hashlib
 import json
+from contextlib import AbstractContextManager
 from random import Random
 import sys
 import threading
@@ -13,10 +14,23 @@ import time
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib import error as url_error
 from urllib.parse import urlparse
 from urllib import request as url_request
+
+from replayer.port_profiles import build_replay_target_from_port_profile
+
+try:
+    from rich.progress import (
+        BarColumn,
+        Progress as RichProgress,
+        SpinnerColumn,
+        TextColumn,
+        TimeElapsedColumn,
+    )
+except ImportError:  # pragma: no cover
+    RichProgress = None
 
 
 def now_iso8601_utc() -> str:
@@ -58,6 +72,38 @@ def read_json(path: Path) -> Any:
 def write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+
+
+class _NullProgress(AbstractContextManager["_NullProgress"]):
+    def __enter__(self) -> "_NullProgress":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+    def add_task(self, description: str, *, total: int, **fields: Any) -> int:
+        return 0
+
+    def update(self, task_id: int, *, advance: int = 0, **fields: Any) -> None:
+        return None
+
+
+def create_replay_progress() -> Any:
+    if RichProgress is None:
+        return _NullProgress()
+    return RichProgress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]{task.description}[/bold blue]"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TextColumn(
+            "launched={task.fields[launched]} "
+            "active={task.fields[active]} "
+            "failed={task.fields[failed]}"
+        ),
+        TimeElapsedColumn(),
+        transient=False,
+    )
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -342,6 +388,133 @@ def extract_harbor_target_config(
     return gateway_url, api_base, model_name
 
 
+def parse_port_profile_id(value: Any, *, field_name: str = "port_profile_id") -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return int(stripped)
+        except ValueError as exc:
+            raise ValueError(f"{field_name} must be an integer, got {value!r}") from exc
+    raise ValueError(f"{field_name} must be an integer, got {value!r}")
+
+
+def extract_runtime_port_profile_id(config: dict[str, Any]) -> int | None:
+    runtime_section = config.get("runtime")
+    if not isinstance(runtime_section, dict):
+        return None
+    return parse_port_profile_id(
+        runtime_section.get("port_profile_id"),
+        field_name="runtime.port_profile_id",
+    )
+
+
+def extract_gateway_enabled(config: dict[str, Any]) -> bool:
+    gateway_section = config.get("gateway")
+    if not isinstance(gateway_section, dict):
+        return False
+    raw_enabled = gateway_section.get("enabled")
+    if isinstance(raw_enabled, bool):
+        return raw_enabled
+    gateway_url = gateway_section.get("url")
+    return isinstance(gateway_url, str) and bool(gateway_url.strip())
+
+
+def resolve_compile_target(
+    *,
+    config: dict[str, Any],
+    results_entries: list[dict[str, Any]],
+    port_profile_id_override: int | None,
+    tokenize_endpoint_override: str | None,
+) -> tuple[str, str, str, str, int | None]:
+    gateway_url, api_base, configured_model = extract_harbor_target_config(
+        config,
+        results_entries,
+    )
+    source_port_profile_id = extract_runtime_port_profile_id(config)
+    effective_port_profile_id = (
+        port_profile_id_override
+        if port_profile_id_override is not None
+        else source_port_profile_id
+    )
+
+    if effective_port_profile_id is not None:
+        gateway_enabled = extract_gateway_enabled(config)
+        resolved_gateway_url, resolved_api_base, resolved_tokenize_endpoint = (
+            build_replay_target_from_port_profile(
+                effective_port_profile_id,
+                gateway_enabled=gateway_enabled,
+            )
+        )
+        gateway_url = resolved_gateway_url
+        api_base = resolved_api_base
+        tokenize_endpoint = tokenize_endpoint_override or resolved_tokenize_endpoint
+    else:
+        tokenize_endpoint = tokenize_endpoint_override or "http://127.0.0.1:11451/tokenize"
+
+    return (
+        gateway_url,
+        api_base,
+        configured_model,
+        tokenize_endpoint,
+        effective_port_profile_id,
+    )
+
+
+def resolve_replay_target(
+    *,
+    replay_target: dict[str, Any],
+    port_profile_id_override: int | None,
+) -> tuple[str, str | None, str | None, str | None]:
+    api_base = replay_target.get("api_base")
+    if not isinstance(api_base, str) or not api_base.strip():
+        raise ValueError("Missing replay_target.api_base in plan")
+    api_base = api_base.strip()
+
+    gateway_url = replay_target.get("gateway_url")
+    if isinstance(gateway_url, str):
+        gateway_url = gateway_url.strip() or None
+    else:
+        gateway_url = None
+
+    tokenize_endpoint = replay_target.get("tokenize_endpoint")
+    if isinstance(tokenize_endpoint, str):
+        tokenize_endpoint = tokenize_endpoint.strip() or None
+    else:
+        tokenize_endpoint = None
+
+    effective_port_profile_id = (
+        port_profile_id_override
+        if port_profile_id_override is not None
+        else parse_port_profile_id(
+            replay_target.get("port_profile_id"),
+            field_name="replay_target.port_profile_id",
+        )
+    )
+
+    if effective_port_profile_id is not None:
+        gateway_enabled = resolve_gateway_lifecycle_mode("auto", gateway_url, api_base)
+        (
+            resolved_gateway_url,
+            api_base,
+            resolved_tokenize_endpoint,
+        ) = build_replay_target_from_port_profile(
+            effective_port_profile_id,
+            gateway_enabled=gateway_enabled,
+        )
+        gateway_url = resolved_gateway_url
+        tokenize_endpoint = resolved_tokenize_endpoint
+
+    return api_base, gateway_url, tokenize_endpoint, (
+        str(effective_port_profile_id) if effective_port_profile_id is not None else None
+    )
+
+
 def resolve_t0(
     run_manifest: dict[str, Any],
     events_records: list[dict[str, Any]],
@@ -523,9 +696,17 @@ def cmd_compile(args: argparse.Namespace) -> int:
     if backend_name != "harbor":
         raise ValueError(f"unsupported backend: {backend_name!r}")
 
-    gateway_url, api_base, configured_model = extract_harbor_target_config(
-        config,
-        results_entries,
+    (
+        gateway_url,
+        api_base,
+        configured_model,
+        tokenize_endpoint,
+        replay_port_profile_id,
+    ) = resolve_compile_target(
+        config=config,
+        results_entries=results_entries,
+        port_profile_id_override=args.port_profile_id,
+        tokenize_endpoint_override=args.tokenize_endpoint,
     )
     launch_policy = build_launch_policy_from_config(config)
 
@@ -646,7 +827,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
 
             response_text = extract_response_text(record.get("response"))
             forced_token_ids = tokenize_response_text(
-                tokenize_endpoint=args.tokenize_endpoint,
+                tokenize_endpoint=tokenize_endpoint,
                 model_name=model_for_tokenize,
                 text=response_text,
                 timeout_s=args.request_timeout_s,
@@ -718,10 +899,11 @@ def cmd_compile(args: argparse.Namespace) -> int:
         "t0": t0_iso,
         "t0_source": t0_source,
         "replay_target": {
+            "port_profile_id": replay_port_profile_id,
             "gateway_url": gateway_url,
             "api_base": api_base,
             "model": configured_model,
-            "tokenize_endpoint": args.tokenize_endpoint,
+            "tokenize_endpoint": tokenize_endpoint,
             "deterministic_required": True,
         },
         "launch_policy": launch_policy,
@@ -736,6 +918,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
         "launch_strategy": launch_policy.get("strategy"),
         "worker_count": len(worker_plans),
         "request_count": sum(len(worker["requests"]) for worker in worker_plans),
+        "port_profile_id": replay_port_profile_id,
     }
     print(json.dumps(summary, indent=2, ensure_ascii=True))
     return 0
@@ -773,6 +956,168 @@ def resolve_gateway_lifecycle_mode(
     return api_base.rstrip("/").startswith(expected_prefix)
 
 
+def _normalize_launch_pattern_name(value: Any) -> str:
+    if isinstance(value, str) and value.strip():
+        return value.strip().lower()
+    return "eager"
+
+
+def _coerce_pattern_arg_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_poisson_rate_per_second(
+    pattern_payload: dict[str, Any],
+    pattern_args_payload: Any,
+) -> float | None:
+    direct_rate = _coerce_pattern_arg_float(pattern_payload.get("rate_per_second"))
+    if direct_rate is not None:
+        return direct_rate
+
+    if not isinstance(pattern_args_payload, dict):
+        return None
+
+    rate_keys = ("rate", "arrival-rate", "arrival_rate", "lambda")
+    for key in rate_keys:
+        rate_value = _coerce_pattern_arg_float(pattern_args_payload.get(key))
+        if rate_value is not None:
+            return rate_value
+
+    mean_keys = ("mean-interval-s", "mean_interval_s", "interval-s", "interval_s")
+    for key in mean_keys:
+        mean_value = _coerce_pattern_arg_float(pattern_args_payload.get(key))
+        if mean_value is not None:
+            if mean_value <= 0:
+                raise ValueError("Replay launch pattern mean interval must be > 0")
+            return 1.0 / mean_value
+    return None
+
+
+def merge_dict_overlay(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    merged = copy.deepcopy(base)
+    for key, value in overlay.items():
+        if (
+            isinstance(value, dict)
+            and isinstance(merged.get(key), dict)
+        ):
+            merged[key] = merge_dict_overlay(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def parse_launch_policy_override_json(raw: str | None) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    if not stripped:
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid --launch-policy-override-json payload: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("--launch-policy-override-json must decode to a JSON object")
+    launch_policy_payload = parsed.get("launch_policy")
+    if launch_policy_payload is not None:
+        if not isinstance(launch_policy_payload, dict):
+            raise ValueError(
+                "--launch-policy-override-json field launch_policy must be a JSON object"
+            )
+        return launch_policy_payload
+    return parsed
+
+
+def resolve_replay_launch_policy(
+    *,
+    launch_policy_payload: dict[str, Any],
+    launch_policy_override: dict[str, Any] | None,
+) -> tuple[str, int, int | None, str, float | None, Callable[[], float], dict[str, Any], dict[str, Any] | None]:
+    effective_launch_policy = (
+        merge_dict_overlay(launch_policy_payload, launch_policy_override)
+        if launch_policy_override is not None
+        else copy.deepcopy(launch_policy_payload)
+    )
+    strategy_raw = launch_policy_payload.get("strategy")
+    if not isinstance(strategy_raw, str) or not strategy_raw.strip():
+        raise ValueError("launch_policy.strategy is required")
+    launch_strategy = strategy_raw.strip().lower()
+    if launch_strategy != "config_ordered":
+        raise ValueError(
+            f"Unsupported launch strategy {launch_strategy!r}; only config_ordered is supported"
+        )
+
+    max_concurrent_raw = effective_launch_policy.get("max_concurrent")
+    max_concurrent = _to_int_or_default(max_concurrent_raw, default=1)
+    if max_concurrent <= 0:
+        raise ValueError("Replay launch max_concurrent must be > 0")
+    launch_max_concurrent = max_concurrent
+
+    seed_raw = effective_launch_policy.get("seed")
+    launch_seed: int | None = None
+    if isinstance(seed_raw, int) and not isinstance(seed_raw, bool):
+        launch_seed = seed_raw
+        rng = Random(seed_raw)
+    else:
+        rng = Random()
+
+    pattern_payload = effective_launch_policy.get("pattern")
+    if not isinstance(pattern_payload, dict):
+        raise ValueError(
+            "launch_policy.strategy=config_ordered requires launch_policy.pattern"
+        )
+    pattern_name = _normalize_launch_pattern_name(pattern_payload.get("name"))
+    launch_pattern_name = pattern_name
+
+    launch_pattern_rate_per_second: float | None = None
+    if pattern_name == "eager":
+        next_launch_delay_s = lambda: 0.0
+    elif pattern_name in {"poisson", "possion"}:
+        rate_value = _extract_poisson_rate_per_second(
+            pattern_payload,
+            effective_launch_policy.get("pattern_args"),
+        )
+        if rate_value is None:
+            raise ValueError(
+                "Poisson replay launch pattern requires rate_per_second; "
+                "set it in launch_policy.pattern.rate_per_second or launch_policy.pattern_args"
+            )
+        rate_per_second = rate_value
+        if rate_per_second <= 0:
+            raise ValueError("Replay launch pattern rate_per_second must be > 0")
+        launch_pattern_rate_per_second = rate_per_second
+
+        def _next_poisson_delay() -> float:
+            return rng.expovariate(rate_per_second)
+
+        next_launch_delay_s = _next_poisson_delay
+    else:
+        raise ValueError(
+            f"Unsupported replay launch pattern {pattern_name!r}; supported: eager, poisson"
+        )
+
+    overrides = launch_policy_override
+    return (
+        launch_strategy,
+        launch_max_concurrent,
+        launch_seed,
+        launch_pattern_name,
+        launch_pattern_rate_per_second,
+        next_launch_delay_s,
+        overrides,
+        effective_launch_policy,
+    )
+
+
 def cmd_replay(args: argparse.Namespace) -> int:
     plan_path = Path(args.plan).expanduser().resolve()
     require_file(plan_path)
@@ -783,15 +1128,10 @@ def cmd_replay(args: argparse.Namespace) -> int:
     replay_target = plan.get("replay_target")
     if not isinstance(replay_target, dict):
         raise ValueError("Missing replay_target in plan")
-    api_base = replay_target.get("api_base")
-    if not isinstance(api_base, str) or not api_base.strip():
-        raise ValueError("Missing replay_target.api_base in plan")
-    api_base = api_base.strip()
-    gateway_url = replay_target.get("gateway_url")
-    if isinstance(gateway_url, str):
-        gateway_url = gateway_url.strip() or None
-    else:
-        gateway_url = None
+    api_base, gateway_url, tokenize_endpoint, resolved_port_profile_id = resolve_replay_target(
+        replay_target=replay_target,
+        port_profile_id_override=args.port_profile_id,
+    )
 
     workers = plan.get("workers")
     if not isinstance(workers, list):
@@ -806,65 +1146,21 @@ def cmd_replay(args: argparse.Namespace) -> int:
             "Missing launch_policy in plan. Old plans without launch_policy are not supported."
         )
 
-    strategy_raw = launch_policy_payload.get("strategy")
-    if not isinstance(strategy_raw, str) or not strategy_raw.strip():
-        raise ValueError("launch_policy.strategy is required")
-    launch_strategy = strategy_raw.strip().lower()
-    if launch_strategy != "config_ordered":
-        raise ValueError(
-            f"Unsupported launch strategy {launch_strategy!r}; only config_ordered is supported"
-        )
-
-    max_concurrent_raw = launch_policy_payload.get("max_concurrent")
-    max_concurrent = _to_int_or_default(max_concurrent_raw, default=1)
-    if max_concurrent <= 0:
-        max_concurrent = 1
-    launch_max_concurrent = max_concurrent
-
-    seed_raw = launch_policy_payload.get("seed")
-    launch_seed: int | None = None
-    if isinstance(seed_raw, int) and not isinstance(seed_raw, bool):
-        launch_seed = seed_raw
-        rng = Random(seed_raw)
-    else:
-        rng = Random()
-
-    pattern_payload = launch_policy_payload.get("pattern")
-    if not isinstance(pattern_payload, dict):
-        raise ValueError(
-            "launch_policy.strategy=config_ordered requires launch_policy.pattern"
-        )
-    pattern_name_raw = pattern_payload.get("name")
-    if isinstance(pattern_name_raw, str) and pattern_name_raw.strip():
-        pattern_name = pattern_name_raw.strip().lower()
-    else:
-        pattern_name = "eager"
-    launch_pattern_name = pattern_name
-
-    launch_pattern_rate_per_second: float | None = None
-    if pattern_name == "eager":
-        next_launch_delay_s = lambda: 0.0
-    elif pattern_name in {"poisson", "possion"}:
-        rate_raw = pattern_payload.get("rate_per_second")
-        if isinstance(rate_raw, (int, float)):
-            rate_per_second = float(rate_raw)
-        else:
-            raise ValueError(
-                "launch_policy.pattern.name=poisson requires rate_per_second"
-            )
-        if rate_per_second <= 0:
-            raise ValueError("launch_policy.pattern.rate_per_second must be > 0")
-        launch_pattern_rate_per_second = rate_per_second
-
-        def _next_poisson_delay() -> float:
-            return rng.expovariate(rate_per_second)
-
-        next_launch_delay_s = _next_poisson_delay
-    else:
-        raise ValueError(
-            f"Unsupported launch_policy.pattern.name={pattern_name!r}; "
-            "supported: eager, poisson"
-        )
+    (
+        launch_strategy,
+        launch_max_concurrent,
+        launch_seed,
+        launch_pattern_name,
+        launch_pattern_rate_per_second,
+        next_launch_delay_s,
+        launch_policy_overrides,
+        effective_launch_policy,
+    ) = resolve_replay_launch_policy(
+        launch_policy_payload=launch_policy_payload,
+        launch_policy_override=parse_launch_policy_override_json(
+            getattr(args, "launch_policy_override_json", None)
+        ),
+    )
 
     if args.output_dir:
         output_dir = Path(args.output_dir).expanduser().resolve()
@@ -893,18 +1189,33 @@ def cmd_replay(args: argparse.Namespace) -> int:
         "source_plan": str(plan_path),
         "output_dir": str(output_dir),
         "started_at": now_iso8601_utc(),
+        "port_profile_id": resolved_port_profile_id,
         "gateway_lifecycle_enabled": use_gateway_lifecycle,
         "launch_strategy": launch_strategy,
         "launch_pattern": launch_pattern_name,
         "launch_max_concurrent": launch_max_concurrent,
         "launch_seed": launch_seed,
         "launch_pattern_rate_per_second": launch_pattern_rate_per_second,
+        "launch_policy_overrides": launch_policy_overrides,
+        "effective_launch_policy": effective_launch_policy,
         "workers_total": len(workers),
         "workers_completed": 0,
         "workers_failed": 0,
         "requests_sent": 0,
         "requests_failed": 0,
     }
+    progress_nonlocal: list[Any] = [_NullProgress()]
+    progress_task_id_nonlocal = [0]
+    progress_state = {"launched": 0, "active": 0}
+
+    def _update_progress(*, advance: int = 0) -> None:
+        progress_nonlocal[0].update(
+            progress_task_id_nonlocal[0],
+            advance=advance,
+            launched=progress_state["launched"],
+            active=progress_state["active"],
+            failed=summary["workers_failed"],
+        )
 
     def call_gateway(path: str, payload: dict[str, Any]) -> Any:
         if not gateway_url:
@@ -1069,6 +1380,8 @@ def cmd_replay(args: argparse.Namespace) -> int:
                 worker_results[worker_id] = record
                 if record["status"] == "completed":
                     summary["workers_completed"] += 1
+                progress_state["active"] = max(progress_state["active"] - 1, 0)
+                _update_progress(advance=1)
             write_json(worker_log_path, record)
 
     def _launch_priority(worker: dict[str, Any]) -> int:
@@ -1097,35 +1410,55 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
     started_threads: list[threading.Thread] = []
 
-    try:
-        next_launch_at = time.monotonic()
-        for thread in threads:
-            while True:
-                active_threads = [item for item in started_threads if item.is_alive()]
-                if len(active_threads) < launch_max_concurrent:
-                    break
+    with create_replay_progress() as progress:
+        progress_nonlocal[0] = progress
+        progress_task_id_nonlocal[0] = progress.add_task(
+            "replaying",
+            total=len(threads),
+            launched=0,
+            active=0,
+            failed=0,
+        )
+        try:
+            next_launch_at = time.monotonic()
+            for thread in threads:
+                while True:
+                    active_threads = [item for item in started_threads if item.is_alive()]
+                    if len(active_threads) < launch_max_concurrent:
+                        break
+                    if stop_event.is_set():
+                        break
+                    for active_thread in active_threads:
+                        active_thread.join(timeout=0.2)
                 if stop_event.is_set():
                     break
-                for active_thread in active_threads:
-                    active_thread.join(timeout=0.2)
-            if stop_event.is_set():
-                break
 
-            launch_delay = next_launch_at - time.monotonic()
-            if launch_delay > 0 and not sleep_with_stop(stop_event, launch_delay):
-                break
+                launch_delay = next_launch_at - time.monotonic()
+                if launch_delay > 0 and not sleep_with_stop(stop_event, launch_delay):
+                    break
 
-            thread.start()
-            started_threads.append(thread)
-            next_launch_at = time.monotonic() + max(0.0, next_launch_delay_s())
+                with lock:
+                    progress_state["launched"] += 1
+                    progress_state["active"] += 1
+                    _update_progress()
+                try:
+                    thread.start()
+                except Exception:
+                    with lock:
+                        progress_state["launched"] = max(progress_state["launched"] - 1, 0)
+                        progress_state["active"] = max(progress_state["active"] - 1, 0)
+                        _update_progress()
+                    raise
+                started_threads.append(thread)
+                next_launch_at = time.monotonic() + max(0.0, next_launch_delay_s())
 
-        while any(thread.is_alive() for thread in started_threads):
+            while any(thread.is_alive() for thread in started_threads):
+                for thread in started_threads:
+                    thread.join(timeout=0.2)
+        except KeyboardInterrupt:
+            stop_event.set()
             for thread in started_threads:
-                thread.join(timeout=0.2)
-    except KeyboardInterrupt:
-        stop_event.set()
-        for thread in started_threads:
-            thread.join(timeout=2)
+                thread.join(timeout=2)
 
     if use_gateway_lifecycle:
         try:
@@ -1186,9 +1519,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override backend name detection from meta/config.toml.",
     )
     compile_parser.add_argument(
+        "--port-profile-id",
+        type=int,
+        default=None,
+        help=(
+            "Resolve replay target URLs from configs/port_profiles.toml. "
+            "Defaults to meta/config.toml [runtime].port_profile_id when present."
+        ),
+    )
+    compile_parser.add_argument(
         "--tokenize-endpoint",
-        default="http://127.0.0.1:11451/tokenize",
-        help="vLLM tokenize endpoint used to build forced_token_ids.",
+        default=None,
+        help=(
+            "vLLM tokenize endpoint used to build forced_token_ids. "
+            "Defaults to the selected port profile's vLLM /tokenize when available."
+        ),
     )
     compile_parser.add_argument(
         "--request-timeout-s",
@@ -1219,12 +1564,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="HTTP timeout seconds for replay requests.",
     )
     replay_parser.add_argument(
+        "--port-profile-id",
+        type=int,
+        default=None,
+        help=(
+            "Resolve replay target URLs from configs/port_profiles.toml. "
+            "Defaults to replay_target.port_profile_id from the plan when present."
+        ),
+    )
+    replay_parser.add_argument(
         "--gateway-lifecycle",
         choices=["auto", "on", "off"],
         default="auto",
         help=(
             "Control /job/* and /agent/* lifecycle calls. "
             "auto enables lifecycle when api_base looks like gateway_url + /v1."
+        ),
+    )
+    replay_parser.add_argument(
+        "--launch-policy-override-json",
+        default=None,
+        help=(
+            "JSON object used to overlay replay-plan launch_policy during replay. "
+            "Accepts either the launch_policy object itself or an object with a "
+            "top-level launch_policy field."
         ),
     )
     replay_parser.set_defaults(func=cmd_replay)

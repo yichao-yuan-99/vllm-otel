@@ -1,0 +1,9 @@
+[driver]
+driver_backend = "harbor"
+pattern = "eager"
+pool = "swebench-verified"
+max_concurrent = 15
+n_task = 300
+results_dir = "experiments/results/sweep-concurrency/15"
+sample_without_replacement = true
+agent = "terminus-2"

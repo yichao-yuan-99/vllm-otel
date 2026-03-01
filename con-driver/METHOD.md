@@ -17,22 +17,23 @@ Provide a small, deterministic scheduler that launches many `harbor trials start
 ## Runtime Flow
 
 1. Parse CLI args and optional TOML config.
-2. Resolve Harbor command prefix and forwarded Harbor args.
-3. Prepare the task pool by downloading datasets with `harbor datasets download`.
-4. Create a run output directory and (if gateway mode is enabled) call `POST /job/start` with a per-run output location.
-5. Build a launch plan from sampled tasks.
-6. For each launch in gateway mode:
+2. If `port_profile_id` is set, resolve ports from `configs/port_profiles.toml`, probe the live served model from `vLLM /v1/models`, and synthesize Harbor model/endpoint args.
+3. Resolve Harbor command prefix and forwarded Harbor args.
+4. Prepare the task pool by downloading datasets with `harbor datasets download`.
+5. Create a run output directory and (if gateway mode is enabled) call `POST /job/start` with a per-run output location.
+6. Build a launch plan from sampled tasks.
+7. For each launch in gateway mode:
    - generate a unique API token,
    - append it as `--agent-kwarg api_key=<token>`,
    - wrap the Harbor command with `con_driver.gateway_wrapper` to call `POST /agent/start` and `POST /agent/end`.
-7. Launch up to `max_concurrent` subprocesses using selected arrival pattern.
-8. Persist events and run manifest under `results_dir`.
-9. Compute aggregate success/failure and optional reward average from trial `result.json` files.
-10. If gateway mode is enabled, call `POST /job/end` with final run status.
+8. Launch up to `max_concurrent` subprocesses using selected arrival pattern.
+9. Persist events and run manifest under `results_dir`.
+10. Compute aggregate success/failure and optional reward average from trial `result.json` files.
+11. If gateway mode is enabled, call `POST /job/end` with final run status.
 
 ## Constraints
 
 - Backend is Harbor-only.
 - The scheduler owns task path/trial ID/trials dir.
 - Forwarded args cannot include `-p/--path`, `--trial-name`, or `--trials-dir`.
-- Gateway mode is enabled by default and assumes agent requests are routed through gateway `.../v1`.
+- Gateway mode is enabled by default and, when `port_profile_id` is set, routes agent requests through `gateway_parse_port`.

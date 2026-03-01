@@ -14,7 +14,7 @@ Use this as the operational checklist.
 
 Inputs:
 
-- model + runtime config from `docker/.env`
+- model + runtime config from CLI profile selection (`start -m/-p/-l`)
 - con-driver config from `con-driver/tests/config.gateway.toml`
 
 Outputs:
@@ -29,7 +29,7 @@ Outputs:
 From repo root:
 
 ```bash
-cp docker/.env.example docker/.env
+cp gateway/config.example.toml gateway/config.toml
 ```
 
 Export Hugging Face env vars in your current shell:
@@ -50,16 +50,16 @@ Notes:
 
 ## 2) Start Runtime
 
-Start Docker services (`vllm` + `jaeger`):
+Start Docker runtime (`vllm` + `jaeger`) through the CLI package:
 
 ```bash
-docker compose -f docker/docker-compose.yml --env-file docker/.env up -d --build
+python3 servers/servers-docker/client.py start -m qwen3_coder_30b -p 0 -l h100_nvl_gpu23 -b
 ```
 
 Start gateway on host (new terminal):
 
 ```bash
-bash docker/start_gateway.sh
+python3 -m gateway start --config gateway/config.toml --port-profile-id 0
 ```
 
 Quick health checks:
@@ -178,17 +178,18 @@ Only `cached_tokens` exact mismatches:
 
 Gateway `/job/end` timeout from con-driver:
 
-- gateway blocks for trace collection (`GATEWAY_JOB_END_TRACE_WAIT_SECONDS`).
+- gateway blocks for trace collection (`gateway.job_end_trace_wait_seconds` in `gateway/config.toml`).
 - increase `gateway_timeout_s` in con-driver config if needed.
 
 ## 8) Stop Services
 
-Stop docker services:
+Stop Docker runtime:
 
 ```bash
-docker compose -f docker/docker-compose.yml --env-file docker/.env down
+python3 servers/servers-docker/client.py stop -b
+python3 servers/servers-docker/client.py daemon-stop
 ```
 
 Stop gateway:
 
-- press `Ctrl+C` in the terminal running `docker/start_gateway.sh`.
+- press `Ctrl+C` in the terminal running `python3 -m gateway start ...`.

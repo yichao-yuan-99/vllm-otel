@@ -5,6 +5,7 @@
 It downloads one or more Harbor datasets, builds a combined task pool, samples tasks uniformly, and launches trials in parallel using eager or Poisson arrivals.
 It is gateway-aware by default: each launched agent gets a unique API token, every launch is wrapped with `/agent/start` and `/agent/end`, and each run calls `/job/start` + `/job/end`.
 Gateway artifacts are stored inside each con-driver run directory under `gateway_job_output_root` (a run-local subdirectory, default `gateway-output`).
+When `port_profile_id` is set, con-driver also probes the live served model from `vLLM /v1/models`, derives the Harbor model and endpoint wiring automatically, and points agents at `gateway_parse_port` by default.
 
 ## Install / Run
 
@@ -42,12 +43,15 @@ python con-driver/driver.py --help
 - `--n-task`: total launches.
 - `--results-dir`: root output directory.
 - `--harbor-bin`: command prefix for Harbor (default: `harbor`).
+- `--port-profile-id`: port profile numeric ID from [`../configs/port_profiles.toml`](../configs/port_profiles.toml).
+- `--agent-name`: Harbor agent name. TOML keys `agent` and `agent_name` are also accepted.
 - `--sample-without-replacement`: optional; disables repeated task sampling.
 - `--vllm-log/--no-vllm-log`: optional; run a separate vLLM metrics monitor process.
 - `--gateway/--no-gateway`: enable/disable gateway mode (default: enabled).
-- `--gateway-url`: gateway base URL (default: `http://127.0.0.1:11457`).
+- `--gateway-url`: gateway base URL.
+  With `port_profile_id`, the default is `http://127.0.0.1:<gateway_parse_port>`.
 - `--gateway-job-output-root`: run-local output subdirectory sent to gateway `/job/start` (default: `gateway-output`).
-- `--gateway-timeout-s`: timeout for gateway lifecycle API calls (default: `30.0`).
+- `--gateway-timeout-s`: timeout for gateway lifecycle API calls (default: `3600.0`).
   Set this above gateway `GATEWAY_JOB_END_TRACE_WAIT_SECONDS`.
 
 Any extra args/options are forwarded to:
@@ -65,11 +69,10 @@ con-driver \
   --max-concurrent=2 \
   --n-task=10 \
   --sample-without-replacement \
+  --port-profile-id=1 \
+  --agent-name=terminus-2 \
   --results-dir=con-driver/output/eager-run \
-  --agent terminus-2 \
-  --model hosted_vllm/Qwen3-Coder-30B-A3B-Instruct \
-  --agent-kwarg api_base=http://localhost:11457/v1 \
-  --agent-kwarg 'model_info={"max_input_tokens":32768,"max_output_tokens":8192,"input_cost_per_token":0.0,"output_cost_per_token":0.0}'
+  --dry-run
 ```
 
 Poisson launch pattern (mean 5 seconds between arrivals):
@@ -81,11 +84,10 @@ con-driver \
   --pattern-args="--mean-interval-s=5" \
   --max-concurrent=4 \
   --n-task=10 \
+  --port-profile-id=1 \
+  --agent-name=terminus-2 \
   --results-dir=con-driver/output/poisson-run \
-  --agent terminus-2 \
-  --model hosted_vllm/Qwen3-Coder-30B-A3B-Instruct \
-  --agent-kwarg api_base=http://localhost:11457/v1 \
-  --agent-kwarg 'model_info={"max_input_tokens":32768,"max_output_tokens":8192,"input_cost_per_token":0.0,"output_cost_per_token":0.0}'
+  --dry-run
 ```
 
 Use `--dry-run` to validate parsing and command construction without launching trials.
@@ -102,6 +104,8 @@ pattern = "eager"
 max_concurrent = 1
 n_task = 1
 results_dir = "con-driver-test"
+port_profile_id = 1
+agent = "terminus-2"
 dry_run = false
 sample_without_replacement = true
 
@@ -109,21 +113,24 @@ sample_without_replacement = true
 pattern_args = "--mean-interval-s=5"
 harbor_bin = "harbor"
 seed = 7
-vllm_log = false
-vllm_log_endpoint = "http://localhost:12138/metrics"
+# With port_profile_id, vllm_log defaults to true and endpoint defaults to
+# http://127.0.0.1:<vllm_port>/metrics.
+# vllm_log = true
+# vllm_log_endpoint = "http://127.0.0.1:24123/metrics"
 vllm_log_interval_s = 1.0
 vllm_log_timeout_s = 5.0
 gateway = true
-gateway_url = "http://localhost:11457"
+# With port_profile_id, gateway_url defaults to
+# http://127.0.0.1:<gateway_parse_port>.
+# gateway_url = "http://127.0.0.1:28171"
 gateway_job_output_root = "gateway-output"
-gateway_timeout_s = 30.0
+gateway_timeout_s = 3600.0
 
-# Forwarded to harbor trials start
+# Optional extra Harbor args only.
+# con-driver auto-populates --agent, --model, api_base/base_url, model_info,
+# and agent-specific defaults from con-driver/configs/agent_defaults.toml.
 forwarded_args = [
-  "--agent", "terminus-2",
-  "--model", "hosted_vllm/Qwen3-Coder-30B-A3B-Instruct",
-  "--agent-kwarg", "api_base=http://localhost:11457/v1",
-  "--agent-kwarg", "model_info={\"max_input_tokens\":32768,\"max_output_tokens\":8192,\"input_cost_per_token\":0.0,\"output_cost_per_token\":0.0}",
+  "--agent-kwarg", "some_other_setting=value",
 ]
 ```
 
@@ -137,9 +144,14 @@ CLI flags override config values.
 
 ## Output Layout
 
+Harbor dataset downloads are cached outside run outputs under:
+
+- `con-driver/.cache/harbor-datasets/`
+  - shared across runs
+  - ignored by git
+
 Non-dataset mode writes run artifacts into a nested subdirectory:
 
-- `--results-dir/datasets/`: downloaded datasets (`harbor datasets download`)
 - `--results-dir/job-<timestamp>/{trials,logs,meta}/`: run outputs
 - `--results-dir/job-<timestamp>/CON_DRIVER_OUTPUT`: con-driver marker file
 - `meta/config.toml`: resolved run config snapshot
@@ -155,16 +167,19 @@ Dataset mode triggers when all of the following are true:
 
 In dataset mode:
 
-- `--results-dir/datasets/` remains the dataset download location
 - `--results-dir/<dataset>-<timestamp>/{trials,logs,meta}/` stores run outputs
 - `--results-dir/<dataset>-<timestamp>/CON_DRIVER_OUTPUT` marks the run directory
 
 ## Notes
 
 - Unknown CLI args are forwarded to Harbor.
+- Harbor dataset downloads are cached in `con-driver/.cache/harbor-datasets/`, not inside `results_dir`.
 - `driver_backend` and `backend` config keys are both accepted (`backend` is a compatibility alias).
 - `forwarded_args` and `harbor_args` config keys are both accepted (`harbor_args` is a compatibility alias).
 - The driver rejects `-p/--path`, `--trial-name`, and `--trials-dir` in forwarded args because it manages those fields.
+- With `port_profile_id`, con-driver probes the single live served model from `http://127.0.0.1:<vllm_port>/v1/models` and uses `hosted_vllm/<served_model_name>` for Harbor automatically.
+- With `port_profile_id`, con-driver sets `api_base`, `base_url`, and universal endpoint environment variables for the Harbor launch automatically.
+- With `port_profile_id`, do not forward `--model` or agent kwargs for `api_base`, `base_url`, or `model_info`; those are managed by con-driver.
 - In gateway mode, con-driver appends a unique per-agent `api_key` token automatically; do not hardcode `api_key` in forwarded args.
 - In gateway mode, wrapper also sets `OPENAI_API_KEY`, `LITELLM_API_KEY`, and `HOSTED_VLLM_API_KEY` to the same per-agent token so Terminus/LiteLLM requests match `/agent/start`.
 - Sampling is uniform over the merged task list.

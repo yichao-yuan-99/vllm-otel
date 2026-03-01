@@ -22,6 +22,21 @@ python -m replayer compile \
   --plan-out tests/output/tmp-replay-plan-20260225T035758Z-v2.json
 ```
 
+If the source `meta/config.toml` was generated from a `port_profile_id`, `compile`
+will reuse that convention automatically and resolve:
+
+- `replay_target.gateway_url` using the raw `gateway_port`
+- `replay_target.api_base` using the raw gateway listener
+- `replay_target.tokenize_endpoint`
+
+You can also override it explicitly:
+
+```bash
+python -m replayer compile \
+  --job-dir tests/output/con-driver/job-20260225T035758Z \
+  --port-profile-id 1
+```
+
 Replay:
 
 ```bash
@@ -31,12 +46,57 @@ python -m replayer replay \
   --gateway-lifecycle auto
 ```
 
+`replayer replay` now shows a live progress bar with total workers, launched
+workers, active workers, and failed workers.
+
+Replay can also override the compiled `launch_policy` while preserving the
+compiled worker/request structure. Pass a JSON object with the fields you want
+to overlay onto the plan's `launch_policy`.
+
+For example, to replay the same workers with `max_concurrent = 10` instead of
+the value stored in the plan:
+
+```bash
+python -m replayer replay \
+  --plan tests/output/tmp-replay-plan-20260225T035758Z-v2.json \
+  --launch-policy-override-json '{"max_concurrent": 10}'
+```
+
+This JSON may either be:
+
+- the `launch_policy` object itself
+- or a wrapper object with a top-level `launch_policy` field
+
+Example shape:
+
+```json
+{
+  "max_concurrent": 10,
+  "seed": null,
+  "pattern": {
+    "name": "eager"
+  },
+  "pattern_args": {}
+}
+```
+
+If the plan includes `replay_target.port_profile_id`, `replay` will resolve the
+current host URLs from `configs/port_profiles.toml` automatically. You can
+override the plan with:
+
+```bash
+python -m replayer replay \
+  --plan tests/output/tmp-replay-plan-20260225T035758Z-v2.json \
+  --port-profile-id 1
+```
+
 Launch behavior:
 
 - replay preserves original worker launch ordering (`launch_priority`)
 - worker launch timing is driven by recorded con-driver scheduling config (`max_concurrent`, `pattern`, `pattern_args`, `seed`)
 - replay does not require exact original absolute launch offsets
 - replay requires plans that include `launch_policy` (`config_ordered`)
+- replay targets the raw gateway listener, not `gateway_parse_port`
 
 ## Validation Script
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import signal
 import sys
 import time
@@ -39,6 +40,7 @@ class SchedulerConfig:
     effective_config: dict[str, object] | None = None
     vllm_log: "VLLMLogConfig | None" = None
     gateway: "GatewayModeConfig | None" = None
+    launch_env: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -52,7 +54,7 @@ class VLLMLogConfig:
 class GatewayModeConfig:
     base_url: str
     job_output_root: str
-    timeout_s: float = 30.0
+    timeout_s: float = 3600.0
 
 
 @dataclass
@@ -127,7 +129,7 @@ class ConcurrentDriver:
 
         self._run_id = self._make_run_id()
         self._target_dir = config.results_dir.resolve()
-        self._datasets_dir = self._target_dir / "datasets"
+        self._datasets_dir = self._backend.dataset_cache_root().resolve()
         self._set_results_dir(self._target_dir)
 
     async def run(self, *, pool_specs: list[str]) -> RunSummary:
@@ -528,10 +530,15 @@ class ConcurrentDriver:
         stderr_handle = request.stderr_log.open("w", encoding="utf-8")
 
         try:
+            launch_env = None
+            if self._config.launch_env:
+                launch_env = os.environ.copy()
+                launch_env.update(self._config.launch_env)
             process = await asyncio.create_subprocess_exec(
                 *request.command,
                 stdout=stdout_handle,
                 stderr=stderr_handle,
+                env=launch_env,
             )
         except Exception:
             stdout_handle.close()
@@ -1116,6 +1123,11 @@ class ConcurrentDriver:
                 self._config.gateway.timeout_s if self._config.gateway is not None else 30.0,
             )
         )
+        port_profile_id = payload.get("port_profile_id")
+        resolved_agent_name = payload.get("resolved_agent_name")
+        resolved_model_name = payload.get("resolved_model_name")
+        resolved_model_context_window = payload.get("resolved_model_context_window")
+        agent_base_url = payload.get("agent_base_url")
 
         def _toml_quote(value: str) -> str:
             return json.dumps(value)
@@ -1159,6 +1171,28 @@ class ConcurrentDriver:
                 f"forwarded_args = {_toml_list(forwarded_args)}",
             ]
         )
+        if (
+            port_profile_id is not None
+            or isinstance(resolved_agent_name, str)
+            or isinstance(resolved_model_name, str)
+            or isinstance(agent_base_url, str)
+        ):
+            lines.extend(
+                [
+                    "",
+                    "[runtime]",
+                ]
+            )
+            if port_profile_id is not None:
+                lines.append(f"port_profile_id = {_toml_quote(str(port_profile_id))}")
+            if isinstance(resolved_agent_name, str) and resolved_agent_name:
+                lines.append(f"agent = {_toml_quote(resolved_agent_name)}")
+            if isinstance(resolved_model_name, str) and resolved_model_name:
+                lines.append(f"served_model_name = {_toml_quote(resolved_model_name)}")
+            if isinstance(resolved_model_context_window, int):
+                lines.append(f"context_window = {resolved_model_context_window}")
+            if isinstance(agent_base_url, str) and agent_base_url:
+                lines.append(f"agent_base_url = {_toml_quote(agent_base_url)}")
         lines.extend(
             [
                 "",

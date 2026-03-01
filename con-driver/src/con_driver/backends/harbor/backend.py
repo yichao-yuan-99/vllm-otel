@@ -11,6 +11,9 @@ from typing import Sequence
 from con_driver.backends.base import TrialBackend
 from con_driver.models import TaskCandidate
 
+PACKAGE_ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_DATASET_CACHE_ROOT = PACKAGE_ROOT / ".cache" / "harbor-datasets"
+
 
 def _safe_dataset_dir_name(dataset_spec: str) -> str:
     safe = []
@@ -59,6 +62,9 @@ class HarborBackend(TrialBackend):
 
     def __init__(self, config: HarborBackendConfig):
         self._config = config
+
+    def dataset_cache_root(self) -> Path:
+        return DEFAULT_DATASET_CACHE_ROOT
 
     async def prepare_task_pool(
         self,

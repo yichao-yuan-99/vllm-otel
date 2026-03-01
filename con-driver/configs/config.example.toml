@@ -5,6 +5,8 @@ pool = "swebench-verified"
 max_concurrent = 500
 n_task = 500
 results_dir = "con-driver-test-3"
+port_profile_id = 1
+agent = "terminus-2"
 
 # Optional
 pattern = "eager"     # eager | poisson | possion
@@ -12,22 +14,29 @@ harbor_bin = "harbor" # or "uv run harbor"
 seed = 7
 dry_run = false
 sample_without_replacement = true
-vllm_log = true
-vllm_log_endpoint = "http://127.0.0.1:12138/metrics"
-vllm_log_interval_s = 1.0
-vllm_log_timeout_s = 5.0
 
 # Gateway mode (enabled by default)
-gateway = true
-gateway_url = "http://127.0.0.1:11457"
-gateway_job_output_root = "gateway-output"
-gateway_timeout_s = 30.0
+# gateway = true
+# gateway_url defaults to http://127.0.0.1:<gateway_parse_port>
+# gateway_job_output_root = "gateway-output"
+# gateway_timeout_s = 3600.0
 
-# Forwarded directly to harbor trials start
-forwarded_args = [
-  "--agent", "terminus-2",
-  "--model", "hosted_vllm/Qwen3-Coder-30B-A3B-Instruct",
-  "--agent-kwarg", "api_base=http://127.0.0.1:11457/v1",
-  "--agent-kwarg", "model_info={\"max_input_tokens\":32768,\"max_output_tokens\":8192,\"input_cost_per_token\":0.0,\"output_cost_per_token\":0.0}",
-  "--agent-kwarg", "trajectory_config={\"linear_history\":true}",
-]
+# vLLM metrics logging defaults to enabled when port_profile_id is set.
+# vllm_log = true
+# vllm_log_endpoint defaults to http://127.0.0.1:<vllm_port>/metrics
+# vllm_log_interval_s = 1.0
+# vllm_log_timeout_s = 5.0
+
+# Optional extra Harbor args.
+# con-driver auto-populates:
+#   --agent
+#   --model hosted_vllm/<served model from /v1/models>
+#   --agent-kwarg api_base=...
+#   --agent-kwarg base_url=...
+#   --agent-kwarg model_info=...
+# Agent-specific defaults like Terminus trajectory_config live in
+# con-driver/configs/agent_defaults.toml.
+#
+# forwarded_args = [
+#   "--agent-kwarg", "some_other_setting=value",
+# ]

@@ -1,0 +1,43 @@
+schema_version = 1
+description = "Mutually exclusive local port profiles for vllm-otel runtime components."
+default_profile = "0"
+
+[profiles."0"]
+label = "default"
+vllm_port = 11451
+jaeger_api_port = 16686
+jaeger_otlp_port = 4317
+gateway_port = 11457
+gateway_parse_port = 18171
+
+[profiles."1"]
+label = "random-1"
+vllm_port = 24123
+jaeger_api_port = 27544
+jaeger_otlp_port = 24831
+gateway_port = 24157
+gateway_parse_port = 28171
+
+[profiles."2"]
+label = "random-2"
+vllm_port = 31987
+jaeger_api_port = 35264
+jaeger_otlp_port = 32719
+gateway_port = 31955
+gateway_parse_port = 38171
+
+[profiles."3"]
+label = "random-3"
+vllm_port = 40823
+jaeger_api_port = 44612
+jaeger_otlp_port = 41735
+gateway_port = 40857
+gateway_parse_port = 48171
+
+[profiles."4"]
+label = "random-4"
+vllm_port = 52341
+jaeger_api_port = 56198
+jaeger_otlp_port = 53477
+gateway_port = 52357
+gateway_parse_port = 58171

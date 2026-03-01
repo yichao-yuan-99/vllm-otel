@@ -134,10 +134,14 @@ run_<...>/
 - `model`: string
 - `status_code`: integer
 - `request`: object containing the original forwarded request body/envelope
-- `response`: object containing the full returned LLM response payload for this call
+- `response`: object containing the raw vLLM response payload for this call
 - `response_summary`: object with non-sensitive response metadata (status, token usage if available, error message if any)
 
 ### Span-to-Request Binding Rule
 
-Each record in `requests/model_inference.jsonl` must include `model_inference_span_id`, the exact forwarded `request`, and the full `response` payload.  
+Each record in `requests/model_inference.jsonl` must include `model_inference_span_id`, the exact forwarded `request`, and the raw `response` payload returned by vLLM.  
 This is the canonical binding between a `model_inference` span and its request/response pair.
+
+If the request came in through `gateway_parse_port`, the client may receive a
+reasoning-parsed response, but the recorded artifact must still preserve the raw
+vLLM payload.

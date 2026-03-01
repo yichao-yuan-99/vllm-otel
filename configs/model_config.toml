@@ -1,0 +1,50 @@
+schema_version = 1
+description = "Shared model definitions used by server launch flows."
+default_model = "qwen3_coder_30b"
+
+# NOTE: weight_vram_gb values should be set to observed model memory usage.
+[models.qwen3_coder_30b]
+vllm_model_name = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+served_model_name = "Qwen3-Coder-30B-A3B-Instruct"
+weight_vram_gb = 70
+context_window = 262144
+extra_args = []
+
+[models.qwen3_5_35b]
+vllm_model_name = "Qwen/Qwen3.5-35B-A3B"
+served_model_name = "Qwen3.5-35B-A3B"
+weight_vram_gb = 75
+context_window = 262144
+extra_args = []
+
+# currently only works with v0.14.0
+# takes 734.4s to start
+# if warm up DeepGemm is on the path it will be even longer
+[models.minimax_m_2_5]
+vllm_model_name = "MiniMaxAI/MiniMax-M2.5"
+served_model_name = "MiniMax-M2.5"
+weight_vram_gb = 230 
+extra_args = [
+  "--trust-remote-code",
+  "--distributed_executor_backend", "ray"
+]
+reasoning_parser = "minimax_m2"
+tool_call_parser = "minimax_m2"
+context_window = 196608
+
+# Note that the parser is removed to get the raw result from kimi
+#  "--tool-call-parser", "kimi_k2",
+#  "--reasoning-parser", "kimi_k2",
+# "--default-chat-template-kwargs", '{"thinking": false}'
+[models.kimi_k2_5]
+vllm_model_name = "moonshotai/Kimi-K2.5"
+served_model_name = "Kimi-K2.5"
+weight_vram_gb = 900
+extra_args = [
+  "--mm-encoder-tp-mode", "data",
+  "--trust-remote-code",
+  "--distributed_executor_backend", "ray"
+]
+reasoning_parser = "kimi_k2"
+tool_call_parser = "kimi_k2"
+context_window = 262144

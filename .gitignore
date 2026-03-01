@@ -20,8 +20,8 @@ pip-wheel-metadata/
 .env
 .env.*
 !.env.example
-!docker/.env.example
-docker/.env
+servers/servers-docker/.env
+servers/servers-docker/logs
 
 # Logs and runtime artifacts
 *.log
@@ -29,6 +29,8 @@ docker/.env
 
 # Project-generated outputs
 tests/output/
+experiments/results/
+con-driver/.cache/
 con-driver-test*/
 gateway-output/
 tmp-replay-plan*.json

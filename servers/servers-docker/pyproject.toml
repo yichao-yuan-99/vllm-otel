@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-otel-docker-control"
+version = "0.1.0"
+description = "Local Docker control plane for vLLM + Jaeger"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "typer>=0.16.0",
+]
+
+[tool.setuptools]
+py-modules = ["client"]

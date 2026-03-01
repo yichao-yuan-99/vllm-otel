@@ -13,7 +13,7 @@ References:
 From repo root:
 
 ```bash
-cp docker/.env.example docker/.env
+cp gateway/config.example.toml gateway/config.toml
 ```
 
 Export HF env vars in the current shell:
@@ -24,16 +24,16 @@ export HF_HUB_CACHE=/path/to/hf-hub-cache
 export HF_TOKEN=your_hf_token
 ```
 
-Start Docker services (`vllm` + `jaeger`):
+Start Docker runtime (`vllm` + `jaeger`) through the CLI package:
 
 ```bash
-docker compose -f docker/docker-compose.yml --env-file docker/.env up -d --build
+python3 servers/servers-docker/client.py start -m qwen3_coder_30b -p 0 -l h100_nvl_gpu23 -b
 ```
 
 Start gateway on host (separate terminal):
 
 ```bash
-bash docker/start_gateway.sh
+python3 -m gateway start --config gateway/config.toml --port-profile-id 0
 ```
 
 Quick checks:
@@ -80,6 +80,10 @@ Important:
 
 - input is the full job directory, not only `gateway-output`
 - compiled plan includes required `launch_policy` (`config_ordered`) extracted from `meta/config.toml[run]`
+- if `meta/config.toml[runtime].port_profile_id` is present, replay endpoints are
+  resolved from `configs/port_profiles.toml`
+- replay plans should target the raw gateway listener (`gateway_port`), not the
+  parsed listener
 
 ## 4) Replay From Plan
 
@@ -99,6 +103,10 @@ Replay launch semantics:
 - preserves original launch ordering (`launch_priority`)
 - launch timing is driven by recorded con-driver scheduling config (`max_concurrent`, `pattern`, `seed`)
 - does not replay exact original absolute launch offsets
+- when the plan includes `replay_target.port_profile_id`, replay resolves the
+  current host URLs from the shared port profile convention automatically
+- replay compares raw vLLM responses and does not apply reasoning-specific
+  parsing during comparison
 
 ## 5) Validate Replay vs Source Profile
 
@@ -135,13 +143,14 @@ Only `cached_tokens` exact mismatches:
 
 Gateway `/job/end` timeout from con-driver:
 
-- gateway waits before trace collection (`GATEWAY_JOB_END_TRACE_WAIT_SECONDS`)
+- gateway waits before trace collection (`gateway.job_end_trace_wait_seconds` in `gateway/config.toml`)
 - increase `gateway_timeout_s` in con-driver config if needed
 
 ## 7) Stop Services
 
 ```bash
-docker compose -f docker/docker-compose.yml --env-file docker/.env down
+python3 servers/servers-docker/client.py stop -b
+python3 servers/servers-docker/client.py daemon-stop
 ```
 
 Stop gateway with `Ctrl+C` in its terminal.

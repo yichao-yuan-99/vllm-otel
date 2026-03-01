@@ -1,37 +1,15 @@
-# Docker Compose Setup (Current)
+# Docker Runtime Operation (CLI-Only)
 
-Compose runs only:
+Runtime launch and operations are managed through `servers/servers-docker/client.py`.
+Manual `docker compose up/down/logs` workflows are intentionally not part of this runbook.
 
-- `vllm`
-- `jaeger`
-- optional `otel-smoke-test`
+## Setup
 
-Gateway is launched on the host, not in compose.
+From repo root:
 
-## Configuration
+`servers/servers-docker/client.py` materializes compose env vars internally. There is no manual docker `.env` step.
 
-- `docker/.env` for compose + host gateway settings
-- current shell env for `HF_HOME`, `HF_HUB_CACHE`, `HF_TOKEN`
-
-## Quick Start
-
-1. Copy template:
-
-```bash
-cp docker/.env.example docker/.env
-```
-
-Default `GATEWAY_OUTPUT_ROOT` is project-root relative: `./tests/output/gateway-artifacts`.
-Default `GATEWAY_ARTIFACT_COMPRESSION` is `none` (uncompressed directories). Set `tar.gz` to emit compressed archives.
-Gateway blocks `GATEWAY_JOB_END_TRACE_WAIT_SECONDS` (default: `10`) at `job/end` before collecting trace payloads.
-vLLM tracing is enabled with `--otlp-traces-endpoint` and `--collect-detailed-traces` (`VLLM_COLLECT_DETAILED_TRACES=all` by default).
-Prompt token details are enabled with `--enable-prompt-tokens-details`.
-Custom logits processor loading is enabled with `VLLM_LOGITS_PROCESSORS` (default: `forceSeq.force_sequence_logits_processor:ForceSequenceAdapter`).
-The processor is request-gated and only applies when `vllm_xargs.forced_token_ids` is present.
-At vLLM startup, `docker/vllm_entrypoint.sh` infers `eos_token_id` from `VLLM_MODEL_NAME` and exports `VLLM_FORCE_SEQUENCE_EOS_TOKEN_ID` automatically.
-If tokenizer loading needs remote code, set `VLLM_FORCE_SEQ_TRUST_REMOTE_CODE=true` in `docker/.env`.
-
-2. Export HF env vars:
+Export Hugging Face env vars in your current shell:
 
 ```bash
 export HF_HOME=/path/to/hf-home
@@ -39,81 +17,33 @@ export HF_HUB_CACHE=/path/to/hf-hub-cache
 export HF_TOKEN=your_hf_token
 ```
 
-3. Start compose services:
+## Profiles
 
 ```bash
-docker compose -f docker/docker-compose.yml --env-file docker/.env up -d --build
+python3 servers/servers-docker/client.py profiles models
+python3 servers/servers-docker/client.py profiles ports
+python3 servers/servers-docker/client.py profiles launches
 ```
 
-4. Start gateway on host (new terminal):
+## Start
 
 ```bash
-bash docker/start_gateway.sh
+python3 servers/servers-docker/client.py start -m qwen3_coder_30b -p 0 -l h100_nvl_gpu23 -b
 ```
 
-`docker/start_gateway.sh` always creates/uses shared `./.venv`.
-
-## Verify
+## Operate
 
 ```bash
-curl http://localhost:11451/v1/models
-curl http://localhost:11457/healthz
+python3 servers/servers-docker/client.py status
+python3 servers/servers-docker/client.py up
+python3 servers/servers-docker/client.py wait-up --timeout-seconds 900
+python3 servers/servers-docker/client.py logs -n 200
+python3 servers/test/client.py --port-profile 0
 ```
-
-Jaeger UI: `http://localhost:16686`
-
-## Logs
-
-```bash
-docker compose -f docker/docker-compose.yml --env-file docker/.env logs -f vllm
-docker compose -f docker/docker-compose.yml --env-file docker/.env logs -f jaeger
-```
-
-Gateway logs are in the terminal running `uvicorn`.
-
-## Optional Gateway Flow
-
-```bash
-set -a
-source docker/.env
-set +a
-
-curl -X POST "http://localhost:${GATEWAY_PORT}/job/start" \
-  -H 'content-type: application/json' \
-  -d '{"output_location":"'"${GATEWAY_OUTPUT_ROOT}"'/job-1"}'
-
-curl -X POST "http://localhost:${GATEWAY_PORT}/agent/start" \
-  -H 'content-type: application/json' \
-  -d '{"api_token":"agent-token-1"}'
-
-curl -X POST "http://localhost:${GATEWAY_PORT}/v1/completions" \
-  -H 'content-type: application/json' \
-  -H 'x-api-key: agent-token-1' \
-  -d '{"model":"'"${VLLM_SERVED_MODEL_NAME}"'","prompt":"hello","max_tokens":16}'
-
-curl -X POST "http://localhost:${GATEWAY_PORT}/agent/end" \
-  -H 'content-type: application/json' \
-  -d '{"api_token":"agent-token-1","return_code":0}'
-
-curl -X POST "http://localhost:${GATEWAY_PORT}/job/end" \
-  -H 'content-type: application/json' \
-  -d '{"status":"completed"}'
-```
-
-Artifacts are written to host path `GATEWAY_OUTPUT_ROOT`.
 
 ## Stop
 
 ```bash
-docker compose -f docker/docker-compose.yml --env-file docker/.env down
-```
-
-Stop host gateway with `Ctrl+C`.
-
-## Optional Force-Sequence Test
-
-Run:
-
-```bash
-docker compose -f docker/docker-compose.yml --env-file docker/.env --profile test run --rm force-seq-smoke-test
+python3 servers/servers-docker/client.py stop -b
+python3 servers/servers-docker/client.py daemon-stop
 ```
