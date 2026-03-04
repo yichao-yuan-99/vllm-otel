@@ -1,0 +1,9 @@
+[driver]
+driver_backend = "harbor"
+pattern = "eager"
+pool = "swebench-verified"
+max_concurrent = 1
+n_task = 500
+results_dir = "experiments/results/single-agent/swebench-verified"
+sample_without_replacement = true
+agent = "terminus-2"

@@ -24,6 +24,11 @@ import tomllib
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
+try:
+    from .port_profiles import PortProfile as AMDHPCPortProfile, load_port_profiles
+except ImportError:  # pragma: no cover
+    from port_profiles import PortProfile as AMDHPCPortProfile, load_port_profiles  # type: ignore[no-redef]
+
 
 DEFAULT_JAEGER_IMAGE = "docker://jaegertracing/all-in-one:1.57"
 DEFAULT_VLLM_IMAGE = "docker://yichaoyuan/vllm-openai-otel:v0.16.0-otel-lp-rocm"
@@ -93,6 +98,7 @@ class RuntimeConfig:
     startup_timeout: int
     startup_timeout_after_running: bool
     ssh_options: list[str]
+    port_profiles: dict[int, AMDHPCPortProfile]
     partitions: dict[str, PartitionSpec]
     models: dict[str, ModelSpec]
     env: dict[str, str]
@@ -112,6 +118,7 @@ class CommandResult:
 
 @dataclass(frozen=True)
 class ActiveJob:
+    port_profile_id: int
     job_id: str
     partition: str
     model: str
@@ -129,6 +136,7 @@ class ActiveJob:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ActiveJob":
         return cls(
+            port_profile_id=int(payload.get("port_profile_id", 0)),
             job_id=str(payload["job_id"]),
             partition=str(payload["partition"]),
             model=str(payload["model"]),
@@ -146,6 +154,7 @@ class ActiveJob:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "port_profile_id": self.port_profile_id,
             "job_id": self.job_id,
             "partition": self.partition,
             "model": self.model,
@@ -171,24 +180,8 @@ class ControlPlane:
         self._lock = threading.Lock()
         self._start_progress_lock = threading.Lock()
         self._stop_progress_lock = threading.Lock()
-        self._start_progress: dict[str, Any] = {
-            "status": "idle",
-            "phase": None,
-            "message": "no start command has been run yet",
-            "job_id": None,
-            "started_at": None,
-            "finished_at": None,
-            "updated_at": _utc_now_iso(),
-        }
-        self._stop_progress: dict[str, Any] = {
-            "status": "idle",
-            "phase": None,
-            "message": "no stop command has been run yet",
-            "job_id": None,
-            "started_at": None,
-            "finished_at": None,
-            "updated_at": _utc_now_iso(),
-        }
+        self._start_progress: dict[int, dict[str, Any]] = {}
+        self._stop_progress: dict[int, dict[str, Any]] = {}
         self._cfg.run_dir.mkdir(parents=True, exist_ok=True)
         self._cfg.log_dir.mkdir(parents=True, exist_ok=True)
         self._cfg.state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -202,12 +195,17 @@ class ControlPlane:
         with self._lock:
             self._ensure_sif_files()
 
-    def start(self, *, partition: str, model: str, block: bool = False) -> CommandResult:
+    def start(self, *, port_profile_id: int, partition: str, model: str, block: bool = False) -> CommandResult:
+        port_profile = self._require_port_profile(port_profile_id)
         start_started_at = _utc_now_iso()
         self._set_start_progress(
+            port_profile_id=port_profile.profile_id,
             status="running",
             phase="validate",
-            message=f"validating start request partition={partition} model={model}",
+            message=(
+                f"validating start request port_profile={port_profile.profile_id} "
+                f"partition={partition} model={model}"
+            ),
             job_id=None,
             started_at=start_started_at,
             finished_at=None,
@@ -220,15 +218,18 @@ class ControlPlane:
                 self._ensure_sif_files()
 
                 state = self._load_state()
-                state_changed, active, job_status = self._refresh_active_job(state)
+                state_changed, active, job_status = self._refresh_active_job(
+                    state,
+                    port_profile_id=port_profile.profile_id,
+                )
                 if state_changed:
                     self._save_state(state)
 
                 if active is not None and job_status is not None:
                     raise ControlPlaneError(
                         message=(
-                            f"active job already exists: {active.job_id} ({job_status}). "
-                            "Stop it first before launching another."
+                            f"active job already exists for port profile {port_profile.profile_id}: "
+                            f"{active.job_id} ({job_status}). Stop it first before launching another."
                         ),
                         code=11,
                         http_status=409,
@@ -270,22 +271,28 @@ class ControlPlane:
                     )
 
                 self._set_start_progress(
+                    port_profile_id=port_profile.profile_id,
                     status="running",
                     phase="submit",
-                    message=f"writing sbatch script and submitting to partition {partition_spec.name}",
+                    message=(
+                        f"writing sbatch script and submitting to partition {partition_spec.name} "
+                        f"for port profile {port_profile.profile_id}"
+                    ),
                     job_id=None,
                     started_at=start_started_at,
                     finished_at=None,
                 )
-                self._ensure_port_available_on_login(self._cfg.service_port)
+                self._ensure_profile_ports_available_on_login(port_profile)
                 script_path = self._write_sbatch_script(
                     partition_spec=partition_spec,
                     model_spec=model_spec,
+                    port_profile=port_profile,
                 )
                 sbatch_result = self._run_checked(["sbatch", str(script_path)], timeout_seconds=120)
                 job_id = _extract_sbatch_job_id(f"{sbatch_result.stdout}\n{sbatch_result.stderr}")
 
                 self._set_start_progress(
+                    port_profile_id=port_profile.profile_id,
                     status="running",
                     phase="record",
                     message=f"submitted job {job_id}; recording active state",
@@ -300,32 +307,34 @@ class ControlPlane:
                 vllm_log = str(self._cfg.log_dir / f"vllm.{job_id}.log")
 
                 new_active = ActiveJob(
+                    port_profile_id=port_profile.profile_id,
                     job_id=job_id,
                     partition=partition_spec.name,
                     model=model_spec.name,
                     submitted_at=_utc_now_iso(),
                     tensor_parallel_size=partition_spec.gpus_per_node,
-                    service_port=self._cfg.service_port,
-                    jaeger_otlp_port=self._cfg.jaeger_otlp_port,
-                    jaeger_ui_port=self._cfg.jaeger_ui_port,
+                    service_port=port_profile.vllm_port,
+                    jaeger_otlp_port=port_profile.jaeger_otlp_port,
+                    jaeger_ui_port=port_profile.jaeger_api_port,
                     sbatch_script=str(script_path),
                     slurm_out_log=slurm_out_log,
                     slurm_err_log=slurm_err_log,
                     jaeger_log=jaeger_log,
                     vllm_log=vllm_log,
                 )
-                state["active_job"] = new_active.to_dict()
+                self._set_active_job(state, port_profile_id=port_profile.profile_id, active_job=new_active.to_dict())
                 self._save_state(state)
 
                 result_data = {
+                    "port_profile": port_profile.profile_id,
                     "job_id": job_id,
                     "partition": partition_spec.name,
                     "model": model_spec.name,
                     "time_limit": partition_spec.max_time,
                     "tensor_parallel_size": partition_spec.gpus_per_node,
-                    "service_port": self._cfg.service_port,
-                    "jaeger_otlp_port": self._cfg.jaeger_otlp_port,
-                    "jaeger_ui_port": self._cfg.jaeger_ui_port,
+                    "service_port": port_profile.vllm_port,
+                    "jaeger_otlp_port": port_profile.jaeger_otlp_port,
+                    "jaeger_ui_port": port_profile.jaeger_api_port,
                     "sbatch_script": str(script_path),
                     "blocked": block,
                 }
@@ -333,6 +342,7 @@ class ControlPlane:
             if not block:
                 finished_at = _utc_now_iso()
                 self._set_start_progress(
+                    port_profile_id=port_profile.profile_id,
                     status="succeeded",
                     phase="done",
                     message=f"submitted job {job_id}",
@@ -347,6 +357,7 @@ class ControlPlane:
                 )
 
             self._set_start_progress(
+                port_profile_id=port_profile.profile_id,
                 status="running",
                 phase="wait_services",
                 message=f"submitted job {job_id}; waiting for vLLM and Jaeger readiness",
@@ -370,6 +381,7 @@ class ControlPlane:
                     return
                 last_wait_message = message
                 self._set_start_progress(
+                    port_profile_id=port_profile.profile_id,
                     status="running",
                     phase="wait_services",
                     message=message,
@@ -379,6 +391,7 @@ class ControlPlane:
                 )
 
             readiness = self._wait_for_services_up(
+                port_profile_id=port_profile.profile_id,
                 timeout_seconds=self._cfg.startup_timeout,
                 poll_interval_seconds=DEFAULT_WAIT_UP_POLL_INTERVAL_SECONDS,
                 expected_job_id=job_id,
@@ -390,6 +403,7 @@ class ControlPlane:
 
             finished_at = _utc_now_iso()
             self._set_start_progress(
+                port_profile_id=port_profile.profile_id,
                 status="succeeded",
                 phase="done",
                 message=f"submitted job {job_id} and services are up",
@@ -404,21 +418,30 @@ class ControlPlane:
             )
         except Exception as exc:  # noqa: BLE001
             self._set_start_progress(
+                port_profile_id=port_profile.profile_id,
                 status="failed",
                 phase="failed",
                 message=str(exc),
-                job_id=self._current_start_job_id(),
+                job_id=self._current_start_job_id(port_profile.profile_id),
                 started_at=start_started_at,
                 finished_at=_utc_now_iso(),
             )
             raise
 
-    def stop(self, *, reason: str = "stopped", block: bool = False) -> CommandResult:
+    def stop(
+        self,
+        *,
+        port_profile_id: int,
+        reason: str = "stopped",
+        block: bool = False,
+    ) -> CommandResult:
+        port_profile = self._require_port_profile(port_profile_id)
         stop_started_at = _utc_now_iso()
         self._set_stop_progress(
+            port_profile_id=port_profile.profile_id,
             status="running",
             phase="validate",
-            message="validating active job before stop",
+            message=f"validating active job before stop for port profile {port_profile.profile_id}",
             job_id=None,
             started_at=stop_started_at,
             finished_at=None,
@@ -430,16 +453,17 @@ class ControlPlane:
                 self._require_command("scancel")
 
                 state = self._load_state()
-                active_raw = state.get("active_job")
+                active_raw = self._active_job_raw(state, port_profile_id=port_profile.profile_id)
                 if not isinstance(active_raw, dict):
                     raise ControlPlaneError(
-                        message="no active job",
+                        message=f"no active job for port profile {port_profile.profile_id}",
                         code=21,
                         http_status=404,
                     )
 
                 active = ActiveJob.from_dict(active_raw)
                 self._set_stop_progress(
+                    port_profile_id=port_profile.profile_id,
                     status="running",
                     phase="validate",
                     message=f"loaded active job {active.job_id}",
@@ -452,6 +476,7 @@ class ControlPlane:
                 status = self._slurm_job_status(active.job_id)
                 if status is not None:
                     self._set_stop_progress(
+                        port_profile_id=port_profile.profile_id,
                         status="running",
                         phase="cancel",
                         message=f"sending scancel for job {active.job_id} (status={status})",
@@ -478,17 +503,22 @@ class ControlPlane:
 
                 if not block:
                     if status is None:
-                        self._archive_active_job(state, reason=reason)
+                        self._archive_active_job(state, port_profile_id=port_profile.profile_id, reason=reason)
                         self._save_state(state)
                         final_status = "not_found"
                     else:
                         active_raw["stop_requested_at"] = _utc_now_iso()
-                        state["active_job"] = active_raw
+                        self._set_active_job(
+                            state,
+                            port_profile_id=port_profile.profile_id,
+                            active_job=active_raw,
+                        )
                         self._save_state(state)
                         final_status = "cancelling"
 
                     finished_at = _utc_now_iso()
                     self._set_stop_progress(
+                        port_profile_id=port_profile.profile_id,
                         status="succeeded",
                         phase="done",
                         message=f"stop requested for job {active.job_id} (final_status={final_status})",
@@ -500,6 +530,7 @@ class ControlPlane:
                         code=0,
                         message=f"stop requested for job {active.job_id}",
                         data={
+                            "port_profile": port_profile.profile_id,
                             "job_id": active.job_id,
                             "previous_status": status or "not_found",
                             "final_status": final_status,
@@ -511,6 +542,7 @@ class ControlPlane:
                     )
 
                 self._set_stop_progress(
+                    port_profile_id=port_profile.profile_id,
                     status="running",
                     phase="wait_slurm",
                     message=f"waiting for job {active.job_id} to disappear from squeue",
@@ -519,7 +551,6 @@ class ControlPlane:
                     finished_at=None,
                 )
 
-                # Block until the job disappears from Slurm so callers know stop is complete.
                 wait_started_at = time.monotonic()
                 deadline = wait_started_at + DEFAULT_STOP_WAIT_TIMEOUT_SECONDS
                 last_seen_status: str | None = None
@@ -530,6 +561,7 @@ class ControlPlane:
                     if current_status != last_seen_status:
                         last_seen_status = current_status
                         self._set_stop_progress(
+                            port_profile_id=port_profile.profile_id,
                             status="running",
                             phase="wait_slurm",
                             message=f"job {active.job_id} still active (status={current_status})",
@@ -555,11 +587,12 @@ class ControlPlane:
                     time.sleep(DEFAULT_STOP_POLL_INTERVAL_SECONDS)
 
                 waited_seconds = round(time.monotonic() - wait_started_at, 3)
-                self._archive_active_job(state, reason=reason)
+                self._archive_active_job(state, port_profile_id=port_profile.profile_id, reason=reason)
                 self._save_state(state)
 
                 finished_at = _utc_now_iso()
                 self._set_stop_progress(
+                    port_profile_id=port_profile.profile_id,
                     status="succeeded",
                     phase="done",
                     message=f"stopped job {active.job_id}",
@@ -572,6 +605,7 @@ class ControlPlane:
                     code=0,
                     message=f"stopped job {active.job_id}",
                     data={
+                        "port_profile": port_profile.profile_id,
                         "job_id": active.job_id,
                         "previous_status": status or "not_found",
                         "final_status": "not_found",
@@ -582,24 +616,26 @@ class ControlPlane:
                 )
         except Exception as exc:  # noqa: BLE001
             self._set_stop_progress(
+                port_profile_id=port_profile.profile_id,
                 status="failed",
                 phase="failed",
                 message=str(exc),
-                job_id=self._current_stop_job_id(),
+                job_id=self._current_stop_job_id(port_profile.profile_id),
                 started_at=stop_started_at,
                 finished_at=_utc_now_iso(),
             )
             raise
 
-    def stop_poll(self) -> CommandResult:
+    def stop_poll(self, *, port_profile_id: int) -> CommandResult:
         with self._lock:
             state = self._load_state()
-            active_raw = state.get("active_job")
+            active_raw = self._active_job_raw(state, port_profile_id=port_profile_id)
             if not isinstance(active_raw, dict):
                 return CommandResult(
                     code=0,
-                    message="no active job",
+                    message=f"no active job for port profile {port_profile_id}",
                     data={
+                        "port_profile": port_profile_id,
                         "done": True,
                         "job_id": None,
                         "job_status": "not_found",
@@ -616,12 +652,13 @@ class ControlPlane:
                     if isinstance(stop_requested_at, str) and stop_requested_at
                     else "finished"
                 )
-                self._archive_active_job(state, reason=reason)
+                self._archive_active_job(state, port_profile_id=port_profile_id, reason=reason)
                 self._save_state(state)
                 return CommandResult(
                     code=0,
                     message=f"job {active.job_id} is no longer in squeue",
                     data={
+                        "port_profile": port_profile_id,
                         "done": True,
                         "job_id": active.job_id,
                         "job_status": "not_found",
@@ -634,6 +671,7 @@ class ControlPlane:
                 code=0,
                 message=f"job {active.job_id} is still active",
                 data={
+                    "port_profile": port_profile_id,
                     "done": False,
                     "job_id": active.job_id,
                     "job_status": status,
@@ -641,17 +679,29 @@ class ControlPlane:
                 },
             )
 
-    def start_status(self) -> CommandResult:
+    def start_status(self, *, port_profile_id: int) -> CommandResult:
         with self._start_progress_lock:
-            progress = dict(self._start_progress)
+            progress = dict(
+                self._start_progress.get(
+                    port_profile_id,
+                    self._empty_progress(message="no start command has been run yet"),
+                )
+            )
+        progress["port_profile"] = port_profile_id
         return CommandResult(code=0, message="start status", data=progress)
 
-    def stop_status(self) -> CommandResult:
+    def stop_status(self, *, port_profile_id: int) -> CommandResult:
         with self._stop_progress_lock:
-            progress = dict(self._stop_progress)
+            progress = dict(
+                self._stop_progress.get(
+                    port_profile_id,
+                    self._empty_progress(message="no stop command has been run yet"),
+                )
+            )
+        progress["port_profile"] = port_profile_id
         return CommandResult(code=0, message="stop status", data=progress)
 
-    def logs(self, *, lines: int = 200) -> CommandResult:
+    def logs(self, *, port_profile_id: int, lines: int = 200) -> CommandResult:
         with self._lock:
             if lines <= 0:
                 raise ControlPlaneError(
@@ -661,10 +711,10 @@ class ControlPlane:
                 )
 
             state = self._load_state()
-            active_raw = state.get("active_job")
+            active_raw = self._active_job_raw(state, port_profile_id=port_profile_id)
             if not isinstance(active_raw, dict):
                 raise ControlPlaneError(
-                    message="no active job",
+                    message=f"no active job for port profile {port_profile_id}",
                     code=32,
                     http_status=404,
                 )
@@ -679,13 +729,14 @@ class ControlPlane:
 
             status = self._slurm_job_status(active.job_id)
             if status is None:
-                self._archive_active_job(state, reason="finished")
+                self._archive_active_job(state, port_profile_id=port_profile_id, reason="finished")
                 self._save_state(state)
 
             return CommandResult(
                 code=0,
                 message="log snapshot collected",
                 data={
+                    "port_profile": port_profile_id,
                     "job_id": active.job_id,
                     "job_status": status or "not_found",
                     "lines": lines,
@@ -693,15 +744,16 @@ class ControlPlane:
                 },
             )
 
-    def up(self) -> CommandResult:
+    def up(self, *, port_profile_id: int) -> CommandResult:
         with self._lock:
-            readiness = self._collect_readiness_snapshot()
+            readiness = self._collect_readiness_snapshot(port_profile_id=port_profile_id)
         message = "services are up" if readiness["ready"] else "services are not ready"
         return CommandResult(code=0, message=message, data=readiness)
 
     def wait_up(
         self,
         *,
+        port_profile_id: int,
         timeout_seconds: int | None = None,
         poll_interval_seconds: float = DEFAULT_WAIT_UP_POLL_INTERVAL_SECONDS,
         defer_timeout_until_running: bool | None = None,
@@ -724,6 +776,7 @@ class ControlPlane:
             )
 
         snapshot = self._wait_for_services_up(
+            port_profile_id=port_profile_id,
             timeout_seconds=timeout_seconds,
             poll_interval_seconds=poll_interval_seconds,
             expected_job_id=None,
@@ -731,12 +784,16 @@ class ControlPlane:
         )
         return CommandResult(code=0, message="services are up", data=snapshot)
 
-    def status(self) -> CommandResult:
+    def status(self, *, port_profile_id: int) -> CommandResult:
         with self._lock:
             state = self._load_state()
-            state_changed, active, job_status = self._refresh_active_job(state)
+            state_changed, active_jobs = self._refresh_all_active_jobs(state)
             if state_changed:
                 self._save_state(state)
+
+            selected = active_jobs.get(port_profile_id)
+            active = selected[0] if selected is not None else None
+            job_status = selected[1] if selected is not None else None
 
             return CommandResult(
                 code=0,
@@ -747,8 +804,25 @@ class ControlPlane:
                         "port": self._cfg.port,
                         "config_path": str(self._config_path),
                     },
+                    "port_profile": port_profile_id,
                     "active_job": active.to_dict() if active is not None else None,
                     "active_job_status": job_status,
+                    "active_jobs": {
+                        str(profile_id): {
+                            "active_job": profile_active.to_dict(),
+                            "active_job_status": profile_status,
+                        }
+                        for profile_id, (profile_active, profile_status) in active_jobs.items()
+                    },
+                    "allowed_port_profiles": {
+                        str(profile_id): {
+                            "label": profile.label,
+                            "service_port": profile.vllm_port,
+                            "jaeger_otlp_port": profile.jaeger_otlp_port,
+                            "jaeger_ui_port": profile.jaeger_api_port,
+                        }
+                        for profile_id, profile in self._cfg.port_profiles.items()
+                    },
                     "allowed_partitions": {
                         key: {
                             "gpus_per_node": value.gpus_per_node,
@@ -800,9 +874,20 @@ class ControlPlane:
                 },
             )
 
+    def _empty_progress(self, *, message: str) -> dict[str, Any]:
+        return {
+            "status": "idle",
+            "phase": None,
+            "message": message,
+            "job_id": None,
+            "started_at": None,
+            "finished_at": None,
+            "updated_at": _utc_now_iso(),
+        }
+
     def _load_state(self) -> dict[str, Any]:
         if not self._cfg.state_file.exists():
-            return {"active_job": None, "history": []}
+            return {"active_jobs": {}, "history": []}
         try:
             raw = json.loads(self._cfg.state_file.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
@@ -814,20 +899,57 @@ class ControlPlane:
             ) from exc
 
         if not isinstance(raw, dict):
-            return {"active_job": None, "history": []}
+            return {"active_jobs": {}, "history": []}
         if "history" not in raw or not isinstance(raw["history"], list):
             raw["history"] = []
-        if "active_job" not in raw:
-            raw["active_job"] = None
+        if "active_jobs" not in raw or not isinstance(raw["active_jobs"], dict):
+            migrated: dict[str, Any] = {}
+            legacy_active = raw.get("active_job")
+            if isinstance(legacy_active, dict):
+                legacy_snapshot = dict(legacy_active)
+                legacy_snapshot.setdefault("port_profile_id", 0)
+                migrated[str(int(legacy_snapshot["port_profile_id"]))] = legacy_snapshot
+            raw["active_jobs"] = migrated
+        for entry in raw["history"]:
+            if isinstance(entry, dict):
+                entry.setdefault("port_profile_id", 0)
+        raw.pop("active_job", None)
         return raw
 
     def _save_state(self, state: dict[str, Any]) -> None:
         self._cfg.state_file.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
 
-    def _archive_active_job(self, state: dict[str, Any], *, reason: str) -> None:
-        active_raw = state.get("active_job")
+    def _active_jobs_table(self, state: dict[str, Any]) -> dict[str, Any]:
+        active_jobs = state.get("active_jobs")
+        if not isinstance(active_jobs, dict):
+            active_jobs = {}
+            state["active_jobs"] = active_jobs
+        return active_jobs
+
+    def _active_job_raw(self, state: dict[str, Any], *, port_profile_id: int) -> dict[str, Any] | None:
+        active_jobs = self._active_jobs_table(state)
+        active_raw = active_jobs.get(str(port_profile_id))
         if not isinstance(active_raw, dict):
-            state["active_job"] = None
+            return None
+        return active_raw
+
+    def _set_active_job(
+        self,
+        state: dict[str, Any],
+        *,
+        port_profile_id: int,
+        active_job: dict[str, Any],
+    ) -> None:
+        active_jobs = self._active_jobs_table(state)
+        payload = dict(active_job)
+        payload["port_profile_id"] = int(payload.get("port_profile_id", port_profile_id))
+        active_jobs[str(port_profile_id)] = payload
+
+    def _archive_active_job(self, state: dict[str, Any], *, port_profile_id: int, reason: str) -> None:
+        active_jobs = self._active_jobs_table(state)
+        active_raw = active_jobs.get(str(port_profile_id))
+        if not isinstance(active_raw, dict):
+            active_jobs.pop(str(port_profile_id), None)
             return
         snapshot = dict(active_raw)
         snapshot["ended_at"] = _utc_now_iso()
@@ -835,7 +957,7 @@ class ControlPlane:
         history = state.setdefault("history", [])
         if isinstance(history, list):
             history.append(snapshot)
-        state["active_job"] = None
+        active_jobs.pop(str(port_profile_id), None)
 
     def _archive_previous_artifacts(self) -> None:
         """Move stale run/log files into run/old and logs/old on server startup."""
@@ -849,10 +971,11 @@ class ControlPlane:
         try:
             state = self._load_state()
         except ControlPlaneError:
-            state = {"active_job": None}
+            state = {"active_jobs": {}}
 
-        active_raw = state.get("active_job")
-        if isinstance(active_raw, dict):
+        for active_raw in self._active_jobs_table(state).values():
+            if not isinstance(active_raw, dict):
+                continue
             for key in ("sbatch_script", "slurm_out_log", "slurm_err_log", "jaeger_log", "vllm_log"):
                 raw_path = active_raw.get(key)
                 if isinstance(raw_path, str) and raw_path:
@@ -899,9 +1022,12 @@ class ControlPlane:
             shutil.move(str(item), str(target))
 
     def _refresh_active_job(
-        self, state: dict[str, Any]
+        self,
+        state: dict[str, Any],
+        *,
+        port_profile_id: int,
     ) -> tuple[bool, ActiveJob | None, str | None]:
-        active_raw = state.get("active_job")
+        active_raw = self._active_job_raw(state, port_profile_id=port_profile_id)
         if not isinstance(active_raw, dict):
             return (False, None, None)
 
@@ -914,9 +1040,25 @@ class ControlPlane:
                 if isinstance(stop_requested_at, str) and stop_requested_at
                 else "finished"
             )
-            self._archive_active_job(state, reason=reason)
+            self._archive_active_job(state, port_profile_id=port_profile_id, reason=reason)
             return (True, None, None)
         return (False, active, job_status)
+
+    def _refresh_all_active_jobs(
+        self,
+        state: dict[str, Any],
+    ) -> tuple[bool, dict[int, tuple[ActiveJob, str | None]]]:
+        state_changed = False
+        active_jobs: dict[int, tuple[ActiveJob, str | None]] = {}
+        for profile_key in sorted(self._active_jobs_table(state).keys(), key=int):
+            state_changed_for_profile, active, job_status = self._refresh_active_job(
+                state,
+                port_profile_id=int(profile_key),
+            )
+            state_changed = state_changed or state_changed_for_profile
+            if active is not None:
+                active_jobs[int(profile_key)] = (active, job_status)
+        return state_changed, active_jobs
 
     def _slurm_job_status(self, job_id: str) -> str | None:
         self._require_command("squeue")
@@ -965,7 +1107,24 @@ class ControlPlane:
             http_status=500,
         )
 
-    def _ensure_port_available_on_login(self, port: int) -> None:
+    def _require_port_profile(self, port_profile_id: int) -> AMDHPCPortProfile:
+        if isinstance(port_profile_id, bool):
+            raise ControlPlaneError(
+                message="port_profile must be an integer",
+                code=16,
+                http_status=400,
+            )
+        profile = self._cfg.port_profiles.get(int(port_profile_id))
+        if profile is None:
+            raise ControlPlaneError(
+                message=f"unknown port profile '{port_profile_id}'",
+                code=17,
+                http_status=400,
+                details={"allowed_port_profiles": sorted(self._cfg.port_profiles.keys())},
+            )
+        return profile
+
+    def _ensure_port_available_on_login(self, port: int, *, label: str) -> None:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
@@ -973,22 +1132,28 @@ class ControlPlane:
             except OSError as exc:
                 raise ControlPlaneError(
                     message=(
-                        f"service_port {port} is already in use on login node; "
-                        "choose a different cluster.service_port"
+                        f"{label} {port} is already in use on login node; "
+                        "choose a different port profile"
                     ),
                     code=15,
                     http_status=409,
-                    details={"service_port": port, "error": str(exc)},
+                    details={"label": label, "port": port, "error": str(exc)},
                 ) from exc
 
-    def _collect_readiness_snapshot(self) -> dict[str, Any]:
+    def _ensure_profile_ports_available_on_login(self, port_profile: AMDHPCPortProfile) -> None:
+        self._ensure_port_available_on_login(port_profile.vllm_port, label="service_port")
+        self._ensure_port_available_on_login(port_profile.jaeger_otlp_port, label="jaeger_otlp_port")
+        self._ensure_port_available_on_login(port_profile.jaeger_api_port, label="jaeger_ui_port")
+
+    def _collect_readiness_snapshot(self, *, port_profile_id: int) -> dict[str, Any]:
+        port_profile = self._require_port_profile(port_profile_id)
         state = self._load_state()
-        state_changed, active, job_status = self._refresh_active_job(state)
+        state_changed, active, job_status = self._refresh_active_job(state, port_profile_id=port_profile.profile_id)
         if state_changed:
             self._save_state(state)
 
-        vllm_url = f"http://127.0.0.1:{self._cfg.service_port}/v1/models"
-        jaeger_url = f"http://127.0.0.1:{self._cfg.jaeger_ui_port}"
+        vllm_url = f"http://127.0.0.1:{port_profile.vllm_port}/v1/models"
+        jaeger_url = f"http://127.0.0.1:{port_profile.jaeger_api_port}"
 
         vllm_probe = self._probe_http_url(vllm_url)
         jaeger_probe = self._probe_http_url(jaeger_url)
@@ -998,6 +1163,7 @@ class ControlPlane:
         ready = bool(active_running and vllm_probe["ok"] and jaeger_probe["ok"])
 
         return {
+            "port_profile": port_profile.profile_id,
             "ready": ready,
             "active_job": active_job_payload,
             "active_job_status": job_status,
@@ -1008,6 +1174,7 @@ class ControlPlane:
     def _wait_for_services_up(
         self,
         *,
+        port_profile_id: int,
         timeout_seconds: int,
         poll_interval_seconds: float,
         expected_job_id: str | None,
@@ -1022,7 +1189,7 @@ class ControlPlane:
 
         while True:
             with self._lock:
-                snapshot = self._collect_readiness_snapshot()
+                snapshot = self._collect_readiness_snapshot(port_profile_id=port_profile_id)
             last_snapshot = snapshot
 
             status_raw = snapshot.get("active_job_status")
@@ -1129,11 +1296,20 @@ class ControlPlane:
                 "error": str(exc),
             }
 
-    def _write_sbatch_script(self, *, partition_spec: PartitionSpec, model_spec: ModelSpec) -> Path:
+    def _write_sbatch_script(
+        self,
+        *,
+        partition_spec: PartitionSpec,
+        model_spec: ModelSpec,
+        port_profile: AMDHPCPortProfile,
+    ) -> Path:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         safe_partition = _safe_token(partition_spec.name)
         safe_model = _safe_token(model_spec.name)
-        script_path = self._cfg.run_dir / f"sbatch-{timestamp}-{safe_partition}-{safe_model}.sh"
+        script_path = (
+            self._cfg.run_dir
+            / f"sbatch-{timestamp}-p{port_profile.profile_id}-{safe_partition}-{safe_model}.sh"
+        )
 
         visible_devices = ",".join(str(idx) for idx in range(partition_spec.gpus_per_node))
         slurm_out = self._cfg.log_dir / "slurm.%j.out"
@@ -1169,9 +1345,9 @@ class ControlPlane:
             echo "Job ${{SLURM_JOB_ID}} starting on $(hostname) at $(date)"
 
             LOGIN_HOST={shlex.quote(self._cfg.login_host)}
-            VLLM_SERVICE_PORT={self._cfg.service_port}
-            JAEGER_OTLP_PORT={self._cfg.jaeger_otlp_port}
-            JAEGER_UI_PORT={self._cfg.jaeger_ui_port}
+            VLLM_SERVICE_PORT={port_profile.vllm_port}
+            JAEGER_OTLP_PORT={port_profile.jaeger_otlp_port}
+            JAEGER_UI_PORT={port_profile.jaeger_api_port}
 
             JAEGER_SIF={shlex.quote(str(self._cfg.jaeger_sif))}
             VLLM_SIF={shlex.quote(str(self._cfg.vllm_sif))}
@@ -1192,7 +1368,7 @@ class ControlPlane:
 
             OTEL_SERVICE_NAME={shlex.quote(self._cfg.env.get('OTEL_SERVICE_NAME', 'vllm-server'))}
             OTEL_EXPORTER_OTLP_TRACES_INSECURE={shlex.quote(self._cfg.env.get('OTEL_EXPORTER_OTLP_TRACES_INSECURE', 'true'))}
-            OTEL_EXPORTER_OTLP_TRACES_ENDPOINT={shlex.quote(f'grpc://127.0.0.1:{self._cfg.jaeger_otlp_port}')}
+            OTEL_EXPORTER_OTLP_TRACES_ENDPOINT={shlex.quote(f'grpc://127.0.0.1:{port_profile.jaeger_otlp_port}')}
             VLLM_COLLECT_DETAILED_TRACES={shlex.quote(self._cfg.env.get('VLLM_COLLECT_DETAILED_TRACES', 'all'))}
             VLLM_LOGITS_PROCESSORS={shlex.quote(self._cfg.env.get('VLLM_LOGITS_PROCESSORS', 'forceSeq.force_sequence_logits_processor:ForceSequenceAdapter'))}
             VLLM_MODEL_EXTRA_ARGS_B64={shlex.quote(encoded_extra_args)}
@@ -1354,6 +1530,7 @@ class ControlPlane:
     def _set_start_progress(
         self,
         *,
+        port_profile_id: int,
         status: str,
         phase: str | None,
         message: str,
@@ -1362,7 +1539,7 @@ class ControlPlane:
         finished_at: str | None,
     ) -> None:
         with self._start_progress_lock:
-            self._start_progress = {
+            self._start_progress[port_profile_id] = {
                 "status": status,
                 "phase": phase,
                 "message": message,
@@ -1372,9 +1549,10 @@ class ControlPlane:
                 "updated_at": _utc_now_iso(),
             }
 
-    def _current_start_job_id(self) -> str | None:
+    def _current_start_job_id(self, port_profile_id: int) -> str | None:
         with self._start_progress_lock:
-            value = self._start_progress.get("job_id")
+            progress = self._start_progress.get(port_profile_id, {})
+            value = progress.get("job_id")
         if isinstance(value, str) and value:
             return value
         return None
@@ -1382,6 +1560,7 @@ class ControlPlane:
     def _set_stop_progress(
         self,
         *,
+        port_profile_id: int,
         status: str,
         phase: str | None,
         message: str,
@@ -1390,7 +1569,7 @@ class ControlPlane:
         finished_at: str | None,
     ) -> None:
         with self._stop_progress_lock:
-            self._stop_progress = {
+            self._stop_progress[port_profile_id] = {
                 "status": status,
                 "phase": phase,
                 "message": message,
@@ -1400,9 +1579,10 @@ class ControlPlane:
                 "updated_at": _utc_now_iso(),
             }
 
-    def _current_stop_job_id(self) -> str | None:
+    def _current_stop_job_id(self, port_profile_id: int) -> str | None:
         with self._stop_progress_lock:
-            value = self._stop_progress.get("job_id")
+            progress = self._stop_progress.get(port_profile_id, {})
+            value = progress.get("job_id")
         if isinstance(value, str) and value:
             return value
         return None
@@ -1488,6 +1668,16 @@ def load_runtime_config(config_path: Path) -> RuntimeConfig:
             http_status=500,
         )
     ssh_options = list(ssh_options_raw)
+
+    try:
+        port_profiles = load_port_profiles()
+    except Exception as exc:  # noqa: BLE001
+        raise ControlPlaneError(
+            message="failed to load configs/port_profiles.toml",
+            code=113,
+            http_status=500,
+            details={"error": str(exc)},
+        ) from exc
 
     partitions_table = raw.get("partition")
     if not isinstance(partitions_table, dict) or not partitions_table:
@@ -1601,6 +1791,7 @@ def load_runtime_config(config_path: Path) -> RuntimeConfig:
         startup_timeout=startup_timeout,
         startup_timeout_after_running=startup_timeout_after_running,
         ssh_options=ssh_options,
+        port_profiles=port_profiles,
         partitions=partitions,
         models=models,
         env=merged_env,

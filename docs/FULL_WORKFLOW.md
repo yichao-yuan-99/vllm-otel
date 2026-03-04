@@ -99,6 +99,7 @@ Compile from full profile directory:
 ```bash
 python3 -m replayer compile \
   --job-dir "$RUN_DIR" \
+  --agent-timeout-s 3000 \
   --plan-out "$RUN_DIR/replay-plan.json"
 ```
 
@@ -111,6 +112,7 @@ jq '.launch_policy,.workers|length' "$RUN_DIR/replay-plan.json"
 Important:
 
 - replay now requires `launch_policy` in plan (`config_ordered`).
+- replay uses `agent_timeout_s` in plan when present; compile may be given `--agent-timeout-s`.
 - old plans without `launch_policy` are rejected by replay.
 
 ## 5) Execute Replay

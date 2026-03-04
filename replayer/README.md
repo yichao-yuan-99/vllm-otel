@@ -19,8 +19,19 @@ Compile:
 ```bash
 python -m replayer compile \
   --job-dir tests/output/con-driver/job-20260225T035758Z \
+  --agent-timeout-s 3000 \
   --plan-out tests/output/tmp-replay-plan-20260225T035758Z-v2.json
 ```
+
+`replayer compile` shows a live progress bar while it builds worker plans and
+deterministic request payloads. The bar advances by recorded request and also
+shows completed workers.
+
+`--agent-timeout-s` is optional. If you pass it, `compile` writes that value
+into the plan as `agent_timeout_s`, and `replay` enforces it as a per-worker
+runtime limit. If a replayed worker exceeds that duration, `replayer` cancels
+the in-flight request and marks the worker `timed_out`. If the field is absent,
+`replay` does not apply an agent-level deadline.
 
 If the source `meta/config.toml` was generated from a `port_profile_id`, `compile`
 will reuse that convention automatically and resolve:
@@ -29,12 +40,23 @@ will reuse that convention automatically and resolve:
 - `replay_target.api_base` using the raw gateway listener
 - `replay_target.tokenize_endpoint`
 
+If the source profile contains recorded `499 client_disconnected` inference
+requests, `compile` now keeps those requests in the plan instead of failing
+deterministic tokenization. Those entries are compiled as synthetic
+client-cancel requests: replay sends the original request with `ignore_eos =
+true`, removes explicit completion-token caps, and then cancels the client
+connection after the recorded request duration. If the gateway returns an error
+after the request has already been running for at least `60s`, replay treats
+that as acceptable equivalent behavior for this mode instead of failing the
+worker.
+
 You can also override it explicitly:
 
 ```bash
 python -m replayer compile \
   --job-dir tests/output/con-driver/job-20260225T035758Z \
-  --port-profile-id 1
+  --port-profile-id 1 \
+  --agent-timeout-s 3000
 ```
 
 Replay:
@@ -48,6 +70,50 @@ python -m replayer replay \
 
 `replayer replay` now shows a live progress bar with total workers, launched
 workers, active workers, and failed workers.
+
+If a worker hits `agent_timeout_s`, replay marks that worker `timed_out` and
+tracks it separately from true replay failures. Timed-out workers do not cause
+`replayer replay` itself to return a non-zero exit code.
+
+Replay-side HTTP calls do not use a request timeout. That applies to:
+
+- replayed `POST /v1/chat/completions` requests
+- gateway lifecycle calls (`/job/start`, `/agent/start`, `/agent/end`, `/job/end`)
+
+If the plan includes `agent_timeout_s`, replay enforces that wall-clock limit
+per worker. For example, a plan compiled with `--agent-timeout-s 3000` will
+terminate a worker at about `3000s` even though the underlying HTTP request has
+no request timeout.
+
+The compile step still keeps its own tokenize timeout. The default is `3600.0s`.
+
+`replayer replay` can also run the same vLLM metrics monitor used by
+`con-driver`. The current replay defaults are:
+
+- sampling interval: `1.0s`
+- scrape timeout: `3600.0s`
+
+Replay uses the same defaults. When `port_profile_id` is available, vLLM logging
+defaults to enabled and resolves the metrics endpoint from the selected
+profile's `vllm_port`. There is no manual replay-side endpoint override.
+
+Example:
+
+```bash
+python -m replayer replay \
+  --plan tests/output/tmp-replay-plan-20260225T035758Z-v2.json \
+  --port-profile-id 1 \
+  --vllm-log
+```
+
+Replay vLLM metrics are written under:
+
+- `<replay-output>/vllm-log/`
+- `<replay-output>/vllm-log/monitor.stdout.log`
+- `<replay-output>/vllm-log/monitor.stderr.log`
+
+Each compressed block stores the raw `/metrics` response text per scrape, not a
+parsed Prometheus JSON structure.
 
 Replay can also override the compiled `launch_policy` while preserving the
 compiled worker/request structure. Pass a JSON object with the fields you want
@@ -97,6 +163,7 @@ Launch behavior:
 - replay does not require exact original absolute launch offsets
 - replay requires plans that include `launch_policy` (`config_ordered`)
 - replay targets the raw gateway listener, not `gateway_parse_port`
+- replay replays recorded `client_disconnected` requests as timed client-side cancellations rather than exact response-text comparisons
 
 ## Validation Script
 

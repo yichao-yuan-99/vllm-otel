@@ -73,6 +73,7 @@ Compile from full profiled job directory:
 ```bash
 python3 -m replayer compile \
   --job-dir "$RUN_DIR" \
+  --agent-timeout-s 3000 \
   --plan-out "$RUN_DIR/replay-plan.json"
 ```
 
@@ -80,6 +81,7 @@ Important:
 
 - input is the full job directory, not only `gateway-output`
 - compiled plan includes required `launch_policy` (`config_ordered`) extracted from `meta/config.toml[run]`
+- compiled plan may include `agent_timeout_s`; replay enforces that per-worker limit when present
 - if `meta/config.toml[runtime].port_profile_id` is present, replay endpoints are
   resolved from `configs/port_profiles.toml`
 - replay plans should target the raw gateway listener (`gateway_port`), not the

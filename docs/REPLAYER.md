@@ -26,6 +26,7 @@ Compile profile to plan:
 ```bash
 python -m replayer compile \
   --job-dir tests/output/con-driver/job-<timestamp> \
+  --agent-timeout-s 3000 \
   --plan-out tests/output/replay-plan.json
 ```
 

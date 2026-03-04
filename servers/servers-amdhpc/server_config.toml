@@ -20,11 +20,17 @@ ssh_options = [
   "-o", "ServerAliveCountMax=3",
 ]
 
+[partition.mi2104x]
+gpus_per_node = 4
+gpu_memory_gb = 64
+total_vram_gb = 256
+max_time = "24:00:00"
+
 [partition.mi2508x]
 gpus_per_node = 8
 gpu_memory_gb = 64
 total_vram_gb = 512
-max_time = "04:00:00"
+max_time = "12:00:00"
 
 [partition.mi3001x]
 gpus_per_node = 1
@@ -36,10 +42,10 @@ max_time = "04:00:00"
 gpus_per_node = 8
 gpu_memory_gb = 192
 total_vram_gb = 1536
-max_time = "04:00:00"
+max_time = "12:00:00"
 
 [partition.mi3258x]
 gpus_per_node = 8
 gpu_memory_gb = 256
 total_vram_gb = 2048
-max_time = "04:00:00"
+max_time = "12:00:00"

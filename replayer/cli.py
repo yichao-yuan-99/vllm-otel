@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import argparse
 import copy
+import http.client
 import hashlib
 import json
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, suppress
+from dataclasses import dataclass
 from random import Random
+import os
+import signal
+import socket
+import subprocess
 import sys
 import threading
 import time
@@ -74,6 +80,29 @@ def write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
 
 
+DEFAULT_VLLM_LOG_INTERVAL_S = 1.0
+DEFAULT_VLLM_LOG_TIMEOUT_S = 3600.0
+_MONITOR_INTERRUPT_GRACE_SEC = 3600.0
+_MONITOR_TERMINATE_GRACE_SEC = 3600.0
+
+
+@dataclass(frozen=True)
+class ReplayVLLMLogConfig:
+    enabled: bool
+    endpoint: str
+    interval_s: float
+    timeout_s: float
+
+
+@dataclass
+class ReplayVLLMMonitorProcess:
+    process: subprocess.Popen[str]
+    stdout_handle: Any
+    stderr_handle: Any
+    stdout_log: Path
+    stderr_log: Path
+
+
 class _NullProgress(AbstractContextManager["_NullProgress"]):
     def __enter__(self) -> "_NullProgress":
         return self
@@ -104,6 +133,138 @@ def create_replay_progress() -> Any:
         TimeElapsedColumn(),
         transient=False,
     )
+
+
+def create_compile_progress() -> Any:
+    if RichProgress is None:
+        return _NullProgress()
+    return RichProgress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]{task.description}[/bold blue]"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total} requests"),
+        TextColumn("workers={task.fields[workers_completed]}/{task.fields[workers_total]}"),
+        TimeElapsedColumn(),
+        transient=False,
+    )
+
+
+def resolve_replay_vllm_log_config(
+    *,
+    port_profile_id: int | None,
+    configured_vllm_log: bool | None,
+    interval_s: float,
+    timeout_s: float,
+) -> ReplayVLLMLogConfig:
+    enabled = (
+        configured_vllm_log
+        if configured_vllm_log is not None
+        else (True if port_profile_id is not None else False)
+    )
+    endpoint = ""
+    if port_profile_id is not None:
+        from gateway.port_profiles import load_port_profile
+
+        profile = load_port_profile(port_profile_id)
+        endpoint = f"http://127.0.0.1:{profile.vllm_port}/metrics"
+    if enabled and port_profile_id is None:
+        raise ValueError(
+            "vLLM metrics logging requires replay_target.port_profile_id or "
+            "--port-profile-id so the endpoint can be resolved from "
+            "configs/port_profiles.toml."
+        )
+    if interval_s <= 0:
+        raise ValueError("--vllm-log-interval-s must be > 0")
+    if timeout_s <= 0:
+        raise ValueError("--vllm-log-timeout-s must be > 0")
+    return ReplayVLLMLogConfig(
+        enabled=enabled,
+        endpoint=endpoint,
+        interval_s=interval_s,
+        timeout_s=timeout_s,
+    )
+
+
+def _build_monitor_env() -> dict[str, str]:
+    env = os.environ.copy()
+    repo_root = Path(__file__).resolve().parents[1]
+    con_driver_src = repo_root / "con-driver" / "src"
+    pythonpath_parts = [str(con_driver_src)]
+    if env.get("PYTHONPATH"):
+        pythonpath_parts.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+    return env
+
+
+def start_replay_vllm_monitor(
+    *,
+    output_dir: Path,
+    config: ReplayVLLMLogConfig,
+) -> ReplayVLLMMonitorProcess:
+    vllm_log_dir = output_dir / "vllm-log"
+    vllm_log_dir.mkdir(parents=True, exist_ok=True)
+    stdout_log = vllm_log_dir / "monitor.stdout.log"
+    stderr_log = vllm_log_dir / "monitor.stderr.log"
+    stdout_handle = stdout_log.open("w", encoding="utf-8")
+    stderr_handle = stderr_log.open("w", encoding="utf-8")
+    command = [
+        sys.executable,
+        "-m",
+        "con_driver.vllm_metrics_monitor",
+        "--endpoint",
+        config.endpoint,
+        "--output-dir",
+        str(vllm_log_dir),
+        "--interval-s",
+        str(config.interval_s),
+        "--timeout-s",
+        str(config.timeout_s),
+        "--block-size",
+        "100",
+    ]
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+            text=True,
+            env=_build_monitor_env(),
+        )
+    except Exception:
+        stdout_handle.close()
+        stderr_handle.close()
+        raise
+    return ReplayVLLMMonitorProcess(
+        process=process,
+        stdout_handle=stdout_handle,
+        stderr_handle=stderr_handle,
+        stdout_log=stdout_log,
+        stderr_log=stderr_log,
+    )
+
+
+def stop_replay_vllm_monitor(monitor: ReplayVLLMMonitorProcess) -> int:
+    process = monitor.process
+    try:
+        if process.poll() is None:
+            process.send_signal(signal.SIGINT)
+            try:
+                process.wait(timeout=_MONITOR_INTERRUPT_GRACE_SEC)
+            except subprocess.TimeoutExpired:
+                if process.poll() is None:
+                    process.terminate()
+                try:
+                    process.wait(timeout=_MONITOR_TERMINATE_GRACE_SEC)
+                except subprocess.TimeoutExpired:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait()
+        else:
+            process.wait()
+    finally:
+        monitor.stdout_handle.close()
+        monitor.stderr_handle.close()
+    return int(process.returncode if process.returncode is not None else 1)
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -156,7 +317,7 @@ def http_json(
     method: str,
     url: str,
     payload: Any,
-    timeout_s: float,
+    timeout_s: float | None,
     headers: dict[str, str] | None = None,
 ) -> tuple[int, Any]:
     req_headers = {"content-type": "application/json"}
@@ -170,7 +331,11 @@ def http_json(
         method=method.upper(),
     )
     try:
-        with url_request.urlopen(req, timeout=timeout_s) as resp:
+        if timeout_s is None:
+            resp_cm = url_request.urlopen(req)
+        else:
+            resp_cm = url_request.urlopen(req, timeout=timeout_s)
+        with resp_cm as resp:
             status = int(resp.getcode())
             raw = resp.read().decode("utf-8", errors="replace")
     except url_error.HTTPError as exc:
@@ -181,12 +346,16 @@ def http_json(
     except TimeoutError as exc:
         raise RuntimeError(f"HTTP request timed out: {method} {url}") from exc
 
+    return status, decode_json_response_body(raw)
+
+
+def decode_json_response_body(raw: str) -> Any:
     if not raw:
-        return status, {}
+        return {}
     try:
-        return status, json.loads(raw)
+        return json.loads(raw)
     except Exception:
-        return status, {"raw_body": raw}
+        return {"raw_body": raw}
 
 
 def require_file(path: Path) -> None:
@@ -608,6 +777,166 @@ def tokenize_response_text(
     return tokens
 
 
+def is_client_disconnected_record(record: dict[str, Any]) -> bool:
+    status_code = record.get("status_code")
+    if isinstance(status_code, bool):
+        status_code = None
+    response_payload = record.get("response")
+    if not isinstance(response_payload, dict):
+        return False
+    error_name = response_payload.get("error")
+    if error_name != "client_disconnected":
+        return False
+    return status_code in {None, 499}
+
+
+def request_duration_seconds(record: dict[str, Any]) -> float:
+    duration_ms = record.get("request_duration_ms")
+    if not isinstance(duration_ms, (int, float)) or isinstance(duration_ms, bool):
+        duration_ms = record.get("duration_ms")
+    if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool):
+        return round(max(0.0, float(duration_ms) / 1000.0), 6)
+    return round(
+        max(0.0, (parse_request_end(record) - parse_request_start(record)).total_seconds()),
+        6,
+    )
+
+
+def parse_required_positive_timeout_s(value: Any, *, field_name: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a positive number")
+    if isinstance(value, (int, float)):
+        timeout_s = float(value)
+    elif isinstance(value, str) and value.strip():
+        timeout_s = float(value.strip())
+    else:
+        raise ValueError(f"{field_name} is required")
+    if timeout_s <= 0:
+        raise ValueError(f"{field_name} must be > 0")
+    return timeout_s
+
+
+def parse_optional_positive_timeout_s(value: Any, *, field_name: str) -> float | None:
+    if value is None:
+        return None
+    return parse_required_positive_timeout_s(value, field_name=field_name)
+
+
+CLIENT_DISCONNECT_ACCEPTABLE_GATEWAY_ERROR_MIN_S = 60.0
+
+
+def build_client_disconnect_request_body(request_body: dict[str, Any]) -> dict[str, Any]:
+    body = copy.deepcopy(request_body)
+    body.pop("stop", None)
+    body.pop("stop_token_ids", None)
+    body.pop("max_tokens", None)
+    body.pop("max_completion_tokens", None)
+    body["ignore_eos"] = True
+
+    vllm_xargs = body.get("vllm_xargs")
+    if isinstance(vllm_xargs, dict):
+        cleaned_vllm_xargs = copy.deepcopy(vllm_xargs)
+        cleaned_vllm_xargs.pop("forced_token_ids", None)
+        cleaned_vllm_xargs.pop("force_eos_after_sequence", None)
+        if cleaned_vllm_xargs:
+            body["vllm_xargs"] = cleaned_vllm_xargs
+        else:
+            body.pop("vllm_xargs", None)
+    return body
+
+
+def build_planned_request(
+    *,
+    record: dict[str, Any],
+    index: int,
+    configured_model: str,
+    tokenize_endpoint: str,
+    request_timeout_s: float,
+    delta_agent_action_after_s: float,
+) -> dict[str, Any]:
+    request_body = record.get("request")
+    if not isinstance(request_body, dict):
+        raise ValueError(f"Request body must be object at index={index}")
+    request_body = copy.deepcopy(request_body)
+
+    record_model = record.get("model")
+    model_for_tokenize: str | None = None
+    if isinstance(record_model, str) and record_model.strip():
+        model_for_tokenize = record_model.strip()
+    else:
+        payload_model = request_body.get("model")
+        if isinstance(payload_model, str) and payload_model.strip():
+            model_for_tokenize = payload_model.strip()
+    if not model_for_tokenize:
+        model_for_tokenize = configured_model
+
+    method = record.get("http_method")
+    path = record.get("http_path")
+    if not isinstance(method, str) or not method:
+        method = "POST"
+    if not isinstance(path, str) or not path:
+        path = "v1/chat/completions"
+
+    if is_client_disconnected_record(record):
+        request_duration_s = request_duration_seconds(record)
+        request_body = build_client_disconnect_request_body(request_body)
+        return {
+            "index": index,
+            "request_id": record.get("request_id"),
+            "method": method.upper(),
+            "path": path,
+            "body": request_body,
+            "model_for_tokenize": model_for_tokenize,
+            "delta_agent_action_after_s": delta_agent_action_after_s,
+            "replay_mode": "client_disconnect_after_duration",
+            "cancel_after_s": request_duration_s,
+            "expected_status_code": 499,
+            "expected_error": "client_disconnected",
+            "expected_response_text": None,
+            "forced_token_ids": None,
+            "force_eos_after_sequence": False,
+        }
+
+    response_text = extract_response_text(record.get("response"))
+    forced_token_ids = tokenize_response_text(
+        tokenize_endpoint=tokenize_endpoint,
+        model_name=model_for_tokenize,
+        text=response_text,
+        timeout_s=request_timeout_s,
+    )
+
+    vllm_xargs = request_body.get("vllm_xargs")
+    if not isinstance(vllm_xargs, dict):
+        vllm_xargs = {}
+    vllm_xargs["forced_token_ids"] = forced_token_ids
+    vllm_xargs["force_eos_after_sequence"] = True
+    request_body["vllm_xargs"] = vllm_xargs
+
+    max_tokens_required = len(forced_token_ids) + 1
+    current_max_tokens = request_body.get("max_tokens")
+    if not isinstance(current_max_tokens, int) or isinstance(current_max_tokens, bool):
+        current_max_tokens = 0
+    if current_max_tokens < max_tokens_required:
+        request_body["max_tokens"] = max_tokens_required
+
+    return {
+        "index": index,
+        "request_id": record.get("request_id"),
+        "method": method.upper(),
+        "path": path,
+        "body": request_body,
+        "model_for_tokenize": model_for_tokenize,
+        "delta_agent_action_after_s": delta_agent_action_after_s,
+        "replay_mode": "deterministic_forced_tokens",
+        "cancel_after_s": None,
+        "expected_status_code": int(record.get("status_code", 200) or 200),
+        "expected_error": None,
+        "expected_response_text": response_text,
+        "forced_token_ids": forced_token_ids,
+        "force_eos_after_sequence": True,
+    }
+
+
 def parse_agent_action_durations(jaeger_payload: dict[str, Any]) -> list[float]:
     data = jaeger_payload.get("data")
     if not isinstance(data, list) or not data:
@@ -695,6 +1024,10 @@ def cmd_compile(args: argparse.Namespace) -> int:
     backend_name = detect_backend(config, args.backend)
     if backend_name != "harbor":
         raise ValueError(f"unsupported backend: {backend_name!r}")
+    agent_timeout_s = parse_optional_positive_timeout_s(
+        getattr(args, "agent_timeout_s", None),
+        field_name="--agent-timeout-s",
+    )
 
     (
         gateway_url,
@@ -734,153 +1067,158 @@ def cmd_compile(args: argparse.Namespace) -> int:
     if not gateway_output_dir.exists() or not gateway_output_dir.is_dir():
         raise ValueError(f"Missing gateway-output directory: {gateway_output_dir}")
 
-    worker_plans: list[dict[str, Any]] = []
+    run_infos: list[tuple[Path, dict[str, Any], int]] = []
+    total_requests = 0
     for run_dir in sorted(gateway_output_dir.glob("run_*")):
         if not run_dir.is_dir():
             continue
         manifest_path = run_dir / "manifest.json"
-        lifecycle_path = run_dir / "events" / "lifecycle.jsonl"
-        requests_path = run_dir / "requests" / "model_inference.jsonl"
-        jaeger_path = run_dir / "trace" / "jaeger_trace.json"
-        for path in [manifest_path, lifecycle_path, requests_path, jaeger_path]:
-            require_file(path)
-
+        require_file(manifest_path)
         run_manifest_payload = read_json(manifest_path)
         if not isinstance(run_manifest_payload, dict):
             raise ValueError(f"Invalid JSON object: {manifest_path}")
+        request_count_raw = run_manifest_payload.get("request_count")
+        request_count = 0
+        if isinstance(request_count_raw, int) and not isinstance(request_count_raw, bool):
+            request_count = max(0, request_count_raw)
+        run_infos.append((run_dir, run_manifest_payload, request_count))
+        total_requests += request_count
 
-        token_hash = run_manifest_payload.get("api_token_hash")
-        run_start_raw = run_manifest_payload.get("run_start_time")
-        if not isinstance(token_hash, str) or not token_hash:
-            raise ValueError(f"Missing api_token_hash in {manifest_path}")
-        if not isinstance(run_start_raw, str) or not run_start_raw:
-            raise ValueError(f"Missing run_start_time in {manifest_path}")
-
-        trial_id = hash_to_trial.get(token_hash)
-        if not trial_id:
-            raise ValueError(
-                f"No trial mapping for api_token_hash={token_hash} in {manifest_path}"
-            )
-        api_token = trial_to_token.get(trial_id)
-        if not api_token:
-            raise ValueError(f"Missing api token for trial={trial_id}")
-
-        run_start_dt = parse_iso8601(run_start_raw)
-        run_offset_s = round((run_start_dt - t0_dt).total_seconds(), 6)
-        if run_offset_s < 0:
-            raise ValueError(f"run_offset_s is negative for {run_dir.name}: {run_offset_s}")
-
-        lifecycle_records = read_jsonl(lifecycle_path)
-        agent_start_dt = extract_agent_start_time(lifecycle_records)
-        agent_end_dt = extract_agent_end_time(lifecycle_records)
-        delta_agent_start_s = round(
-            max(0.0, (agent_start_dt - run_start_dt).total_seconds()),
-            6,
+    worker_plans: list[dict[str, Any]] = []
+    compile_progress_state = {
+        "workers_completed": 0,
+        "workers_total": len(run_infos),
+        "requests_total": total_requests,
+    }
+    with create_compile_progress() as progress:
+        progress_task_id = progress.add_task(
+            "compiling replay plan",
+            total=compile_progress_state["requests_total"],
+            workers_completed=compile_progress_state["workers_completed"],
+            workers_total=compile_progress_state["workers_total"],
         )
 
-        request_records = read_jsonl(requests_path)
-        request_records.sort(key=parse_request_start)
-        if request_records:
-            delta_first_request_s = round(
-                max(0.0, (parse_request_start(request_records[0]) - agent_start_dt).total_seconds()),
+        def _update_compile_progress(*, advance: int = 0, request_total_delta: int = 0) -> None:
+            if request_total_delta:
+                compile_progress_state["requests_total"] = max(
+                    0,
+                    compile_progress_state["requests_total"] + request_total_delta,
+                )
+            progress.update(
+                progress_task_id,
+                advance=advance,
+                total=compile_progress_state["requests_total"],
+                workers_completed=compile_progress_state["workers_completed"],
+                workers_total=compile_progress_state["workers_total"],
+            )
+
+        for run_dir, run_manifest_payload, expected_request_count in run_infos:
+            manifest_path = run_dir / "manifest.json"
+            lifecycle_path = run_dir / "events" / "lifecycle.jsonl"
+            requests_path = run_dir / "requests" / "model_inference.jsonl"
+            jaeger_path = run_dir / "trace" / "jaeger_trace.json"
+            for path in [manifest_path, lifecycle_path, requests_path, jaeger_path]:
+                require_file(path)
+
+            token_hash = run_manifest_payload.get("api_token_hash")
+            run_start_raw = run_manifest_payload.get("run_start_time")
+            if not isinstance(token_hash, str) or not token_hash:
+                raise ValueError(f"Missing api_token_hash in {manifest_path}")
+            if not isinstance(run_start_raw, str) or not run_start_raw:
+                raise ValueError(f"Missing run_start_time in {manifest_path}")
+
+            trial_id = hash_to_trial.get(token_hash)
+            if not trial_id:
+                raise ValueError(
+                    f"No trial mapping for api_token_hash={token_hash} in {manifest_path}"
+                )
+            api_token = trial_to_token.get(trial_id)
+            if not api_token:
+                raise ValueError(f"Missing api token for trial={trial_id}")
+
+            run_start_dt = parse_iso8601(run_start_raw)
+            run_offset_s = round((run_start_dt - t0_dt).total_seconds(), 6)
+            if run_offset_s < 0:
+                raise ValueError(
+                    f"run_offset_s is negative for {run_dir.name}: {run_offset_s}"
+                )
+
+            lifecycle_records = read_jsonl(lifecycle_path)
+            agent_start_dt = extract_agent_start_time(lifecycle_records)
+            agent_end_dt = extract_agent_end_time(lifecycle_records)
+            delta_agent_start_s = round(
+                max(0.0, (agent_start_dt - run_start_dt).total_seconds()),
                 6,
             )
-        else:
-            delta_first_request_s = 0.0
 
-        jaeger_payload = read_json(jaeger_path)
-        if not isinstance(jaeger_payload, dict):
-            raise ValueError(f"Invalid jaeger payload in {jaeger_path}")
-        agent_action_durations = parse_agent_action_durations(jaeger_payload)
-        if request_records:
-            final_agent_tail_s = max(
-                0.0,
-                (agent_end_dt - parse_request_end(request_records[-1])).total_seconds(),
-            )
-        else:
-            final_agent_tail_s = max(0.0, (agent_end_dt - agent_start_dt).total_seconds())
-        delta_agent_action_after = compute_agent_action_deltas(
-            request_records,
-            agent_action_durations,
-            final_agent_tail_s=final_agent_tail_s,
-        )
-
-        planned_requests: list[dict[str, Any]] = []
-        for index, record in enumerate(request_records):
-            request_body = record.get("request")
-            if not isinstance(request_body, dict):
-                raise ValueError(
-                    f"Request body must be object in {requests_path} at index={index}"
+            request_records = read_jsonl(requests_path)
+            request_records.sort(key=parse_request_start)
+            actual_request_count = len(request_records)
+            if actual_request_count != expected_request_count:
+                _update_compile_progress(
+                    request_total_delta=actual_request_count - expected_request_count
                 )
-            request_body = copy.deepcopy(request_body)
-
-            record_model = record.get("model")
-            model_for_tokenize: str | None = None
-            if isinstance(record_model, str) and record_model.strip():
-                model_for_tokenize = record_model.strip()
+            if request_records:
+                delta_first_request_s = round(
+                    max(
+                        0.0,
+                        (parse_request_start(request_records[0]) - agent_start_dt).total_seconds(),
+                    ),
+                    6,
+                )
             else:
-                payload_model = request_body.get("model")
-                if isinstance(payload_model, str) and payload_model.strip():
-                    model_for_tokenize = payload_model.strip()
-            if not model_for_tokenize:
-                model_for_tokenize = configured_model
+                delta_first_request_s = 0.0
 
-            response_text = extract_response_text(record.get("response"))
-            forced_token_ids = tokenize_response_text(
-                tokenize_endpoint=tokenize_endpoint,
-                model_name=model_for_tokenize,
-                text=response_text,
-                timeout_s=args.request_timeout_s,
+            jaeger_payload = read_json(jaeger_path)
+            if not isinstance(jaeger_payload, dict):
+                raise ValueError(f"Invalid jaeger payload in {jaeger_path}")
+            agent_action_durations = parse_agent_action_durations(jaeger_payload)
+            if request_records:
+                final_agent_tail_s = max(
+                    0.0,
+                    (agent_end_dt - parse_request_end(request_records[-1])).total_seconds(),
+                )
+            else:
+                final_agent_tail_s = max(
+                    0.0,
+                    (agent_end_dt - agent_start_dt).total_seconds(),
+                )
+            delta_agent_action_after = compute_agent_action_deltas(
+                request_records,
+                agent_action_durations,
+                final_agent_tail_s=final_agent_tail_s,
             )
 
-            vllm_xargs = request_body.get("vllm_xargs")
-            if not isinstance(vllm_xargs, dict):
-                vllm_xargs = {}
-            vllm_xargs["forced_token_ids"] = forced_token_ids
-            vllm_xargs["force_eos_after_sequence"] = True
-            request_body["vllm_xargs"] = vllm_xargs
+            planned_requests: list[dict[str, Any]] = []
+            for index, record in enumerate(request_records):
+                planned_requests.append(
+                    build_planned_request(
+                        record=record,
+                        index=index,
+                        configured_model=configured_model,
+                        tokenize_endpoint=tokenize_endpoint,
+                        request_timeout_s=args.request_timeout_s,
+                        delta_agent_action_after_s=delta_agent_action_after[index],
+                    )
+                )
+                _update_compile_progress(advance=1)
 
-            max_tokens_required = len(forced_token_ids) + 1
-            current_max_tokens = request_body.get("max_tokens")
-            if not isinstance(current_max_tokens, int) or current_max_tokens < max_tokens_required:
-                request_body["max_tokens"] = max_tokens_required
-
-            method = record.get("http_method")
-            path = record.get("http_path")
-            if not isinstance(method, str) or not method:
-                method = "POST"
-            if not isinstance(path, str) or not path:
-                path = "v1/chat/completions"
-
-            planned_requests.append(
+            worker_plans.append(
                 {
-                    "index": index,
-                    "request_id": record.get("request_id"),
-                    "method": method.upper(),
-                    "path": path,
-                    "body": request_body,
-                    "model_for_tokenize": model_for_tokenize,
-                    "delta_agent_action_after_s": delta_agent_action_after[index],
-                    "expected_response_text": response_text,
-                    "forced_token_ids": forced_token_ids,
-                    "force_eos_after_sequence": True,
+                    "worker_id": trial_id,
+                    "trial_id": trial_id,
+                    "api_token": api_token,
+                    "api_token_hash": token_hash,
+                    "trace_id": run_manifest_payload.get("trace_id"),
+                    "run_start_time": to_iso8601_utc(run_start_dt),
+                    "run_offset_s": run_offset_s,
+                    "delta_agent_start_s": delta_agent_start_s,
+                    "delta_first_request_s": delta_first_request_s,
+                    "requests": planned_requests,
                 }
             )
-
-        worker_plans.append(
-            {
-                "worker_id": trial_id,
-                "trial_id": trial_id,
-                "api_token": api_token,
-                "api_token_hash": token_hash,
-                "trace_id": run_manifest_payload.get("trace_id"),
-                "run_start_time": to_iso8601_utc(run_start_dt),
-                "run_offset_s": run_offset_s,
-                "delta_agent_start_s": delta_agent_start_s,
-                "delta_first_request_s": delta_first_request_s,
-                "requests": planned_requests,
-            }
-        )
+            compile_progress_state["workers_completed"] += 1
+            _update_compile_progress()
 
     worker_plans.sort(key=lambda item: (float(item["run_offset_s"]), str(item["worker_id"])))
     for launch_priority, worker in enumerate(worker_plans):
@@ -909,6 +1247,8 @@ def cmd_compile(args: argparse.Namespace) -> int:
         "launch_policy": launch_policy,
         "workers": worker_plans,
     }
+    if agent_timeout_s is not None:
+        plan_payload["agent_timeout_s"] = agent_timeout_s
     write_json(plan_path, plan_payload)
 
     summary = {
@@ -920,6 +1260,8 @@ def cmd_compile(args: argparse.Namespace) -> int:
         "request_count": sum(len(worker["requests"]) for worker in worker_plans),
         "port_profile_id": replay_port_profile_id,
     }
+    if agent_timeout_s is not None:
+        summary["agent_timeout_s"] = agent_timeout_s
     print(json.dumps(summary, indent=2, ensure_ascii=True))
     return 0
 
@@ -954,6 +1296,188 @@ def resolve_gateway_lifecycle_mode(
         return False
     expected_prefix = f"{gateway_url.rstrip('/')}/v1"
     return api_base.rstrip("/").startswith(expected_prefix)
+
+
+def timed_cancel_http_json(
+    *,
+    method: str,
+    url: str,
+    payload: Any,
+    cancel_after_s: float,
+    connect_timeout_s: float | None,
+    headers: dict[str, str] | None = None,
+    stop_event: threading.Event | None = None,
+) -> dict[str, Any]:
+    start_time = time.monotonic()
+    parsed_url = urlparse(url)
+    if parsed_url.scheme not in {"http", "https"}:
+        raise RuntimeError(f"Unsupported URL scheme for timed cancel replay: {url}")
+
+    host = parsed_url.hostname
+    if not host:
+        raise RuntimeError(f"Missing hostname in replay URL: {url}")
+    port = parsed_url.port
+    if port is None:
+        port = 443 if parsed_url.scheme == "https" else 80
+    path = parsed_url.path or "/"
+    if parsed_url.query:
+        path = f"{path}?{parsed_url.query}"
+
+    req_headers = {"content-type": "application/json"}
+    if headers:
+        req_headers.update(headers)
+    body_bytes = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+
+    if parsed_url.scheme == "https":
+        connection: http.client.HTTPConnection = http.client.HTTPSConnection(
+            host,
+            port,
+            timeout=connect_timeout_s,
+        )
+    else:
+        connection = http.client.HTTPConnection(
+            host,
+            port,
+            timeout=connect_timeout_s,
+        )
+
+    try:
+        connection.connect()
+        if connection.sock is not None:
+            connection.sock.settimeout(None)
+    except Exception as exc:
+        connection.close()
+        raise RuntimeError(f"Timed cancel replay failed to connect: {method} {url}: {exc}") from exc
+
+    state: dict[str, Any] = {
+        "completed": False,
+        "response_status": None,
+        "response_started": False,
+        "response_payload": None,
+        "error": None,
+    }
+    finished = threading.Event()
+
+    def _request_thread() -> None:
+        try:
+            connection.request(method.upper(), path, body=body_bytes, headers=req_headers)
+            response = connection.getresponse()
+            state["response_started"] = True
+            state["response_status"] = int(response.status)
+            raw_chunks: list[bytes] = []
+            while True:
+                chunk = response.read(64 * 1024)
+                if not chunk:
+                    break
+                raw_chunks.append(chunk)
+            raw_body = b"".join(raw_chunks).decode("utf-8", errors="replace")
+            state["response_payload"] = decode_json_response_body(raw_body)
+            state["completed"] = True
+        except Exception as exc:  # noqa: BLE001
+            state["error"] = str(exc)
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=_request_thread, name="replay-timed-cancel-http")
+    thread.daemon = True
+    thread.start()
+
+    if stop_event is None:
+        interrupted = False
+        completed_before_deadline = finished.wait(timeout=max(0.0, cancel_after_s))
+    else:
+        completed_before_deadline = False
+        interrupted = False
+        deadline = time.monotonic() + max(0.0, cancel_after_s)
+        while not finished.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            wait_slice = min(0.2, remaining)
+            if stop_event.wait(timeout=wait_slice):
+                interrupted = True
+                break
+        completed_before_deadline = finished.is_set()
+
+    if completed_before_deadline:
+        connection.close()
+        thread.join(timeout=1.0)
+        return {
+            "outcome": "completed_early",
+            "elapsed_s": max(0.0, time.monotonic() - start_time),
+            "response_status": state["response_status"],
+            "response_payload": state["response_payload"],
+            "error": state["error"],
+        }
+
+    try:
+        if connection.sock is not None:
+            with suppress(Exception):
+                connection.sock.shutdown(socket.SHUT_RDWR)
+    finally:
+        connection.close()
+    thread.join(timeout=max(1.0, min(10.0, max(1.0, cancel_after_s * 0.05))))
+
+    if thread.is_alive():
+        return {
+            "outcome": "cancel_failed",
+            "elapsed_s": max(0.0, time.monotonic() - start_time),
+            "response_status": state["response_status"],
+            "response_payload": state["response_payload"],
+            "error": state["error"],
+        }
+    if interrupted:
+        return {
+            "outcome": "stopped",
+            "elapsed_s": max(0.0, time.monotonic() - start_time),
+            "response_status": state["response_status"],
+            "response_payload": state["response_payload"],
+            "error": state["error"],
+        }
+    return {
+        "outcome": "cancelled",
+        "elapsed_s": max(0.0, time.monotonic() - start_time),
+        "response_status": state["response_status"],
+        "response_payload": state["response_payload"],
+        "error": state["error"],
+    }
+
+
+def is_acceptable_client_disconnect_early_error(timed_result: dict[str, Any]) -> bool:
+    response_status = timed_result.get("response_status")
+    elapsed_s = timed_result.get("elapsed_s")
+    if not isinstance(response_status, int) or response_status < 400:
+        return False
+    if not isinstance(elapsed_s, (int, float)) or isinstance(elapsed_s, bool):
+        return False
+    return float(elapsed_s) >= CLIENT_DISCONNECT_ACCEPTABLE_GATEWAY_ERROR_MIN_S
+
+
+def sleep_with_stop_or_deadline(
+    stop_event: threading.Event,
+    *,
+    seconds: float,
+    deadline_at: float | None,
+) -> str:
+    if deadline_at is not None and time.monotonic() >= deadline_at:
+        return "deadline"
+    if seconds <= 0:
+        return "ok" if not stop_event.is_set() else "stopped"
+
+    effective_deadline = time.monotonic() + seconds
+    if deadline_at is not None:
+        effective_deadline = min(effective_deadline, deadline_at)
+
+    while not stop_event.is_set():
+        remaining = effective_deadline - time.monotonic()
+        if remaining <= 0:
+            if deadline_at is not None and time.monotonic() >= deadline_at:
+                return "deadline"
+            return "ok"
+        if stop_event.wait(timeout=min(0.2, remaining)):
+            return "stopped"
+
+    return "stopped"
 
 
 def _normalize_launch_pattern_name(value: Any) -> str:
@@ -1132,6 +1656,10 @@ def cmd_replay(args: argparse.Namespace) -> int:
         replay_target=replay_target,
         port_profile_id_override=args.port_profile_id,
     )
+    resolved_port_profile_id_int = parse_port_profile_id(
+        resolved_port_profile_id,
+        field_name="resolved replay port_profile_id",
+    )
 
     workers = plan.get("workers")
     if not isinstance(workers, list):
@@ -1139,6 +1667,10 @@ def cmd_replay(args: argparse.Namespace) -> int:
     for worker in workers:
         if not isinstance(worker, dict):
             raise ValueError("Worker item must be an object")
+    agent_timeout_s = parse_optional_positive_timeout_s(
+        plan.get("agent_timeout_s"),
+        field_name="plan.agent_timeout_s",
+    )
 
     launch_policy_payload = plan.get("launch_policy")
     if not isinstance(launch_policy_payload, dict):
@@ -1170,6 +1702,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
         replay_name = f"{safe_name(source_name)}.replayed-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
         output_dir = (plan_path.parent / replay_name).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    replay_http_timeout_s: float | None = None
 
     workers_dir = output_dir / "replay" / "workers"
     workers_dir.mkdir(parents=True, exist_ok=True)
@@ -1180,6 +1713,12 @@ def cmd_replay(args: argparse.Namespace) -> int:
         args.gateway_lifecycle,
         gateway_url,
         api_base,
+    )
+    vllm_log_config = resolve_replay_vllm_log_config(
+        port_profile_id=resolved_port_profile_id_int,
+        configured_vllm_log=args.vllm_log,
+        interval_s=args.vllm_log_interval_s,
+        timeout_s=args.vllm_log_timeout_s,
     )
 
     stop_event = threading.Event()
@@ -1198,15 +1737,24 @@ def cmd_replay(args: argparse.Namespace) -> int:
         "launch_pattern_rate_per_second": launch_pattern_rate_per_second,
         "launch_policy_overrides": launch_policy_overrides,
         "effective_launch_policy": effective_launch_policy,
+        "vllm_log_enabled": vllm_log_config.enabled,
+        "vllm_log_endpoint": vllm_log_config.endpoint,
+        "vllm_log_interval_s": vllm_log_config.interval_s,
+        "vllm_log_timeout_s": vllm_log_config.timeout_s,
+        "vllm_log_dir": str(output_dir / "vllm-log") if vllm_log_config.enabled else None,
         "workers_total": len(workers),
         "workers_completed": 0,
         "workers_failed": 0,
+        "workers_timed_out": 0,
         "requests_sent": 0,
         "requests_failed": 0,
     }
+    if agent_timeout_s is not None:
+        summary["agent_timeout_s"] = agent_timeout_s
     progress_nonlocal: list[Any] = [_NullProgress()]
     progress_task_id_nonlocal = [0]
     progress_state = {"launched": 0, "active": 0}
+    summary_path = output_dir / "replay" / "summary.json"
 
     def _update_progress(*, advance: int = 0) -> None:
         progress_nonlocal[0].update(
@@ -1224,7 +1772,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
             method="POST",
             url=join_url(gateway_url, path),
             payload=payload,
-            timeout_s=args.request_timeout_s,
+            timeout_s=replay_http_timeout_s,
         )
         if status >= 400:
             raise RuntimeError(
@@ -1232,13 +1780,11 @@ def cmd_replay(args: argparse.Namespace) -> int:
             )
         return response_payload
 
-    if use_gateway_lifecycle:
-        gateway_output_dir = output_dir / "gateway-output"
-        gateway_output_dir.mkdir(parents=True, exist_ok=True)
-        call_gateway(
-            "/job/start",
-            {"output_location": str(gateway_output_dir)},
-        )
+    monitor: ReplayVLLMMonitorProcess | None = None
+    if vllm_log_config.enabled:
+        monitor = start_replay_vllm_monitor(output_dir=output_dir, config=vllm_log_config)
+        summary["vllm_log_stdout"] = str(monitor.stdout_log)
+        summary["vllm_log_stderr"] = str(monitor.stderr_log)
 
     def worker_fn(worker: dict[str, Any]) -> None:
         worker_id = str(worker.get("worker_id") or worker.get("trial_id") or "worker")
@@ -1252,6 +1798,8 @@ def cmd_replay(args: argparse.Namespace) -> int:
             "requests_failed": 0,
             "error": None,
         }
+        if agent_timeout_s is not None:
+            record["agent_timeout_s"] = agent_timeout_s
 
         api_token = worker.get("api_token")
         if not isinstance(api_token, str) or not api_token:
@@ -1270,9 +1818,24 @@ def cmd_replay(args: argparse.Namespace) -> int:
                     )
                 call_gateway("/agent/start", {"api_token": api_token})
 
+            agent_deadline_at = (
+                time.monotonic() + agent_timeout_s
+                if agent_timeout_s is not None
+                else None
+            )
+
             delta_first_request_s = float(worker.get("delta_first_request_s", 0.0))
-            if not sleep_with_stop(stop_event, max(0.0, delta_first_request_s)):
+            sleep_result = sleep_with_stop_or_deadline(
+                stop_event,
+                seconds=max(0.0, delta_first_request_s),
+                deadline_at=agent_deadline_at,
+            )
+            if sleep_result == "stopped":
                 record["status"] = "cancelled"
+                return
+            if sleep_result == "deadline":
+                record["status"] = "timed_out"
+                record["error"] = f"agent timeout exceeded after {agent_timeout_s:.3f}s"
                 return
 
             planned_requests = worker.get("requests")
@@ -1298,71 +1861,190 @@ def cmd_replay(args: argparse.Namespace) -> int:
                 if api_token:
                     headers["x-api-key"] = api_token
 
-                status, response_payload = http_json(
-                    method=method,
-                    url=join_url(api_base, path),
-                    payload=body,
-                    timeout_s=args.request_timeout_s,
-                    headers=headers,
-                )
-                with lock:
-                    summary["requests_sent"] += 1
-                if status >= 400:
-                    record["requests_failed"] += 1
-                    with lock:
-                        summary["requests_failed"] += 1
-                    raise RuntimeError(
-                        f"Replay request failed: worker={worker_id}, "
-                        f"path={path}, status={status}, response={response_payload}"
-                    )
+                remaining_agent_s: float | None
+                if agent_deadline_at is None:
+                    remaining_agent_s = None
+                else:
+                    remaining_agent_s = max(0.0, agent_deadline_at - time.monotonic())
+                    if remaining_agent_s <= 0:
+                        record["status"] = "timed_out"
+                        record["error"] = f"agent timeout exceeded after {agent_timeout_s:.3f}s"
+                        return
 
-                expected_response_text = req.get("expected_response_text")
-                if not isinstance(expected_response_text, str):
-                    record["requests_failed"] += 1
-                    with lock:
-                        summary["requests_failed"] += 1
-                    raise RuntimeError(
-                        "Replay request is missing expected_response_text in plan: "
-                        f"worker={worker_id}, path={path}"
+                replay_mode = str(req.get("replay_mode") or "deterministic_forced_tokens")
+                if replay_mode == "client_disconnect_after_duration":
+                    cancel_after_s = float(req.get("cancel_after_s", 0.0))
+                    if remaining_agent_s is None:
+                        effective_cancel_after_s = cancel_after_s
+                        agent_timeout_wins = False
+                    else:
+                        effective_cancel_after_s = min(cancel_after_s, remaining_agent_s)
+                        agent_timeout_wins = remaining_agent_s <= cancel_after_s
+                    timed_result = timed_cancel_http_json(
+                        method=method,
+                        url=join_url(api_base, path),
+                        payload=body,
+                        cancel_after_s=effective_cancel_after_s,
+                        connect_timeout_s=replay_http_timeout_s,
+                        headers=headers,
+                        stop_event=stop_event,
                     )
-                try:
-                    actual_response_text = extract_response_text(response_payload)
-                except Exception as exc:  # noqa: BLE001
-                    record["requests_failed"] += 1
                     with lock:
-                        summary["requests_failed"] += 1
-                    raise RuntimeError(
-                        "Failed to extract response text from replay response: "
-                        f"worker={worker_id}, path={path}, error={exc}"
-                    ) from exc
-                if actual_response_text != expected_response_text:
-                    record["requests_failed"] += 1
-                    with lock:
-                        summary["requests_failed"] += 1
-                    raise RuntimeError(
-                        "Replay response text mismatch: "
-                        f"worker={worker_id}, path={path}, "
-                        f"expected={expected_response_text!r}, "
-                        f"actual={actual_response_text!r}"
-                    )
+                        summary["requests_sent"] += 1
+                    outcome = timed_result.get("outcome")
+                    if outcome == "stopped":
+                        record["status"] = "cancelled"
+                        return
+                    if outcome == "cancelled" and agent_timeout_wins:
+                        record["status"] = "timed_out"
+                        record["error"] = (
+                            f"agent timeout exceeded after {agent_timeout_s:.3f}s"
+                        )
+                        record["requests_failed"] += 1
+                        with lock:
+                            summary["requests_failed"] += 1
+                        return
+                    if (
+                        outcome == "completed_early"
+                        and is_acceptable_client_disconnect_early_error(timed_result)
+                    ):
+                        record["requests_succeeded"] += 1
+                        sleep_result = sleep_with_stop_or_deadline(
+                            stop_event,
+                            seconds=float(req.get("delta_agent_action_after_s", 0.0)),
+                            deadline_at=agent_deadline_at,
+                        )
+                        if sleep_result == "stopped":
+                            record["status"] = "cancelled"
+                            return
+                        if sleep_result == "deadline":
+                            record["status"] = "timed_out"
+                            record["error"] = (
+                                f"agent timeout exceeded after {agent_timeout_s:.3f}s"
+                            )
+                            return
+                        continue
+                    if outcome != "cancelled":
+                        record["requests_failed"] += 1
+                        with lock:
+                            summary["requests_failed"] += 1
+                        raise RuntimeError(
+                            "Timed disconnect replay did not cancel cleanly: "
+                            f"worker={worker_id}, path={path}, outcome={outcome}, "
+                            f"response_status={timed_result.get('response_status')}, "
+                            f"error={timed_result.get('error')}"
+                        )
+                else:
+                    if remaining_agent_s is None:
+                        status, response_payload = http_json(
+                            method=method,
+                            url=join_url(api_base, path),
+                            payload=body,
+                            timeout_s=replay_http_timeout_s,
+                            headers=headers,
+                        )
+                        with lock:
+                            summary["requests_sent"] += 1
+                    else:
+                        timed_result = timed_cancel_http_json(
+                            method=method,
+                            url=join_url(api_base, path),
+                            payload=body,
+                            cancel_after_s=remaining_agent_s,
+                            connect_timeout_s=replay_http_timeout_s,
+                            headers=headers,
+                            stop_event=stop_event,
+                        )
+                        outcome = timed_result.get("outcome")
+                        with lock:
+                            summary["requests_sent"] += 1
+                        if outcome == "stopped":
+                            record["status"] = "cancelled"
+                            return
+                        if outcome == "cancelled":
+                            record["status"] = "timed_out"
+                            record["error"] = (
+                                f"agent timeout exceeded after {agent_timeout_s:.3f}s"
+                            )
+                            record["requests_failed"] += 1
+                            with lock:
+                                summary["requests_failed"] += 1
+                            return
+                        if outcome != "completed_early":
+                            record["requests_failed"] += 1
+                            with lock:
+                                summary["requests_failed"] += 1
+                            raise RuntimeError(
+                                "Replay request ended unexpectedly: "
+                                f"worker={worker_id}, path={path}, outcome={outcome}, "
+                                f"response_status={timed_result.get('response_status')}, "
+                                f"error={timed_result.get('error')}"
+                            )
+                        status = int(timed_result.get("response_status") or 0)
+                        response_payload = timed_result.get("response_payload")
+                    if status >= 400:
+                        record["requests_failed"] += 1
+                        with lock:
+                            summary["requests_failed"] += 1
+                        raise RuntimeError(
+                            f"Replay request failed: worker={worker_id}, "
+                            f"path={path}, status={status}, response={response_payload}"
+                        )
+
+                    expected_response_text = req.get("expected_response_text")
+                    if not isinstance(expected_response_text, str):
+                        record["requests_failed"] += 1
+                        with lock:
+                            summary["requests_failed"] += 1
+                        raise RuntimeError(
+                            "Replay request is missing expected_response_text in plan: "
+                            f"worker={worker_id}, path={path}"
+                        )
+                    try:
+                        actual_response_text = extract_response_text(response_payload)
+                    except Exception as exc:  # noqa: BLE001
+                        record["requests_failed"] += 1
+                        with lock:
+                            summary["requests_failed"] += 1
+                        raise RuntimeError(
+                            "Failed to extract response text from replay response: "
+                            f"worker={worker_id}, path={path}, error={exc}"
+                        ) from exc
+                    if actual_response_text != expected_response_text:
+                        record["requests_failed"] += 1
+                        with lock:
+                            summary["requests_failed"] += 1
+                        raise RuntimeError(
+                            "Replay response text mismatch: "
+                            f"worker={worker_id}, path={path}, "
+                            f"expected={expected_response_text!r}, "
+                            f"actual={actual_response_text!r}"
+                        )
                 record["requests_succeeded"] += 1
 
                 delay_after_s = float(req.get("delta_agent_action_after_s", 0.0))
-                if not sleep_with_stop(stop_event, max(0.0, delay_after_s)):
+                sleep_result = sleep_with_stop_or_deadline(
+                    stop_event,
+                    seconds=max(0.0, delay_after_s),
+                    deadline_at=agent_deadline_at,
+                )
+                if sleep_result == "stopped":
                     record["status"] = "cancelled"
+                    return
+                if sleep_result == "deadline":
+                    record["status"] = "timed_out"
+                    record["error"] = f"agent timeout exceeded after {agent_timeout_s:.3f}s"
                     return
 
             record["status"] = "completed"
         except Exception as exc:  # noqa: BLE001
             record["status"] = "failed"
             record["error"] = str(exc)
-            with lock:
-                summary["workers_failed"] += 1
             stop_event.set()
         finally:
             if use_gateway_lifecycle and api_token:
                 try:
-                    rc = 0 if record["status"] == "completed" else 1
+                    rc = 0 if record["status"] in {"completed", "timed_out"} else 1
                     call_gateway(
                         "/agent/end",
                         {"api_token": api_token, "return_code": rc},
@@ -1371,8 +2053,6 @@ def cmd_replay(args: argparse.Namespace) -> int:
                     if record["status"] == "completed":
                         record["status"] = "failed"
                         record["error"] = f"agent/end failed: {exc}"
-                        with lock:
-                            summary["workers_failed"] += 1
                     stop_event.set()
 
             record["finished_at"] = now_iso8601_utc()
@@ -1380,6 +2060,10 @@ def cmd_replay(args: argparse.Namespace) -> int:
                 worker_results[worker_id] = record
                 if record["status"] == "completed":
                     summary["workers_completed"] += 1
+                elif record["status"] == "timed_out":
+                    summary["workers_timed_out"] += 1
+                elif record["status"] == "failed":
+                    summary["workers_failed"] += 1
                 progress_state["active"] = max(progress_state["active"] - 1, 0)
                 _update_progress(advance=1)
             write_json(worker_log_path, record)
@@ -1392,86 +2076,100 @@ def cmd_replay(args: argparse.Namespace) -> int:
             return value
         return 1_000_000_000
 
-    ordered_workers = sorted(
-        workers,
-        key=lambda worker: (
-            _launch_priority(worker),
-            float(worker.get("run_offset_s", 0.0)),
-            str(worker.get("worker_id") or worker.get("trial_id") or "worker"),
-        ),
-    )
+    try:
+        if use_gateway_lifecycle:
+            gateway_output_dir = output_dir / "gateway-output"
+            gateway_output_dir.mkdir(parents=True, exist_ok=True)
+            call_gateway(
+                "/job/start",
+                {"output_location": str(gateway_output_dir)},
+            )
 
-    threads: list[threading.Thread] = []
-    for worker in ordered_workers:
-        worker_id = str(worker.get("worker_id") or worker.get("trial_id") or "worker")
-        thread = threading.Thread(target=worker_fn, args=(worker,), name=f"replay-{worker_id}")
-        thread.daemon = True
-        threads.append(thread)
-
-    started_threads: list[threading.Thread] = []
-
-    with create_replay_progress() as progress:
-        progress_nonlocal[0] = progress
-        progress_task_id_nonlocal[0] = progress.add_task(
-            "replaying",
-            total=len(threads),
-            launched=0,
-            active=0,
-            failed=0,
+        ordered_workers = sorted(
+            workers,
+            key=lambda worker: (
+                _launch_priority(worker),
+                float(worker.get("run_offset_s", 0.0)),
+                str(worker.get("worker_id") or worker.get("trial_id") or "worker"),
+            ),
         )
-        try:
-            next_launch_at = time.monotonic()
-            for thread in threads:
-                while True:
-                    active_threads = [item for item in started_threads if item.is_alive()]
-                    if len(active_threads) < launch_max_concurrent:
-                        break
+
+        threads: list[threading.Thread] = []
+        for worker in ordered_workers:
+            worker_id = str(worker.get("worker_id") or worker.get("trial_id") or "worker")
+            thread = threading.Thread(
+                target=worker_fn,
+                args=(worker,),
+                name=f"replay-{worker_id}",
+            )
+            thread.daemon = True
+            threads.append(thread)
+
+        started_threads: list[threading.Thread] = []
+
+        with create_replay_progress() as progress:
+            progress_nonlocal[0] = progress
+            progress_task_id_nonlocal[0] = progress.add_task(
+                "replaying",
+                total=len(threads),
+                launched=0,
+                active=0,
+                failed=0,
+            )
+            try:
+                next_launch_at = time.monotonic()
+                for thread in threads:
+                    while True:
+                        active_threads = [item for item in started_threads if item.is_alive()]
+                        if len(active_threads) < launch_max_concurrent:
+                            break
+                        if stop_event.is_set():
+                            break
+                        for active_thread in active_threads:
+                            active_thread.join(timeout=0.2)
                     if stop_event.is_set():
                         break
-                    for active_thread in active_threads:
-                        active_thread.join(timeout=0.2)
-                if stop_event.is_set():
-                    break
 
-                launch_delay = next_launch_at - time.monotonic()
-                if launch_delay > 0 and not sleep_with_stop(stop_event, launch_delay):
-                    break
+                    launch_delay = next_launch_at - time.monotonic()
+                    if launch_delay > 0 and not sleep_with_stop(stop_event, launch_delay):
+                        break
 
-                with lock:
-                    progress_state["launched"] += 1
-                    progress_state["active"] += 1
-                    _update_progress()
-                try:
-                    thread.start()
-                except Exception:
                     with lock:
-                        progress_state["launched"] = max(progress_state["launched"] - 1, 0)
-                        progress_state["active"] = max(progress_state["active"] - 1, 0)
+                        progress_state["launched"] += 1
+                        progress_state["active"] += 1
                         _update_progress()
-                    raise
-                started_threads.append(thread)
-                next_launch_at = time.monotonic() + max(0.0, next_launch_delay_s())
+                    try:
+                        thread.start()
+                    except Exception:
+                        with lock:
+                            progress_state["launched"] = max(progress_state["launched"] - 1, 0)
+                            progress_state["active"] = max(progress_state["active"] - 1, 0)
+                            _update_progress()
+                        raise
+                    started_threads.append(thread)
+                    next_launch_at = time.monotonic() + max(0.0, next_launch_delay_s())
 
-            while any(thread.is_alive() for thread in started_threads):
+                while any(thread.is_alive() for thread in started_threads):
+                    for thread in started_threads:
+                        thread.join(timeout=0.2)
+            except KeyboardInterrupt:
+                stop_event.set()
                 for thread in started_threads:
-                    thread.join(timeout=0.2)
-        except KeyboardInterrupt:
-            stop_event.set()
-            for thread in started_threads:
-                thread.join(timeout=2)
+                    thread.join(timeout=2)
 
-    if use_gateway_lifecycle:
-        try:
-            status = "completed" if summary["workers_failed"] == 0 else "failed"
-            call_gateway("/job/end", {"status": status})
-        except Exception as exc:  # noqa: BLE001
-            summary["gateway_job_end_error"] = str(exc)
-            summary["workers_failed"] += 1
-
-    summary["finished_at"] = now_iso8601_utc()
-    summary["worker_results"] = worker_results
-    summary_path = output_dir / "replay" / "summary.json"
-    write_json(summary_path, summary)
+        if use_gateway_lifecycle:
+            try:
+                status = "completed" if summary["workers_failed"] == 0 else "failed"
+                call_gateway("/job/end", {"status": status})
+            except Exception as exc:  # noqa: BLE001
+                summary["gateway_job_end_error"] = str(exc)
+                summary["workers_failed"] += 1
+    finally:
+        if monitor is not None:
+            summary["vllm_log_monitor_return_code"] = stop_replay_vllm_monitor(monitor)
+        summary["finished_at"] = now_iso8601_utc()
+        summary["worker_results"] = worker_results
+        write_json(summary_path, summary)
 
     print(
         json.dumps(
@@ -1482,6 +2180,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
                 "workers_total": summary["workers_total"],
                 "workers_completed": summary["workers_completed"],
                 "workers_failed": summary["workers_failed"],
+                "workers_timed_out": summary["workers_timed_out"],
                 "requests_sent": summary["requests_sent"],
                 "requests_failed": summary["requests_failed"],
             },
@@ -1538,8 +2237,17 @@ def build_parser() -> argparse.ArgumentParser:
     compile_parser.add_argument(
         "--request-timeout-s",
         type=float,
-        default=30.0,
+        default=3600.0,
         help="HTTP timeout seconds for tokenize/validation requests.",
+    )
+    compile_parser.add_argument(
+        "--agent-timeout-s",
+        type=float,
+        default=None,
+        help=(
+            "Optional agent runtime limit in seconds to encode into the replay plan. "
+            "When present, replay will terminate a worker when it exceeds this duration."
+        ),
     )
     compile_parser.set_defaults(func=cmd_compile)
 
@@ -1556,12 +2264,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir",
         default=None,
         help="Replay output directory. Default: <plan-dir>/<job>.replayed-<ts>",
-    )
-    replay_parser.add_argument(
-        "--request-timeout-s",
-        type=float,
-        default=120.0,
-        help="HTTP timeout seconds for replay requests.",
     )
     replay_parser.add_argument(
         "--port-profile-id",
@@ -1589,6 +2291,27 @@ def build_parser() -> argparse.ArgumentParser:
             "Accepts either the launch_policy object itself or an object with a "
             "top-level launch_policy field."
         ),
+    )
+    replay_parser.add_argument(
+        "--vllm-log",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Run the vLLM metrics monitor during replay. Defaults to on when "
+            "--port-profile-id is provided or replay_target.port_profile_id is set."
+        ),
+    )
+    replay_parser.add_argument(
+        "--vllm-log-interval-s",
+        type=float,
+        default=DEFAULT_VLLM_LOG_INTERVAL_S,
+        help="Replay vLLM metrics sampling interval in seconds.",
+    )
+    replay_parser.add_argument(
+        "--vllm-log-timeout-s",
+        type=float,
+        default=DEFAULT_VLLM_LOG_TIMEOUT_S,
+        help="Replay vLLM metrics scrape timeout in seconds.",
     )
     replay_parser.set_defaults(func=cmd_replay)
 

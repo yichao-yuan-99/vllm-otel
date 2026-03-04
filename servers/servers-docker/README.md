@@ -48,6 +48,9 @@ python3 servers/servers-docker/client.py start -m qwen3_coder_30b -p 0 -l h100_n
 - `servers/servers-docker/launch_profiles.toml`
 - `servers/servers-docker/service_images.toml`
 
+GPU selection from the launch profile is enforced through Docker Compose GPU
+`device_ids`, not only by `NVIDIA_VISIBLE_DEVICES`.
+
 Change the Docker tags in `servers/servers-docker/service_images.toml` if you need a different Jaeger or vLLM image.
 
 Operate environment:
@@ -92,6 +95,9 @@ curl http://localhost:11451/v1/models
 ```
 
 Use ports from your selected port profile if changed.
+
+If you change the launch profile GPU selection, restart the environment so the
+generated Docker Compose GPU override is re-materialized and applied.
 
 Jaeger UI: `http://localhost:16686`
 

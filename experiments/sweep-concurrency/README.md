@@ -80,6 +80,18 @@ Replay from the latest `15`-concurrency source job:
 bash experiments/sweep-concurrency/run_replay.sh --port-profile-id 3
 ```
 
+When `--source-job-dir` is omitted, the script only considers real source
+`con-driver` job directories under `experiments/results/sweep-concurrency/15/`.
+Replay output directories such as `*.replayed-c15` are ignored.
+
+Disable the Harbor-style per-agent timeout in replay:
+
+```bash
+bash experiments/sweep-concurrency/run_replay.sh \
+  --port-profile-id 3 \
+  --agent-timeout off
+```
+
 Or replay from a specific source job:
 
 ```bash
@@ -90,8 +102,21 @@ bash experiments/sweep-concurrency/run_replay.sh \
 
 This does:
 
-1. compile `replay-plan.json` inside the source job directory
+1. always recompile `replay-plan.json` inside the source job directory
 2. replay the exact same workload at `30`, `60`, `90`, and `120`
+
+Because this experiment uses `pool = "swebench-verified"`, `run_replay.sh`
+defaults to compiling the plan with `--agent-timeout-s 3000`. Replay then
+enforces the same rough per-agent wall-clock limit that Harbor uses for these
+tasks.
+
+You can change this with:
+
+- `--agent-timeout on`
+  - compile the replay plan with `--agent-timeout-s 3000`
+- `--agent-timeout off`
+  - compile the replay plan without `agent_timeout_s`
+  - replay will run without an agent-level timeout
 
 ## Replay Overlay
 

@@ -41,3 +41,43 @@ jaeger_api_port = 56198
 jaeger_otlp_port = 53477
 gateway_port = 52357
 gateway_parse_port = 58171
+
+[profiles."5"]
+label = "random-5"
+vllm_port = 59231
+jaeger_api_port = 61784
+jaeger_otlp_port = 60319
+gateway_port = 59257
+gateway_parse_port = 59171
+
+[profiles."6"]
+label = "random-6"
+vllm_port = 60231
+jaeger_api_port = 62784
+jaeger_otlp_port = 61319
+gateway_port = 60257
+gateway_parse_port = 60171
+
+[profiles."7"]
+label = "random-7"
+vllm_port = 61231
+jaeger_api_port = 63784
+jaeger_otlp_port = 62319
+gateway_port = 61257
+gateway_parse_port = 61171
+
+[profiles."8"]
+label = "random-8"
+vllm_port = 62231
+jaeger_api_port = 64784
+jaeger_otlp_port = 63319
+gateway_port = 62257
+gateway_parse_port = 62171
+
+[profiles."9"]
+label = "random-9"
+vllm_port = 63231
+jaeger_api_port = 65284
+jaeger_otlp_port = 64319
+gateway_port = 63257
+gateway_parse_port = 63171

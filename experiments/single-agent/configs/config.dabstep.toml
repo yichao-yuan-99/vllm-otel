@@ -1,0 +1,9 @@
+[driver]
+driver_backend = "harbor"
+pattern = "eager"
+pool = "dabstep"
+max_concurrent = 1
+n_task = 450
+results_dir = "experiments/results/single-agent/dabstep"
+sample_without_replacement = true
+agent = "terminus-2"

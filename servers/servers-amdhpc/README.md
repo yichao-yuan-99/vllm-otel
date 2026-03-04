@@ -6,7 +6,7 @@ This directory now supports a login-node control plane for AMD HPC clusters:
 - `servers/servers-amdhpc/client.py`: Typer CLI frontend that sends JSON POST commands.
 - `servers/servers-amdhpc/client_d.py`: SSH tunnel daemon for client/server on different machines.
 
-The server keeps cluster partition config, loads shared model definitions, submits `sbatch` jobs, and manages one active vLLM service job at a time.
+The server keeps cluster partition config, loads shared model definitions, submits `sbatch` jobs, and manages one active vLLM service job per port profile.
 
 ## Files
 
@@ -29,7 +29,7 @@ Edit `configs/model_config.toml` for model definitions.
 Export runtime env vars in your shell before starting the server (for example: `HF_HOME`, `HF_HUB_CACHE`, optional `HF_TOKEN`, and any image overrides like `APPTAINER_IMGS`, `JAEGER_IMAGE`, `VLLM_IMAGE`).
 The server no longer reads `servers/servers-amdhpc/.env` or `server.env_file`.
 
-`server_config.toml` includes the partition specs requested in `PROMPT.md` (`mi2508x`, `mi3001x`, `mi3008x`, `mi3258x`). Model entries are loaded from the shared top-level `configs/model_config.toml` with:
+`server_config.toml` includes the partition specs requested in `PROMPT.md` (`mi2104x`, `mi2508x`, `mi3001x`, `mi3008x`, `mi3258x`). Model entries are loaded from the shared top-level `configs/model_config.toml` with:
 
 - `vllm_model_name`
 - `served_model_name`
@@ -60,70 +60,73 @@ Default bind is `0.0.0.0:23971`.
 ## 4) Use client
 
 ```bash
-python3 servers/servers-amdhpc/client.py clientd-start --ssh-target amd-hpc --port-profile 0
-python3 servers/servers-amdhpc/client.py clientd-status
-python3 servers/servers-amdhpc/client.py status
-python3 servers/servers-amdhpc/client.py start -p mi3008x -m kimi_k2_5
-python3 servers/servers-amdhpc/client.py start -p mi3008x -m kimi_k2_5 -b
-python3 servers/servers-amdhpc/client.py up
-python3 servers/servers-amdhpc/client.py wait-up --timeout-seconds 900
-python3 servers/servers-amdhpc/client.py logs -n 200
-python3 servers/servers-amdhpc/client.py stop
-python3 servers/servers-amdhpc/client.py stop -b
-python3 servers/servers-amdhpc/client.py stop-poll
-python3 servers/servers-amdhpc/client.py clientd-stop
+python3 servers/servers-amdhpc/client.py clientd-start --ssh-target amd-hpc -P 0
+python3 servers/servers-amdhpc/client.py clientd-status -P 0
+python3 servers/servers-amdhpc/client.py status -P 0
+python3 servers/servers-amdhpc/client.py start -P 0 -p mi3008x -m kimi_k2_5
+python3 servers/servers-amdhpc/client.py start -P 0 -p mi3008x -m kimi_k2_5 -b
+python3 servers/servers-amdhpc/client.py up -P 0
+python3 servers/servers-amdhpc/client.py wait-up -P 0 --timeout-seconds 900
+python3 servers/servers-amdhpc/client.py logs -P 0 -n 200
+python3 servers/servers-amdhpc/client.py stop -P 0
+python3 servers/servers-amdhpc/client.py stop -P 0 -b
+python3 servers/servers-amdhpc/client.py stop-poll -P 0
+python3 servers/servers-amdhpc/client.py clientd-stop -P 0
 ```
 
-Client default server URL is `http://127.0.0.1:23971`.
+`-P` is the short alias for `--port-profile`.
+Client default server URL is derived from the selected local `client-d` record. By default the local control port is `23971 + <port_profile>` (for example: profile `0` -> `23971`, profile `1` -> `23972`).
 
 ## Commands implemented
 
 - `clientd-start`: start local SSH forwarding via `ssh <target>`, using a required port profile ID from `configs/port_profiles.toml`.
-- `clientd-start`: the selected port profile sets the local forwarded vLLM/Jaeger ports; the control server tunnel stays on `23971` unless overridden with `--server-port`.
-- `clientd-stop`: stop local SSH forwarding daemon.
-- `clientd-status`: show whether forwarding daemon is running.
+- `clientd-start`: the selected port profile sets the local forwarded vLLM/Jaeger ports and the local forwarded control port.
+- `clientd-start`: remote vLLM/Jaeger ports on the login node also come from the selected port profile; the remote control server stays on `23971` unless overridden with `--server-port`.
+- `clientd-stop`: stop the local SSH forwarding daemon for the specified port profile.
+- `clientd-status`: show whether forwarding is running for the specified port profile.
 - `start`: submit `sbatch` job with reverse tunnels for:
-  - vLLM API: `127.0.0.1:11451`
-  - Jaeger OTLP gRPC: `127.0.0.1:4317`
-  - Jaeger UI/API: `127.0.0.1:16686`
+  - vLLM API: `127.0.0.1:<profile.vllm_port>`
+  - Jaeger OTLP gRPC: `127.0.0.1:<profile.jaeger_otlp_port>`
+  - Jaeger UI/API: `127.0.0.1:<profile.jaeger_api_port>`
+- `start`: every control-plane command requires a specific `--port-profile`/`-P`, so multiple profiles can run concurrently without sharing state.
 - `start`: if model `extra_args` includes `--trust-remote-code`, force-sequence tokenizer bootstrap also enables remote code.
 - `start`: model `extra_args` from `configs/model_config.toml` are forwarded into the vLLM launch through `VLLM_MODEL_EXTRA_ARGS_B64`.
 - `start --block/-b`: block until vLLM + Jaeger endpoints are up.
 - `start --block/-b`: streams per-step progress updates (`validate`, `submit`, `record`, `wait_services`).
 - `start --block/-b`: startup timeout starts after Slurm reaches `RUNNING` (while `PENDING`, timeout is deferred).
 - `start --block/-b`: if interrupted (`Ctrl-C`), client automatically enters blocking stop cleanup and waits for cancellation.
-- `start`: fails fast if `cluster.service_port` is already occupied on login node.
-- `stop`: send `scancel` for active job (non-blocking by default).
+- `start`: fails fast if the selected port profile's service ports are already occupied on the login node.
+- `stop`: send `scancel` for the active job on the selected port profile (non-blocking by default).
 - `stop --block/-b`: block until it disappears from `squeue` (queries scoped to `-u $USER`).
 - `stop --block/-b`: streams per-step progress updates (`validate`, `cancel`, `wait_slurm`).
-- `stop-poll`: check whether a prior non-block `stop` has fully finished.
-- `up`: check whether both tunneled vLLM + Jaeger endpoints are currently up.
-- `wait-up`: block until both tunneled vLLM + Jaeger endpoints are up.
+- `stop-poll`: check whether a prior non-block `stop` has fully finished for the selected port profile.
+- `up`: check whether both tunneled vLLM + Jaeger endpoints are currently up for the selected port profile.
+- `wait-up`: block until both tunneled vLLM + Jaeger endpoints are up for the selected port profile.
 - `wait-up`: supports `--defer-timeout-until-running/--timeout-from-submit`.
-- `logs`: tail slurm + jaeger + vllm logs.
-- `status`: show active job and configured partitions/models.
+- `logs`: tail slurm + jaeger + vllm logs for the selected port profile.
+- `status`: show the selected port profile status plus the full active-profile map and configured partitions/models.
 
 You can also manage the tunnel directly:
 
 ```bash
-python3 servers/servers-amdhpc/client_d.py start --ssh-target <hpc-login-target> --port-profile 0
-python3 servers/servers-amdhpc/client_d.py status
-python3 servers/servers-amdhpc/client_d.py stop
+python3 servers/servers-amdhpc/client_d.py start --ssh-target <hpc-login-target> -P 0
+python3 servers/servers-amdhpc/client_d.py status -P 0
+python3 servers/servers-amdhpc/client_d.py stop -P 0
 ```
 
 ## HTTP API (server)
 
 All commands accept POST JSON:
 
-- `POST /start` with `{"partition": "...", "model": "...", "block": false}`
-- `POST /stop` with optional `{"block": false}`
-- `POST /stop/poll`
-- `POST /start/status`
-- `POST /stop/status`
-- `POST /up`
-- `POST /wait-up` with optional `{"timeout_seconds": 900, "poll_interval_seconds": 2.0, "defer_timeout_until_running": true}`
-- `POST /logs` with optional `{"lines": 200}`
-- `POST /status`
+- `POST /start` with `{"port_profile": 0, "partition": "...", "model": "...", "block": false}`
+- `POST /stop` with `{"port_profile": 0, "block": false}`
+- `POST /stop/poll` with `{"port_profile": 0}`
+- `POST /start/status` with `{"port_profile": 0}`
+- `POST /stop/status` with `{"port_profile": 0}`
+- `POST /up` with `{"port_profile": 0}`
+- `POST /wait-up` with `{"port_profile": 0, "timeout_seconds": 900, "poll_interval_seconds": 2.0, "defer_timeout_until_running": true}`
+- `POST /logs` with `{"port_profile": 0, "lines": 200}`
+- `POST /status` with `{"port_profile": 0}`
 
 Optional aliases are also available under `/command/<name>`.
 

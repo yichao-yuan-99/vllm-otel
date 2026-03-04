@@ -1,0 +1,9 @@
+[driver]
+driver_backend = "harbor"
+pattern = "eager"
+pool = "livecodebench"
+max_concurrent = 1
+n_task = 100
+results_dir = "experiments/results/single-agent/livecodebench"
+sample_without_replacement = true
+agent = "terminus-2"

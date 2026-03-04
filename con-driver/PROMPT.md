@@ -50,7 +50,7 @@ sample_without_replacement = true
 
 
 # vllm_log = true # this is defaulted, user may or may not provide
-# vllm_log_endpoint = "http://127.0.0.1:12138/metrics" # the user required to provide the port profile number
+# vllm_log endpoint is resolved from the port profile and should not be configured manually
 # vllm_log_interval_s = 1.0 # this is defaulted, user may or may not provide
 # vllm_log_timeout_s = 5.0 # this is defaulted, user may or may not provide
 

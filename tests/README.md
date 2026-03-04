@@ -193,6 +193,7 @@ Compile from the full profiled con-driver job:
 python -m replayer compile \
   --job-dir "$RUN_DIR" \
   --port-profile-id 3 \
+  --agent-timeout-s 3000 \
   --plan-out "$RUN_DIR/replay-plan.json"
 ```
 

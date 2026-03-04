@@ -4,7 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 SOURCE_RESULTS_ROOT="${REPO_ROOT}/experiments/results/sweep-concurrency/15"
-TARGETS=(30 60 90 120)
+TARGETS=(15 30 60 90 120)
+AGENT_TIMEOUT_S="3000"
+AGENT_TIMEOUT_MODE="on"
 
 PORT_PROFILE_ID=""
 SOURCE_JOB_DIR=""
@@ -18,6 +20,11 @@ find_latest_run_dir() {
   shopt -s nullglob
   for candidate in "${root}"/*; do
     [[ -d "${candidate}" ]] || continue
+    local candidate_name
+    candidate_name="$(basename "${candidate}")"
+    [[ "${candidate_name}" == job-* ]] || continue
+    [[ "${candidate_name}" == *.replayed-* ]] && continue
+    [[ -f "${candidate}/meta/config.toml" ]] || continue
     local mtime
     mtime="$(stat -c '%Y' "${candidate}")"
     if [[ -z "${latest}" || "${mtime}" -gt "${latest_mtime}" ]]; then
@@ -59,15 +66,31 @@ while [[ $# -gt 0 ]]; do
       SOURCE_JOB_DIR="${1#*=}"
       shift
       ;;
+    --agent-timeout)
+      if [[ $# -lt 2 ]]; then
+        echo "missing value for --agent-timeout" >&2
+        exit 1
+      fi
+      AGENT_TIMEOUT_MODE="$2"
+      shift 2
+      ;;
+    --agent-timeout=*)
+      AGENT_TIMEOUT_MODE="${1#*=}"
+      shift
+      ;;
     -h|--help)
       cat <<'EOF'
-usage: bash experiments/sweep-concurrency/run_replay.sh --port-profile-id <id> [--source-job-dir <dir>]
+usage: bash experiments/sweep-concurrency/run_replay.sh --port-profile-id <id> [--source-job-dir <dir>] [--agent-timeout on|off]
 
 Compile replay-plan.json from a source 15-concurrency job and replay the same
 workload at 30, 60, 90, and 120 concurrency.
 
 If --source-job-dir is omitted, the latest directory under
 experiments/results/sweep-concurrency/15/ is used.
+
+This script always recompiles replay-plan.json before replay.
+Use --agent-timeout on to compile swebench-verified replay plans with
+--agent-timeout-s 3000, or --agent-timeout off to omit the agent timeout.
 EOF
       exit 0
       ;;
@@ -83,6 +106,15 @@ if [[ -z "${PORT_PROFILE_ID}" ]]; then
   exit 1
 fi
 
+case "${AGENT_TIMEOUT_MODE}" in
+  on|off)
+    ;;
+  *)
+    echo "invalid --agent-timeout value: ${AGENT_TIMEOUT_MODE} (expected on or off)" >&2
+    exit 1
+    ;;
+esac
+
 if [[ -z "${SOURCE_JOB_DIR}" ]]; then
   SOURCE_JOB_DIR="$(find_latest_run_dir "${SOURCE_RESULTS_ROOT}")"
 fi
@@ -96,10 +128,16 @@ fi
 PLAN_PATH="${SOURCE_JOB_DIR}/replay-plan.json"
 
 echo "=== compile replay plan ==="
-python3 -m replayer compile \
-  --job-dir "${SOURCE_JOB_DIR}" \
-  --port-profile-id "${PORT_PROFILE_ID}" \
+compile_cmd=(
+  python3 -m replayer compile
+  --job-dir "${SOURCE_JOB_DIR}"
+  --port-profile-id "${PORT_PROFILE_ID}"
   --plan-out "${PLAN_PATH}"
+)
+if [[ "${AGENT_TIMEOUT_MODE}" == "on" ]]; then
+  compile_cmd+=(--agent-timeout-s "${AGENT_TIMEOUT_S}")
+fi
+"${compile_cmd[@]}"
 
 for target in "${TARGETS[@]}"; do
   target_root="${REPO_ROOT}/experiments/results/sweep-concurrency/${target}"

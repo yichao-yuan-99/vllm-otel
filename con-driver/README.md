@@ -47,6 +47,8 @@ python con-driver/driver.py --help
 - `--agent-name`: Harbor agent name. TOML keys `agent` and `agent_name` are also accepted.
 - `--sample-without-replacement`: optional; disables repeated task sampling.
 - `--vllm-log/--no-vllm-log`: optional; run a separate vLLM metrics monitor process.
+- `--vllm-log-interval-s`: optional; metrics sampling interval.
+- `--vllm-log-timeout-s`: optional; scrape timeout.
 - `--gateway/--no-gateway`: enable/disable gateway mode (default: enabled).
 - `--gateway-url`: gateway base URL.
   With `port_profile_id`, the default is `http://127.0.0.1:<gateway_parse_port>`.
@@ -116,7 +118,6 @@ seed = 7
 # With port_profile_id, vllm_log defaults to true and endpoint defaults to
 # http://127.0.0.1:<vllm_port>/metrics.
 # vllm_log = true
-# vllm_log_endpoint = "http://127.0.0.1:24123/metrics"
 vllm_log_interval_s = 1.0
 vllm_log_timeout_s = 5.0
 gateway = true
@@ -155,7 +156,7 @@ Non-dataset mode writes run artifacts into a nested subdirectory:
 - `--results-dir/job-<timestamp>/{trials,logs,meta}/`: run outputs
 - `--results-dir/job-<timestamp>/CON_DRIVER_OUTPUT`: con-driver marker file
 - `meta/config.toml`: resolved run config snapshot
-- `vllm-log/` (optional): monitor logs and compressed metrics blocks
+- `vllm-log/` (optional): monitor logs and compressed raw metrics blocks
 - Gateway run output location sent to `/job/start`: `--results-dir/job-<timestamp>/<gateway_job_output_root>`
 
 Dataset mode triggers when all of the following are true:
@@ -176,6 +177,7 @@ In dataset mode:
 - Harbor dataset downloads are cached in `con-driver/.cache/harbor-datasets/`, not inside `results_dir`.
 - `driver_backend` and `backend` config keys are both accepted (`backend` is a compatibility alias).
 - `forwarded_args` and `harbor_args` config keys are both accepted (`harbor_args` is a compatibility alias).
+- `vllm_log_endpoint` is not user-configurable; when vLLM logging is enabled, the endpoint is always derived from `port_profile_id`.
 - The driver rejects `-p/--path`, `--trial-name`, and `--trials-dir` in forwarded args because it manages those fields.
 - With `port_profile_id`, con-driver probes the single live served model from `http://127.0.0.1:<vllm_port>/v1/models` and uses `hosted_vllm/<served_model_name>` for Harbor automatically.
 - With `port_profile_id`, con-driver sets `api_base`, `base_url`, and universal endpoint environment variables for the Harbor launch automatically.

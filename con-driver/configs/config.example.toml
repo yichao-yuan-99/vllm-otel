@@ -23,7 +23,7 @@ sample_without_replacement = true
 
 # vLLM metrics logging defaults to enabled when port_profile_id is set.
 # vllm_log = true
-# vllm_log_endpoint defaults to http://127.0.0.1:<vllm_port>/metrics
+# vllm_log endpoint is always resolved from port_profile_id
 # vllm_log_interval_s = 1.0
 # vllm_log_timeout_s = 5.0
 

@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import signal
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 try:
     from .control_plane import (
@@ -57,28 +58,34 @@ def _parse_request_payload(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     return payload
 
 
+def _parse_request_path(handler: BaseHTTPRequestHandler) -> tuple[str, dict[str, Any]]:
+    parsed = urlparse(handler.path)
+    query_payload = {key: values[-1] for key, values in parse_qs(parsed.query).items() if values}
+    return parsed.path, query_payload
+
+
 class RequestHandler(BaseHTTPRequestHandler):
     control_plane: ControlPlane
 
     def do_GET(self) -> None:  # noqa: N802
-        path = self.path.split("?", 1)[0]
+        path, payload = _parse_request_path(self)
         if path == "/health":
             self._write_json(200, {"ok": True, "message": "healthy"})
             return
         if path == "/up":
-            self._handle_with_result(lambda: self.control_plane.up())
+            self._handle_with_result(lambda: self._up_command(payload))
             return
         if path == "/stop/poll":
-            self._handle_with_result(lambda: self.control_plane.stop_poll())
+            self._handle_with_result(lambda: self._stop_poll_command(payload))
             return
         if path == "/start/status":
-            self._handle_with_result(lambda: self.control_plane.start_status())
+            self._handle_with_result(lambda: self._start_status_command(payload))
             return
         if path == "/stop/status":
-            self._handle_with_result(lambda: self.control_plane.stop_status())
+            self._handle_with_result(lambda: self._stop_status_command(payload))
             return
         if path == "/status":
-            self._handle_with_result(lambda: self.control_plane.status())
+            self._handle_with_result(lambda: self._status_command(payload))
             return
         self._write_json(
             404,
@@ -90,7 +97,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         )
 
     def do_POST(self) -> None:  # noqa: N802
-        path = self.path.split("?", 1)[0]
+        path, _ = _parse_request_path(self)
 
         try:
             payload = _parse_request_payload(self)
@@ -101,22 +108,22 @@ class RequestHandler(BaseHTTPRequestHandler):
         routes = {
             "/start": lambda: self._start_command(payload),
             "/stop": lambda: self._stop_command(payload),
-            "/stop/poll": lambda: self.control_plane.stop_poll(),
-            "/start/status": lambda: self.control_plane.start_status(),
-            "/stop/status": lambda: self.control_plane.stop_status(),
+            "/stop/poll": lambda: self._stop_poll_command(payload),
+            "/start/status": lambda: self._start_status_command(payload),
+            "/stop/status": lambda: self._stop_status_command(payload),
             "/logs": lambda: self._logs_command(payload),
-            "/up": lambda: self.control_plane.up(),
+            "/up": lambda: self._up_command(payload),
             "/wait-up": lambda: self._wait_up_command(payload),
-            "/status": lambda: self.control_plane.status(),
+            "/status": lambda: self._status_command(payload),
             "/command/start": lambda: self._start_command(payload),
             "/command/stop": lambda: self._stop_command(payload),
-            "/command/stop/poll": lambda: self.control_plane.stop_poll(),
-            "/command/start/status": lambda: self.control_plane.start_status(),
-            "/command/stop/status": lambda: self.control_plane.stop_status(),
+            "/command/stop/poll": lambda: self._stop_poll_command(payload),
+            "/command/start/status": lambda: self._start_status_command(payload),
+            "/command/stop/status": lambda: self._stop_status_command(payload),
             "/command/logs": lambda: self._logs_command(payload),
-            "/command/up": lambda: self.control_plane.up(),
+            "/command/up": lambda: self._up_command(payload),
             "/command/wait-up": lambda: self._wait_up_command(payload),
-            "/command/status": lambda: self.control_plane.status(),
+            "/command/status": lambda: self._status_command(payload),
         }
 
         action = routes.get(path)
@@ -133,7 +140,39 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         self._handle_with_result(action)
 
+    def _require_port_profile(self, payload: dict[str, Any], *, command_name: str) -> int:
+        raw_port_profile = payload.get("port_profile")
+        if raw_port_profile is None or raw_port_profile == "":
+            raise ControlPlaneError(
+                message=f"{command_name} requires 'port_profile'",
+                code=212,
+                http_status=400,
+            )
+        if isinstance(raw_port_profile, bool):
+            raise ControlPlaneError(
+                message=f"{command_name}.port_profile must be an integer",
+                code=213,
+                http_status=400,
+            )
+        if isinstance(raw_port_profile, int):
+            return raw_port_profile
+        if isinstance(raw_port_profile, str):
+            try:
+                return int(raw_port_profile)
+            except ValueError as exc:
+                raise ControlPlaneError(
+                    message=f"{command_name}.port_profile must be an integer",
+                    code=214,
+                    http_status=400,
+                ) from exc
+        raise ControlPlaneError(
+            message=f"{command_name}.port_profile must be an integer",
+            code=215,
+            http_status=400,
+        )
+
     def _start_command(self, payload: dict[str, Any]) -> CommandResult:
+        port_profile = self._require_port_profile(payload, command_name="start")
         partition = payload.get("partition")
         model = payload.get("model")
         block = payload.get("block", False)
@@ -155,9 +194,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                 code=209,
                 http_status=400,
             )
-        return self.control_plane.start(partition=partition, model=model, block=block)
+        return self.control_plane.start(
+            port_profile_id=port_profile,
+            partition=partition,
+            model=model,
+            block=block,
+        )
 
     def _stop_command(self, payload: dict[str, Any]) -> CommandResult:
+        port_profile = self._require_port_profile(payload, command_name="stop")
         block = payload.get("block", False)
         if not isinstance(block, bool):
             raise ControlPlaneError(
@@ -165,9 +210,22 @@ class RequestHandler(BaseHTTPRequestHandler):
                 code=210,
                 http_status=400,
             )
-        return self.control_plane.stop(block=block)
+        return self.control_plane.stop(port_profile_id=port_profile, block=block)
+
+    def _stop_poll_command(self, payload: dict[str, Any]) -> CommandResult:
+        port_profile = self._require_port_profile(payload, command_name="stop-poll")
+        return self.control_plane.stop_poll(port_profile_id=port_profile)
+
+    def _start_status_command(self, payload: dict[str, Any]) -> CommandResult:
+        port_profile = self._require_port_profile(payload, command_name="start/status")
+        return self.control_plane.start_status(port_profile_id=port_profile)
+
+    def _stop_status_command(self, payload: dict[str, Any]) -> CommandResult:
+        port_profile = self._require_port_profile(payload, command_name="stop/status")
+        return self.control_plane.stop_status(port_profile_id=port_profile)
 
     def _logs_command(self, payload: dict[str, Any]) -> CommandResult:
+        port_profile = self._require_port_profile(payload, command_name="logs")
         lines = payload.get("lines", 200)
         if isinstance(lines, bool):
             raise ControlPlaneError(
@@ -181,9 +239,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                 code=206,
                 http_status=400,
             )
-        return self.control_plane.logs(lines=lines)
+        return self.control_plane.logs(port_profile_id=port_profile, lines=lines)
+
+    def _up_command(self, payload: dict[str, Any]) -> CommandResult:
+        port_profile = self._require_port_profile(payload, command_name="up")
+        return self.control_plane.up(port_profile_id=port_profile)
 
     def _wait_up_command(self, payload: dict[str, Any]) -> CommandResult:
+        port_profile = self._require_port_profile(payload, command_name="wait-up")
         timeout_seconds = payload.get("timeout_seconds", self.control_plane.config.startup_timeout)
         poll_interval_seconds = payload.get("poll_interval_seconds", 2)
         defer_timeout_until_running = payload.get(
@@ -212,10 +275,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                 http_status=400,
             )
         return self.control_plane.wait_up(
+            port_profile_id=port_profile,
             timeout_seconds=timeout_seconds,
             poll_interval_seconds=float(poll_interval_seconds),
             defer_timeout_until_running=defer_timeout_until_running,
         )
+
+    def _status_command(self, payload: dict[str, Any]) -> CommandResult:
+        port_profile = self._require_port_profile(payload, command_name="status")
+        return self.control_plane.status(port_profile_id=port_profile)
 
     def _handle_with_result(self, action: Any) -> None:
         try:

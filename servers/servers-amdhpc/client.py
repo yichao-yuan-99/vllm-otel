@@ -19,6 +19,7 @@ try:
         DEFAULT_RUNTIME_DIR as CLIENT_D_RUNTIME_DIR,
         DEFAULT_SERVER_PORT,
         client_d_status,
+        resolve_client_d_server_url,
         start_client_d,
         stop_client_d,
     )
@@ -27,6 +28,7 @@ except ImportError:  # pragma: no cover
         DEFAULT_RUNTIME_DIR as CLIENT_D_RUNTIME_DIR,
         DEFAULT_SERVER_PORT,
         client_d_status,
+        resolve_client_d_server_url,
         start_client_d,
         stop_client_d,
     )
@@ -97,10 +99,15 @@ def _require_ok(payload: dict[str, Any]) -> None:
 @app.callback()
 def main(
     ctx: typer.Context,
-    server_url: str = typer.Option(
-        "http://127.0.0.1:23971",
+    server_url: str | None = typer.Option(
+        None,
         "--server-url",
-        help="Control server base URL.",
+        help="Override control server base URL. By default it is derived from --port-profile.",
+    ),
+    clientd_runtime_dir: Path = typer.Option(
+        CLIENT_D_RUNTIME_DIR,
+        "--clientd-runtime-dir",
+        help="Directory for client-d pid/log files when deriving the control server URL.",
     ),
     timeout_seconds: float = typer.Option(
         120.0,
@@ -110,6 +117,7 @@ def main(
 ) -> None:
     ctx.obj = {
         "server_url": server_url,
+        "clientd_runtime_dir": clientd_runtime_dir,
         "timeout_seconds": timeout_seconds,
     }
 
@@ -120,7 +128,7 @@ def clientd_start(
     port_profile: int = typer.Option(
         ...,
         "--port-profile",
-        "-p",
+        "-P",
         help="Port profile numeric ID from configs/port_profiles.toml.",
     ),
     runtime_dir: Path = typer.Option(
@@ -128,7 +136,11 @@ def clientd_start(
         "--runtime-dir",
         help="Directory for client-d pid and log files.",
     ),
-    server_port: int = typer.Option(DEFAULT_SERVER_PORT, "--server-port", help="Control server port."),
+    server_port: int = typer.Option(
+        DEFAULT_SERVER_PORT,
+        "--server-port",
+        help="Remote control server port on the login node.",
+    ),
     ssh_option: list[str] = typer.Option(
         [],
         "--ssh-option",
@@ -140,7 +152,7 @@ def clientd_start(
         ssh_target=ssh_target,
         port_profile_id=port_profile,
         runtime_dir=runtime_dir,
-        server_port=server_port,
+        remote_server_port=server_port,
         ssh_options=ssh_option or None,
     )
     _require_ok(payload)
@@ -149,6 +161,12 @@ def clientd_start(
 
 @app.command(name="clientd-stop")
 def clientd_stop(
+    port_profile: int = typer.Option(
+        ...,
+        "--port-profile",
+        "-P",
+        help="Port profile numeric ID from configs/port_profiles.toml.",
+    ),
     runtime_dir: Path = typer.Option(
         CLIENT_D_RUNTIME_DIR,
         "--runtime-dir",
@@ -161,13 +179,23 @@ def clientd_stop(
     ),
 ) -> None:
     """Stop client-d SSH tunnels."""
-    payload = stop_client_d(runtime_dir=runtime_dir, timeout_seconds=timeout_seconds)
+    payload = stop_client_d(
+        port_profile_id=port_profile,
+        runtime_dir=runtime_dir,
+        timeout_seconds=timeout_seconds,
+    )
     _require_ok(payload)
     _print_json(payload)
 
 
 @app.command(name="clientd-status")
 def clientd_status(
+    port_profile: int = typer.Option(
+        ...,
+        "--port-profile",
+        "-P",
+        help="Port profile numeric ID from configs/port_profiles.toml.",
+    ),
     runtime_dir: Path = typer.Option(
         CLIENT_D_RUNTIME_DIR,
         "--runtime-dir",
@@ -175,7 +203,7 @@ def clientd_status(
     ),
 ) -> None:
     """Show client-d status."""
-    payload = client_d_status(runtime_dir=runtime_dir)
+    payload = client_d_status(port_profile_id=port_profile, runtime_dir=runtime_dir)
     _require_ok(payload)
     _print_json(payload)
 
@@ -193,7 +221,18 @@ def _run_command_with_timeout(
 ) -> dict[str, Any]:
     payload = payload or {}
     obj = ctx.obj or {}
-    server_url = str(obj.get("server_url", "http://127.0.0.1:23971"))
+    server_url_override = obj.get("server_url")
+    if isinstance(server_url_override, str) and server_url_override:
+        server_url = server_url_override
+    else:
+        port_profile = payload.get("port_profile")
+        if isinstance(port_profile, bool) or not isinstance(port_profile, int):
+            raise RuntimeError("port_profile is required for AMD HPC control commands")
+        server_url = resolve_client_d_server_url(
+            port_profile_id=port_profile,
+            runtime_dir=obj.get("clientd_runtime_dir", CLIENT_D_RUNTIME_DIR),
+            remote_server_port=DEFAULT_SERVER_PORT,
+        )
     default_timeout_seconds = float(obj.get("timeout_seconds", 120.0))
     request_timeout_seconds = timeout_seconds if timeout_seconds is not None else default_timeout_seconds
     return _post_json(
@@ -210,6 +249,7 @@ def _run_blocking_with_progress(
     endpoint: str,
     payload: dict[str, Any],
     progress_endpoint: str,
+    progress_payload: dict[str, Any] | None = None,
     progress_tag: str,
     timeout_seconds: float,
 ) -> dict[str, Any]:
@@ -228,8 +268,8 @@ def _run_blocking_with_progress(
 
     last_line: str | None = None
     while worker.is_alive():
-        progress_payload = _run_command(ctx, progress_endpoint)
-        data = progress_payload.get("data")
+        progress_response = _run_command(ctx, progress_endpoint, progress_payload)
+        data = progress_response.get("data")
         if isinstance(data, dict):
             status = data.get("status")
             phase = data.get("phase")
@@ -251,7 +291,7 @@ def _run_blocking_with_progress(
     return command_payload
 
 
-def _cleanup_after_start_interrupt(ctx: typer.Context) -> None:
+def _cleanup_after_start_interrupt(ctx: typer.Context, *, port_profile: int) -> None:
     typer.echo(
         "[start] interrupt received; entering cleanup and attempting blocking stop.",
         err=True,
@@ -261,8 +301,9 @@ def _cleanup_after_start_interrupt(ctx: typer.Context) -> None:
         return _run_blocking_with_progress(
             ctx,
             endpoint="/stop",
-            payload={"block": True},
+            payload={"port_profile": port_profile, "block": True},
             progress_endpoint="/stop/status",
+            progress_payload={"port_profile": port_profile},
             progress_tag="stop",
             timeout_seconds=24.0 * 60.0 * 60.0,
         )
@@ -271,7 +312,7 @@ def _cleanup_after_start_interrupt(ctx: typer.Context) -> None:
         stop_payload = run_blocking_stop()
     except KeyboardInterrupt:
         typer.echo(
-            "[start] cleanup interrupted again; run `python3 servers/servers-amdhpc/client.py stop -b`.",
+            "[start] cleanup interrupted again; rerun stop with the same --port-profile.",
             err=True,
         )
         return
@@ -294,7 +335,7 @@ def _cleanup_after_start_interrupt(ctx: typer.Context) -> None:
     last_line: str | None = None
 
     while time.monotonic() < deadline:
-        progress_payload = _run_command(ctx, "/start/status")
+        progress_payload = _run_command(ctx, "/start/status", {"port_profile": port_profile})
         data = progress_payload.get("data")
         if isinstance(data, dict):
             status = data.get("status")
@@ -323,7 +364,7 @@ def _cleanup_after_start_interrupt(ctx: typer.Context) -> None:
                     retry_payload = run_blocking_stop()
                 except KeyboardInterrupt:
                     typer.echo(
-                        "[start] cleanup interrupted again; run `python3 servers/servers-amdhpc/client.py stop -b`.",
+                        "[start] cleanup interrupted again; rerun stop with the same --port-profile.",
                         err=True,
                     )
                     return
@@ -340,7 +381,7 @@ def _cleanup_after_start_interrupt(ctx: typer.Context) -> None:
         time.sleep(1.0)
 
     typer.echo(
-        "[start] cleanup timed out waiting for submission; run `python3 servers/servers-amdhpc/client.py stop -b` if needed.",
+        "[start] cleanup timed out waiting for submission; rerun stop with the same --port-profile if needed.",
         err=True,
     )
 
@@ -348,6 +389,12 @@ def _cleanup_after_start_interrupt(ctx: typer.Context) -> None:
 @app.command()
 def start(
     ctx: typer.Context,
+    port_profile: int = typer.Option(
+        ...,
+        "--port-profile",
+        "-P",
+        help="Port profile numeric ID from configs/port_profiles.toml.",
+    ),
     partition: str = typer.Option(..., "--partition", "-p", help="Configured partition key."),
     model: str = typer.Option(..., "--model", "-m", help="Configured model key."),
     block: bool = typer.Option(
@@ -363,19 +410,20 @@ def start(
             payload = _run_blocking_with_progress(
                 ctx,
                 endpoint="/start",
-                payload={"partition": partition, "model": model, "block": True},
+                payload={"port_profile": port_profile, "partition": partition, "model": model, "block": True},
                 progress_endpoint="/start/status",
+                progress_payload={"port_profile": port_profile},
                 progress_tag="start",
                 timeout_seconds=24.0 * 60.0 * 60.0,
             )
         except KeyboardInterrupt:
-            _cleanup_after_start_interrupt(ctx)
+            _cleanup_after_start_interrupt(ctx, port_profile=port_profile)
             raise typer.Exit(code=130)
     else:
         payload = _run_command_with_timeout(
             ctx,
             "/start",
-            payload={"partition": partition, "model": model, "block": False},
+            payload={"port_profile": port_profile, "partition": partition, "model": model, "block": False},
             timeout_seconds=None,
         )
     _require_ok(payload)
@@ -385,6 +433,12 @@ def start(
 @app.command()
 def stop(
     ctx: typer.Context,
+    port_profile: int = typer.Option(
+        ...,
+        "--port-profile",
+        "-P",
+        help="Port profile numeric ID from configs/port_profiles.toml.",
+    ),
     block: bool = typer.Option(
         False,
         "--block",
@@ -397,8 +451,9 @@ def stop(
         payload = _run_blocking_with_progress(
             ctx,
             endpoint="/stop",
-            payload={"block": True},
+            payload={"port_profile": port_profile, "block": True},
             progress_endpoint="/stop/status",
+            progress_payload={"port_profile": port_profile},
             progress_tag="stop",
             timeout_seconds=10.0 * 60.0,
         )
@@ -406,7 +461,7 @@ def stop(
         payload = _run_command_with_timeout(
             ctx,
             "/stop",
-            payload={"block": False},
+            payload={"port_profile": port_profile, "block": False},
             timeout_seconds=None,
         )
     _require_ok(payload)
@@ -414,9 +469,17 @@ def stop(
 
 
 @app.command()
-def stop_poll(ctx: typer.Context) -> None:
+def stop_poll(
+    ctx: typer.Context,
+    port_profile: int = typer.Option(
+        ...,
+        "--port-profile",
+        "-P",
+        help="Port profile numeric ID from configs/port_profiles.toml.",
+    ),
+) -> None:
     """Check whether a previous non-block stop has fully finished."""
-    payload = _run_command(ctx, "/stop/poll")
+    payload = _run_command(ctx, "/stop/poll", {"port_profile": port_profile})
     _require_ok(payload)
     _print_json(payload)
 
@@ -424,10 +487,16 @@ def stop_poll(ctx: typer.Context) -> None:
 @app.command()
 def logs(
     ctx: typer.Context,
+    port_profile: int = typer.Option(
+        ...,
+        "--port-profile",
+        "-P",
+        help="Port profile numeric ID from configs/port_profiles.toml.",
+    ),
     lines: int = typer.Option(200, "--lines", "-n", min=1, help="Lines per log file."),
 ) -> None:
     """Fetch current tail of Slurm/Jaeger/vLLM logs."""
-    payload = _run_command(ctx, "/logs", {"lines": lines})
+    payload = _run_command(ctx, "/logs", {"port_profile": port_profile, "lines": lines})
     _require_ok(payload)
 
     data = payload.get("data")
@@ -451,9 +520,17 @@ def logs(
 
 
 @app.command()
-def up(ctx: typer.Context) -> None:
+def up(
+    ctx: typer.Context,
+    port_profile: int = typer.Option(
+        ...,
+        "--port-profile",
+        "-P",
+        help="Port profile numeric ID from configs/port_profiles.toml.",
+    ),
+) -> None:
     """Check whether both tunneled vLLM and Jaeger endpoints are up."""
-    payload = _run_command(ctx, "/up")
+    payload = _run_command(ctx, "/up", {"port_profile": port_profile})
     _require_ok(payload)
     _print_json(payload)
 
@@ -461,6 +538,12 @@ def up(ctx: typer.Context) -> None:
 @app.command(name="wait-up")
 def wait_up(
     ctx: typer.Context,
+    port_profile: int = typer.Option(
+        ...,
+        "--port-profile",
+        "-P",
+        help="Port profile numeric ID from configs/port_profiles.toml.",
+    ),
     timeout_seconds: int = typer.Option(
         900,
         "--timeout-seconds",
@@ -489,6 +572,7 @@ def wait_up(
         ctx,
         "/wait-up",
         payload={
+            "port_profile": port_profile,
             "timeout_seconds": timeout_seconds,
             "poll_interval_seconds": poll_interval_seconds,
             "defer_timeout_until_running": defer_timeout_until_running,
@@ -500,9 +584,17 @@ def wait_up(
 
 
 @app.command()
-def status(ctx: typer.Context) -> None:
+def status(
+    ctx: typer.Context,
+    port_profile: int = typer.Option(
+        ...,
+        "--port-profile",
+        "-P",
+        help="Port profile numeric ID from configs/port_profiles.toml.",
+    ),
+) -> None:
     """Show control-plane status and configured partitions/models."""
-    payload = _run_command(ctx, "/status")
+    payload = _run_command(ctx, "/status", {"port_profile": port_profile})
     _require_ok(payload)
     _print_json(payload)
 

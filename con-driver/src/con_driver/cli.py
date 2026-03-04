@@ -47,7 +47,6 @@ _OPTIONS_WITH_VALUE = {
     "--port-profile-id",
     "--agent-name",
     "--seed",
-    "--vllm-log-endpoint",
     "--vllm-log-interval-s",
     "--vllm-log-timeout-s",
     "--gateway-url",
@@ -470,11 +469,6 @@ def run(
         "--vllm-log/--no-vllm-log",
         help="Enable vLLM Prometheus metrics logging process.",
     ),
-    vllm_log_endpoint: str | None = typer.Option(
-        None,
-        "--vllm-log-endpoint",
-        help="Prometheus endpoint polled by the vLLM monitor.",
-    ),
     vllm_log_interval_s: float | None = typer.Option(
         None,
         "--vllm-log-interval-s",
@@ -676,14 +670,11 @@ def run(
             key="vllm_log",
         )
 
-        configured_vllm_log_endpoint_value = _coerce_str(
-            (
-                vllm_log_endpoint
-                if vllm_log_endpoint is not None
-                else config_values.get("vllm_log_endpoint")
-            ),
-            key="vllm_log_endpoint",
-        )
+        if "vllm_log_endpoint" in config_values:
+            raise ValueError(
+                "Config key 'vllm_log_endpoint' is no longer supported. "
+                "vLLM log endpoint is always resolved from 'port_profile_id'."
+            )
 
         vllm_log_interval_s_value = _coerce_float(
             (
@@ -754,7 +745,6 @@ def run(
             configured_gateway_url=configured_gateway_url_value,
             gateway_timeout_s=gateway_timeout_s_value,
             configured_vllm_log=configured_vllm_log_value,
-            configured_vllm_log_endpoint=configured_vllm_log_endpoint_value,
         )
         synthesized_forwarded_args = harbor_runtime.forwarded_args
         launch_env = harbor_runtime.trial_env

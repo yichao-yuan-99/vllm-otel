@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 import requests
-from prometheus_client.parser import text_string_to_metric_families
 
 DEFAULT_ENDPOINT = "http://localhost:12138/metrics"
 DEFAULT_INTERVAL_S = 1.0
@@ -37,55 +36,18 @@ def _normalize_endpoint(endpoint: str) -> str:
     return value
 
 
-def _json_safe(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    return repr(value)
-
-
 def _fetch_metrics(endpoint: str, timeout_s: float) -> str:
     response = requests.get(endpoint, timeout=timeout_s)
     response.raise_for_status()
     return response.text
 
 
-def _convert_prometheus_to_record(raw_metrics: str) -> dict[str, Any]:
-    record: dict[str, Any] = {
+def _build_raw_record(raw_metrics: str) -> dict[str, Any]:
+    return {
         "timestamp": int(time.time()),
         "captured_at": _utc_now_iso(),
-        "families": {},
+        "content": raw_metrics,
     }
-    families_out: dict[str, Any] = {}
-
-    for family in text_string_to_metric_families(raw_metrics):
-        if not family.name.startswith("vllm"):
-            continue
-
-        family_payload = {
-            "type": family.type,
-            "help": family.documentation,
-            "samples": [],
-        }
-        for sample in family.samples:
-            family_payload["samples"].append(
-                {
-                    "name": sample.name,
-                    "labels": dict(sample.labels),
-                    "value": float(sample.value),
-                    "timestamp": _json_safe(sample.timestamp),
-                    "exemplar": _json_safe(sample.exemplar),
-                    "native_histogram": _json_safe(sample.native_histogram),
-                }
-            )
-
-        families_out[family.name] = family_payload
-
-    record["families"] = families_out
-    return record
 
 
 @dataclass
@@ -256,7 +218,7 @@ def run_monitor(argv: list[str] | None = None) -> int:
             if args.verbose:
                 print(f"Polling {endpoint}", file=sys.stderr)
             raw = _fetch_metrics(endpoint, timeout_s)
-            writer.append(_convert_prometheus_to_record(raw))
+            writer.append(_build_raw_record(raw))
         except Exception as exc:
             writer.finalize(status="failed", error=str(exc))
             raise RuntimeError(f"vLLM monitor failed: {exc}") from exc

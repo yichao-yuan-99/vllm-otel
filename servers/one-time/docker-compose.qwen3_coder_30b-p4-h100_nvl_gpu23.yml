@@ -1,0 +1,61 @@
+name: vllm-otel-one-time-qwen3-coder-30b-p4-h100-nvl-gpu23
+
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    container_name: jaeger-one-time-p4
+    restart: unless-stopped
+    environment:
+      COLLECTOR_ZIPKIN_HOST_PORT: ":9411"
+    ports:
+      - "56198:16686"
+      - "53477:4317"
+
+  vllm:
+    image: yichaoyuan/vllm-openai-otel-lp:v0.14.0-otel-lp
+    container_name: vllm-openai-otel-lp-one-time-p4
+    restart: unless-stopped
+    depends_on:
+      - jaeger
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids:
+                - "2"
+                - "3"
+              capabilities:
+                - gpu
+    environment:
+      HF_HOME: ${HF_HOME:?Set HF_HOME in the current shell}
+      HF_HUB_CACHE: ${HF_HUB_CACHE:?Set HF_HUB_CACHE in the current shell}
+      HF_TOKEN: ${HF_TOKEN-}
+      OTEL_SERVICE_NAME: vllm-server
+      OTEL_EXPORTER_OTLP_TRACES_INSECURE: "true"
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: grpc://jaeger:4317
+      VLLM_FORCE_SEQ_TRUST_REMOTE_CODE: "false"
+    volumes:
+      - ${HF_HOME:?Set HF_HOME in the current shell}:${HF_HOME:?Set HF_HOME in the current shell}
+      - ${HF_HUB_CACHE:?Set HF_HUB_CACHE in the current shell}:${HF_HUB_CACHE:?Set HF_HUB_CACHE in the current shell}
+    ports:
+      - "52341:52341"
+    entrypoint:
+      - /opt/vllm-plugins/vllm_entrypoint.sh
+    command:
+      - --model
+      - Qwen/Qwen3-Coder-30B-A3B-Instruct
+      - --served-model-name
+      - Qwen3-Coder-30B-A3B-Instruct
+      - --port
+      - "52341"
+      - --tensor-parallel-size
+      - "2"
+      - --otlp-traces-endpoint
+      - grpc://jaeger:4317
+      - --collect-detailed-traces
+      - all
+      - --enable-prompt-tokens-details
+      - --logits-processors
+      - forceSeq.force_sequence_logits_processor:ForceSequenceAdapter

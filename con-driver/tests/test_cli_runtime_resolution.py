@@ -11,6 +11,7 @@ if str(CON_DRIVER_SRC) not in sys.path:
 
 from con_driver import cli
 from con_driver.backends.harbor import runtime as harbor_runtime
+from con_driver.vllm_metrics_monitor import _build_raw_record
 
 
 def test_main_synthesizes_runtime_from_port_profile(
@@ -170,3 +171,42 @@ def test_main_preserves_manual_forwarded_args_without_port_profile(
     assert captured["resolved_agent_name"] == "terminus-2"
     assert captured["resolved_model_name"] is None
     assert captured["vllm_log_enabled"] is False
+
+
+def test_main_rejects_manual_vllm_log_endpoint(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[driver]",
+                'driver_backend = "harbor"',
+                'pool = "terminal-bench@2.0"',
+                'pattern = "eager"',
+                "max_concurrent = 1",
+                "n_task = 1",
+                'results_dir = "out"',
+                "port_profile_id = 1",
+                'agent = "terminus-2"',
+                'vllm_log_endpoint = "http://127.0.0.1:24123/metrics"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(["--config", str(config_path)])
+
+    assert exit_code == 1
+    assert "vllm_log_endpoint" in capsys.readouterr().err
+
+
+def test_vllm_metrics_monitor_keeps_raw_metrics_text() -> None:
+    record = _build_raw_record("# HELP test\nvllm:num_requests_running 3\n")
+
+    assert isinstance(record["timestamp"], int)
+    assert isinstance(record["captured_at"], str)
+    assert record["content"] == "# HELP test\nvllm:num_requests_running 3\n"
+    assert "families" not in record

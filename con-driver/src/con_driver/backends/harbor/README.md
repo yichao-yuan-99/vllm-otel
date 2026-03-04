@@ -31,7 +31,8 @@ When `port_profile_id` is provided, `resolve_harbor_runtime(...)` resolves:
 - `vllm_log_enabled`
   - defaults to `true`
 - `vllm_log_endpoint`
-  - defaults to `http://127.0.0.1:<vllm_port>/metrics`
+  - always resolved as `http://127.0.0.1:<vllm_port>/metrics`
+  - not user-configurable
 - `resolved_agent_name`
   - from top-level `agent` / `agent_name`, or forwarded `--agent`
 - `resolved_model_name`
@@ -110,7 +111,6 @@ Optional user overrides still allowed:
 - `gateway_job_output_root`
 - `gateway_timeout_s`
 - `vllm_log`
-- `vllm_log_endpoint`
 - `vllm_log_interval_s`
 - `vllm_log_timeout_s`
 - additional Harbor forwarded args, as long as they do not override Harbor-managed fields

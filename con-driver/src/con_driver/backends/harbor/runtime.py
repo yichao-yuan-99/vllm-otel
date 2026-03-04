@@ -104,7 +104,6 @@ def resolve_harbor_runtime(
     configured_gateway_url: str | None,
     gateway_timeout_s: float,
     configured_vllm_log: bool | None,
-    configured_vllm_log_endpoint: str | None,
 ) -> HarborRuntimeResolution:
     resolved_port_profile = load_port_profile(port_profile_id) if port_profile_id is not None else None
     derived_vllm_base_url = (
@@ -128,10 +127,13 @@ def resolve_harbor_runtime(
         if configured_vllm_log is not None
         else (True if port_profile_id is not None else False)
     )
+    if vllm_log_enabled and resolved_port_profile is None:
+        raise ValueError(
+            "vLLM metrics logging requires 'port_profile_id' so the endpoint can be "
+            "resolved from configs/port_profiles.toml."
+        )
     vllm_log_endpoint = (
-        configured_vllm_log_endpoint
-        or (f"{derived_vllm_base_url}/metrics" if derived_vllm_base_url is not None else None)
-        or "http://localhost:12138/metrics"
+        f"{derived_vllm_base_url}/metrics" if derived_vllm_base_url is not None else ""
     )
 
     combined_forwarded_args = list(forwarded_args_from_config) + list(forwarded_args_from_cli)
