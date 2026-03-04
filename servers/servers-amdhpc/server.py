@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import signal
+import time
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -381,29 +382,102 @@ def main() -> int:
         pass
     finally:
         server.server_close()
+        stop_requested_profiles: set[int] = set()
+        stop_request_failures: set[int] = set()
+        stop_poll_failures: set[int] = set()
         stopped_count = 0
-        failure_count = 0
+
+        # Phase 1: request cancellation for all profiles first (non-blocking).
         for port_profile_id in sorted(control_plane.config.port_profiles.keys()):
             try:
                 cleanup_result = control_plane.stop(
                     port_profile_id=port_profile_id,
                     reason="server_exit",
-                    block=True,
+                    block=False,
                 )
-                stopped_count += 1
-                print(
-                    "shutdown cleanup: stopped active job for profile "
-                    f"{port_profile_id}: {cleanup_result.data.get('job_id')} "
-                    f"(previous_status={cleanup_result.data.get('previous_status')})"
-                )
+                result_data = cleanup_result.data if isinstance(cleanup_result.data, dict) else {}
+                final_status = str(result_data.get("final_status", "unknown"))
+                job_id = result_data.get("job_id")
+                if final_status == "cancelling":
+                    stop_requested_profiles.add(port_profile_id)
+                    print(
+                        "shutdown cleanup: stop requested for profile "
+                        f"{port_profile_id}: {job_id} "
+                        f"(previous_status={result_data.get('previous_status')})"
+                    )
+                else:
+                    print(
+                        "shutdown cleanup: profile "
+                        f"{port_profile_id} already inactive "
+                        f"(final_status={final_status})"
+                    )
             except ControlPlaneError as exc:
                 if exc.code == 21:
                     continue
-                failure_count += 1
+                stop_request_failures.add(port_profile_id)
+                stop_requested_profiles.add(port_profile_id)
                 print(
-                    "shutdown cleanup failed for profile "
+                    "shutdown cleanup failed to request stop for profile "
                     f"{port_profile_id}: code={exc.code} message={exc.message}"
                 )
+
+        # Phase 2: wait for all previously requested stops to complete.
+        if stop_requested_profiles:
+            deadline = time.monotonic() + control_plane.config.stop_wait_timeout_seconds
+            pending_profiles = set(stop_requested_profiles)
+            last_reported_status: dict[int, tuple[str | None, str | None]] = {}
+            while pending_profiles:
+                finished_profiles: set[int] = set()
+                for port_profile_id in sorted(pending_profiles):
+                    try:
+                        poll_result = control_plane.stop_poll(port_profile_id=port_profile_id)
+                    except ControlPlaneError as exc:
+                        if port_profile_id not in stop_poll_failures:
+                            stop_poll_failures.add(port_profile_id)
+                            print(
+                                "shutdown cleanup polling failed for profile "
+                                f"{port_profile_id}: code={exc.code} message={exc.message}"
+                            )
+                        continue
+
+                    poll_data = poll_result.data if isinstance(poll_result.data, dict) else {}
+                    done = bool(poll_data.get("done"))
+                    job_id = poll_data.get("job_id")
+                    job_status = poll_data.get("job_status")
+                    if done:
+                        finished_profiles.add(port_profile_id)
+                        stopped_count += 1
+                        print(
+                            "shutdown cleanup: stopped active job for profile "
+                            f"{port_profile_id}: {job_id} "
+                            f"(final_status={job_status})"
+                        )
+                        continue
+
+                    current_status = (
+                        str(job_id) if job_id is not None else None,
+                        str(job_status) if job_status is not None else None,
+                    )
+                    if last_reported_status.get(port_profile_id) != current_status:
+                        print(
+                            "shutdown cleanup: waiting on profile "
+                            f"{port_profile_id} job={job_id} status={job_status}"
+                        )
+                        last_reported_status[port_profile_id] = current_status
+
+                pending_profiles -= finished_profiles
+                if not pending_profiles:
+                    break
+                if time.monotonic() >= deadline:
+                    print(
+                        "shutdown cleanup timed out waiting for profiles: "
+                        f"{sorted(pending_profiles)}"
+                    )
+                    stop_poll_failures.update(pending_profiles)
+                    break
+                time.sleep(control_plane.config.stop_poll_interval_seconds)
+
+        failure_count = len(stop_request_failures | stop_poll_failures)
         if stopped_count == 0 and failure_count == 0:
             print("shutdown cleanup: no active jobs")
         elif failure_count > 0:
