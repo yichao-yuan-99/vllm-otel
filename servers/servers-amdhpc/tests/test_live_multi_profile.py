@@ -13,12 +13,15 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
+import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 import unittest
+from dataclasses import dataclass
 from typing import Any
 from urllib import error as urlerror
 from urllib import request as urlrequest
@@ -41,6 +44,61 @@ STOP_TIMEOUT_SECONDS = float(os.environ.get("AMDHPC_STOP_TIMEOUT_SECONDS", "1800
 REQUEST_TIMEOUT_SECONDS = float(os.environ.get("AMDHPC_REQUEST_TIMEOUT_SECONDS", "120"))
 MODEL_READY_TIMEOUT_SECONDS = float(os.environ.get("AMDHPC_MODEL_READY_TIMEOUT_SECONDS", "120"))
 QUERY_DURATION_SECONDS = float(os.environ.get("AMDHPC_QUERY_DURATION_SECONDS", "120"))
+QUERY_PROGRESS_INTERVAL_SECONDS = float(os.environ.get("AMDHPC_QUERY_PROGRESS_INTERVAL_SECONDS", "30"))
+COMMAND_HEARTBEAT_SECONDS = float(os.environ.get("AMDHPC_COMMAND_HEARTBEAT_SECONDS", "30"))
+
+_ACTIVE_PROCESSES_LOCK = threading.Lock()
+_ACTIVE_PROCESSES: dict[int, tuple[subprocess.Popen[str], int | None, str]] = {}
+
+
+@dataclass
+class PhaseInterruptedError(RuntimeError):
+    phase_name: str
+    partial_results: dict[int, dict[str, Any]]
+
+    def __str__(self) -> str:
+        return f"phase {self.phase_name} interrupted by user"
+
+
+def _log(message: str, *, profile_id: int | None = None) -> None:
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    prefix = f"[amdhpc-live-test {timestamp}]"
+    if profile_id is not None:
+        prefix = f"{prefix} [profile={profile_id}]"
+    print(f"{prefix} {message}", flush=True)
+
+
+def _register_active_process(
+    process: subprocess.Popen[str],
+    *,
+    profile_id: int | None,
+    command_label: str,
+) -> None:
+    with _ACTIVE_PROCESSES_LOCK:
+        _ACTIVE_PROCESSES[id(process)] = (process, profile_id, command_label)
+
+
+def _unregister_active_process(process: subprocess.Popen[str]) -> None:
+    with _ACTIVE_PROCESSES_LOCK:
+        _ACTIVE_PROCESSES.pop(id(process), None)
+
+
+def _interrupt_active_processes(*, reason: str) -> None:
+    with _ACTIVE_PROCESSES_LOCK:
+        active = list(_ACTIVE_PROCESSES.values())
+    if not active:
+        _log(f"{reason}: no active client subprocesses to interrupt")
+        return
+
+    _log(f"{reason}: interrupting {len(active)} active client subprocesses")
+    for process, profile_id, command_label in active:
+        if process.poll() is not None:
+            continue
+        try:
+            process.send_signal(signal.SIGINT)
+            _log(f"sent SIGINT to running command {command_label}", profile_id=profile_id)
+        except OSError as exc:
+            _log(f"failed to send SIGINT to {command_label}: {exc}", profile_id=profile_id)
 
 
 def _load_port_profile(profile_id: int) -> dict[str, Any]:
@@ -121,47 +179,151 @@ def _extract_last_json_object(text: str) -> dict[str, Any]:
     raise ValueError("could not locate trailing JSON payload in command output")
 
 
-def _run_client_command(args: list[str], *, timeout_seconds: float) -> dict[str, Any]:
-    command = ["python3", str(CLIENT_PATH), *args]
+def _stream_process_output(
+    stream: Any,
+    *,
+    sink: list[str],
+    profile_id: int | None,
+    command_label: str,
+) -> None:
     try:
-        completed = subprocess.run(
+        for line in stream:
+            sink.append(line)
+            text = line.rstrip()
+            if text:
+                _log(f"{command_label}: {text}", profile_id=profile_id)
+    finally:
+        stream.close()
+
+
+def _run_client_command(
+    args: list[str],
+    *,
+    timeout_seconds: float,
+    profile_id: int | None = None,
+) -> dict[str, Any]:
+    command = ["python3", str(CLIENT_PATH), *args]
+    command_label = " ".join(args[:3]) if len(args) >= 3 else " ".join(args)
+    env = dict(os.environ)
+    env["PYTHONUNBUFFERED"] = "1"
+
+    stdout_lines: list[str] = []
+    try:
+        process = subprocess.Popen(
             command,
             cwd=REPO_ROOT,
-            capture_output=True,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
-            timeout=timeout_seconds,
-            check=False,
+            bufsize=1,
         )
-    except subprocess.TimeoutExpired as exc:
+    except OSError as exc:
         return {
             "command": command,
             "returncode": None,
-            "stdout": exc.stdout or "",
-            "stderr": exc.stderr or "",
+            "stdout": "",
+            "stderr": "",
             "payload": None,
-            "error": f"command timed out after {timeout_seconds} seconds",
+            "error": f"failed to start command: {exc}",
         }
 
-    payload: dict[str, Any] | None = None
-    parse_error: str | None = None
-    if completed.stdout.strip():
-        try:
-            payload = _extract_last_json_object(completed.stdout)
-        except ValueError as exc:
-            parse_error = str(exc)
+    _register_active_process(process, profile_id=profile_id, command_label=command_label)
 
-    return {
-        "command": command,
-        "returncode": completed.returncode,
-        "stdout": completed.stdout,
-        "stderr": completed.stderr,
-        "payload": payload,
-        "error": parse_error,
-    }
+    reader: threading.Thread | None = None
+    try:
+        if process.stdout is not None:
+            reader = threading.Thread(
+                target=_stream_process_output,
+                kwargs={
+                    "stream": process.stdout,
+                    "sink": stdout_lines,
+                    "profile_id": profile_id,
+                    "command_label": command_label,
+                },
+                daemon=True,
+            )
+            reader.start()
+
+        started = time.monotonic()
+        next_heartbeat_at = started + COMMAND_HEARTBEAT_SECONDS
+        timeout_hit = False
+
+        while True:
+            returncode = process.poll()
+            if returncode is not None:
+                break
+            now = time.monotonic()
+            if now >= next_heartbeat_at:
+                _log(
+                    (
+                        f"{command_label}: still running "
+                        f"elapsed_seconds={round(now - started, 1)}"
+                    ),
+                    profile_id=profile_id,
+                )
+                next_heartbeat_at = now + COMMAND_HEARTBEAT_SECONDS
+            if now - started >= timeout_seconds:
+                timeout_hit = True
+                _log(
+                    f"{command_label}: timeout reached after {timeout_seconds} seconds; terminating",
+                    profile_id=profile_id,
+                )
+                process.terminate()
+                break
+            time.sleep(1.0)
+
+        if timeout_hit:
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                _log(f"{command_label}: did not terminate promptly; killing", profile_id=profile_id)
+                process.kill()
+                process.wait(timeout=10)
+        else:
+            process.wait()
+
+        if reader is not None:
+            reader.join(timeout=5)
+
+        stdout_text = "".join(stdout_lines)
+        stderr_text = ""
+        if timeout_hit:
+            return {
+                "command": command,
+                "returncode": None,
+                "stdout": stdout_text,
+                "stderr": stderr_text,
+                "payload": None,
+                "error": f"command timed out after {timeout_seconds} seconds",
+            }
+
+        payload: dict[str, Any] | None = None
+        parse_error: str | None = None
+        if stdout_text.strip():
+            try:
+                payload = _extract_last_json_object(stdout_text)
+            except ValueError as exc:
+                parse_error = str(exc)
+
+        return {
+            "command": command,
+            "returncode": process.returncode,
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+            "payload": payload,
+            "error": parse_error,
+        }
+    finally:
+        _unregister_active_process(process)
 
 
 def _run_profile_start(profile_id: int) -> dict[str, Any]:
-    return _run_client_command(
+    _log(
+        f"starting profile with ssh_target={SSH_TARGET} partition={PARTITION} model={MODEL_KEY}",
+        profile_id=profile_id,
+    )
+    result = _run_client_command(
         [
             "start",
             "--ssh-target",
@@ -175,14 +337,29 @@ def _run_profile_start(profile_id: int) -> dict[str, Any]:
             "-b",
         ],
         timeout_seconds=START_TIMEOUT_SECONDS,
+        profile_id=profile_id,
     )
+    payload = result.get("payload")
+    if isinstance(payload, dict) and payload.get("ok"):
+        _log("start completed successfully", profile_id=profile_id)
+    else:
+        _log(f"start failed returncode={result.get('returncode')}", profile_id=profile_id)
+    return result
 
 
 def _run_profile_stop(profile_id: int) -> dict[str, Any]:
-    return _run_client_command(
+    _log("stopping profile", profile_id=profile_id)
+    result = _run_client_command(
         ["stop", "-P", str(profile_id)],
         timeout_seconds=STOP_TIMEOUT_SECONDS,
+        profile_id=profile_id,
     )
+    payload = result.get("payload")
+    if isinstance(payload, dict) and payload.get("ok"):
+        _log("stop completed successfully", profile_id=profile_id)
+    else:
+        _log(f"stop failed returncode={result.get('returncode')}", profile_id=profile_id)
+    return result
 
 
 def _probe_tcp_port(port: int, *, timeout_seconds: float) -> dict[str, Any]:
@@ -259,7 +436,12 @@ def _run_chat_completion(vllm_port: int, model_name: str) -> tuple[bool, dict[st
 
 
 def _check_profile_health(profile_id: int) -> dict[str, Any]:
-    up_result = _run_client_command(["up", "-P", str(profile_id)], timeout_seconds=REQUEST_TIMEOUT_SECONDS)
+    _log("checking health via control-plane up/status", profile_id=profile_id)
+    up_result = _run_client_command(
+        ["up", "-P", str(profile_id)],
+        timeout_seconds=REQUEST_TIMEOUT_SECONDS,
+        profile_id=profile_id,
+    )
     payload = up_result.get("payload")
     if not isinstance(payload, dict):
         raise RuntimeError(f"profile {profile_id} up command returned no JSON payload: {up_result}")
@@ -271,6 +453,13 @@ def _check_profile_health(profile_id: int) -> dict[str, Any]:
         raise RuntimeError(f"profile {profile_id} is not ready: {json.dumps(up_result, indent=2)}")
 
     ports = _load_port_profile(profile_id)
+    _log(
+        (
+            "probing local ports "
+            f"vllm={ports['vllm_port']} jaeger_ui={ports['jaeger_api_port']} otlp={ports['jaeger_otlp_port']}"
+        ),
+        profile_id=profile_id,
+    )
     otlp_probe = _probe_tcp_port(ports["jaeger_otlp_port"], timeout_seconds=REQUEST_TIMEOUT_SECONDS)
     if not otlp_probe.get("ok"):
         raise RuntimeError(f"profile {profile_id} OTLP port probe failed: {json.dumps(otlp_probe, indent=2)}")
@@ -280,6 +469,7 @@ def _check_profile_health(profile_id: int) -> dict[str, Any]:
         raise RuntimeError(f"profile {profile_id} /v1/models is not ready: {json.dumps(models_probe, indent=2)}")
 
     model_name = _extract_model_name(models_probe["result"])
+    _log(f"health check passed model={model_name}", profile_id=profile_id)
     return {
         "profile_id": profile_id,
         "ports": ports,
@@ -297,10 +487,18 @@ def _query_profile_for_duration(
 ) -> dict[str, Any]:
     ports = _load_port_profile(profile_id)
     deadline = time.monotonic() + duration_seconds
+    next_progress_at = time.monotonic() + QUERY_PROGRESS_INTERVAL_SECONDS
     success_count = 0
     attempts = 0
     last_response: dict[str, Any] | None = None
 
+    _log(
+        (
+            f"starting query loop for {round(duration_seconds, 1)}s "
+            f"against vllm_port={ports['vllm_port']} model={model_name}"
+        ),
+        profile_id=profile_id,
+    )
     while time.monotonic() < deadline:
         attempts += 1
         ok, result = _run_chat_completion(ports["vllm_port"], model_name)
@@ -317,7 +515,21 @@ def _query_profile_for_duration(
             raise RuntimeError(f"profile {profile_id} returned no choices: {json.dumps(result, indent=2)}")
         success_count += 1
         last_response = result
+        if time.monotonic() >= next_progress_at:
+            remaining_seconds = max(deadline - time.monotonic(), 0.0)
+            _log(
+                (
+                    f"query progress successes={success_count} attempts={attempts} "
+                    f"remaining_seconds={round(remaining_seconds, 1)}"
+                ),
+                profile_id=profile_id,
+            )
+            next_progress_at = time.monotonic() + QUERY_PROGRESS_INTERVAL_SECONDS
 
+    _log(
+        f"query loop complete successes={success_count} attempts={attempts}",
+        profile_id=profile_id,
+    )
     return {
         "profile_id": profile_id,
         "duration_seconds": duration_seconds,
@@ -330,14 +542,38 @@ def _query_profile_for_duration(
 def _collect_parallel_results(
     func: Any,
     items: tuple[int, ...] | list[int],
+    *,
+    phase_name: str,
+    on_result: Any | None = None,
 ) -> dict[int, dict[str, Any]]:
+    _log(f"phase={phase_name} launching {len(items)} parallel tasks")
     results: dict[int, dict[str, Any]] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(items)) as executor:
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(items))
+    future_to_item: dict[concurrent.futures.Future[dict[str, Any]], int] = {}
+    try:
         future_to_item = {executor.submit(func, item): item for item in items}
         for future in concurrent.futures.as_completed(future_to_item):
             item = future_to_item[future]
-            results[item] = future.result()
-    return results
+            try:
+                results[item] = future.result()
+            except Exception as exc:
+                _log(f"phase={phase_name} task failed: {exc}", profile_id=item)
+                raise
+            if on_result is not None:
+                on_result(item, results[item])
+            _log(f"phase={phase_name} task finished", profile_id=item)
+        executor.shutdown(wait=True, cancel_futures=False)
+        return results
+    except KeyboardInterrupt as exc:
+        _log(f"phase={phase_name} interrupted by user")
+        _interrupt_active_processes(reason=f"phase={phase_name}")
+        for future in future_to_item:
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise PhaseInterruptedError(phase_name=phase_name, partial_results=dict(results)) from exc
+    except Exception:
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
 
 
 @unittest.skipUnless(
@@ -352,13 +588,35 @@ class LiveMultiProfileIntegrationTest(unittest.TestCase):
 
     def test_profiles_5_to_9_can_start_query_and_stop_concurrently(self) -> None:
         self.assertTrue(CLIENT_PATH.exists(), f"missing client CLI: {CLIENT_PATH}")
+        _log(
+            (
+                "starting live multi-profile test "
+                f"profiles={list(PORT_PROFILES)} ssh_target={SSH_TARGET} "
+                f"partition={PARTITION} model={MODEL_KEY}"
+            )
+        )
 
-        started_profiles: list[int] = []
+        started_profiles: set[int] = set()
         cleanup_failures: dict[int, dict[str, Any]] = {}
         body_error: tuple[type[BaseException], BaseException, Any] | None = None
+        interrupted_phase: str | None = None
+
+        def _record_started_profile(profile_id: int, result: dict[str, Any]) -> None:
+            payload = result.get("payload")
+            if (
+                result.get("returncode") == 0
+                and isinstance(payload, dict)
+                and payload.get("ok")
+            ):
+                started_profiles.add(profile_id)
 
         try:
-            start_results = _collect_parallel_results(_run_profile_start, list(PORT_PROFILES))
+            start_results = _collect_parallel_results(
+                _run_profile_start,
+                list(PORT_PROFILES),
+                phase_name="start",
+                on_result=_record_started_profile,
+            )
             start_failures = {
                 profile_id: result
                 for profile_id, result in start_results.items()
@@ -366,29 +624,37 @@ class LiveMultiProfileIntegrationTest(unittest.TestCase):
                 or not isinstance(result.get("payload"), dict)
                 or not result["payload"].get("ok")
             }
-            started_profiles = sorted(
-                profile_id
-                for profile_id, result in start_results.items()
-                if profile_id not in start_failures
-            )
             self.assertFalse(
                 start_failures,
                 "concurrent start failed:\n" + json.dumps(start_failures, indent=2, sort_keys=True),
             )
 
-            health_results = _collect_parallel_results(_check_profile_health, list(PORT_PROFILES))
+            _log("all profile starts completed; beginning health checks")
+            health_results = _collect_parallel_results(
+                _check_profile_health,
+                list(PORT_PROFILES),
+                phase_name="health",
+            )
             model_names = {
                 profile_id: str(result["model_name"])
                 for profile_id, result in health_results.items()
             }
+            _log(
+                "all profile health checks passed "
+                + json.dumps(model_names, indent=2, sort_keys=True)
+            )
 
             query_results: dict[int, dict[str, Any]] = {}
             query_failures: dict[int, str] = {}
+            _log(
+                f"starting concurrent query phase for {round(QUERY_DURATION_SECONDS, 1)} seconds"
+            )
             mp_context = multiprocessing.get_context("spawn")
-            with concurrent.futures.ProcessPoolExecutor(
+            executor = concurrent.futures.ProcessPoolExecutor(
                 max_workers=len(PORT_PROFILES),
                 mp_context=mp_context,
-            ) as executor:
+            )
+            try:
                 future_to_profile = {
                     executor.submit(
                         _query_profile_for_duration,
@@ -402,8 +668,25 @@ class LiveMultiProfileIntegrationTest(unittest.TestCase):
                     profile_id = future_to_profile[future]
                     try:
                         query_results[profile_id] = future.result()
+                        _log(
+                            (
+                                "query worker finished "
+                                f"successes={query_results[profile_id]['success_count']} "
+                                f"attempts={query_results[profile_id]['attempts']}"
+                            ),
+                            profile_id=profile_id,
+                        )
                     except Exception as exc:  # pragma: no cover - worker boundary
                         query_failures[profile_id] = str(exc)
+                        _log(f"query worker failed: {exc}", profile_id=profile_id)
+                executor.shutdown(wait=True, cancel_futures=False)
+            except KeyboardInterrupt as exc:
+                _log("phase=query interrupted by user")
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise PhaseInterruptedError(
+                    phase_name="query",
+                    partial_results=dict(query_results),
+                ) from exc
 
             self.assertFalse(
                 query_failures,
@@ -415,20 +698,48 @@ class LiveMultiProfileIntegrationTest(unittest.TestCase):
                     0,
                     f"profile {profile_id} did not complete any successful requests",
                 )
+            _log("query phase completed successfully for all profiles")
+        except PhaseInterruptedError as exc:
+            interrupted_phase = exc.phase_name
+            body_error = sys.exc_info()
         except Exception:  # noqa: BLE001
             body_error = sys.exc_info()
         finally:
             if started_profiles:
-                stop_results = _collect_parallel_results(_run_profile_stop, started_profiles)
-                cleanup_failures = {
-                    profile_id: result
-                    for profile_id, result in stop_results.items()
-                    if result.get("returncode") != 0
-                    or not isinstance(result.get("payload"), dict)
-                    or not result["payload"].get("ok")
-                }
+                profiles_to_stop = sorted(started_profiles)
+                _log(f"starting cleanup stop for profiles={profiles_to_stop}")
+                try:
+                    stop_results = _collect_parallel_results(
+                        _run_profile_stop,
+                        profiles_to_stop,
+                        phase_name="stop",
+                    )
+                except PhaseInterruptedError:
+                    interrupted_phase = interrupted_phase or "stop"
+                    body_error = body_error or sys.exc_info()
+                    _log("cleanup stop was interrupted by user")
+                else:
+                    cleanup_failures = {
+                        profile_id: result
+                        for profile_id, result in stop_results.items()
+                        if result.get("returncode") != 0
+                        or not isinstance(result.get("payload"), dict)
+                        or not result["payload"].get("ok")
+                    }
+                    if cleanup_failures:
+                        _log("cleanup stop completed with failures")
+                    else:
+                        _log("cleanup stop completed successfully")
 
         if body_error is not None:
+            if interrupted_phase is not None:
+                if cleanup_failures:
+                    self.fail(
+                        "interrupted by user during "
+                        f"{interrupted_phase}; cleanup had failures:\n"
+                        + json.dumps(cleanup_failures, indent=2, sort_keys=True)
+                    )
+                self.skipTest(f"interrupted by user during {interrupted_phase}; cleanup attempted")
             if cleanup_failures:
                 print(
                     "cleanup failures after test body error:\n"
@@ -441,6 +752,7 @@ class LiveMultiProfileIntegrationTest(unittest.TestCase):
             cleanup_failures,
             "graceful stop failed:\n" + json.dumps(cleanup_failures, indent=2, sort_keys=True),
         )
+        _log("live multi-profile test completed successfully")
 
 
 if __name__ == "__main__":

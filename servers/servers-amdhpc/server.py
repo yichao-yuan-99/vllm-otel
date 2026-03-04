@@ -381,17 +381,36 @@ def main() -> int:
         pass
     finally:
         server.server_close()
-        try:
-            cleanup_result = control_plane.stop(reason="server_exit", block=True)
+        stopped_count = 0
+        failure_count = 0
+        for port_profile_id in sorted(control_plane.config.port_profiles.keys()):
+            try:
+                cleanup_result = control_plane.stop(
+                    port_profile_id=port_profile_id,
+                    reason="server_exit",
+                    block=True,
+                )
+                stopped_count += 1
+                print(
+                    "shutdown cleanup: stopped active job for profile "
+                    f"{port_profile_id}: {cleanup_result.data.get('job_id')} "
+                    f"(previous_status={cleanup_result.data.get('previous_status')})"
+                )
+            except ControlPlaneError as exc:
+                if exc.code == 21:
+                    continue
+                failure_count += 1
+                print(
+                    "shutdown cleanup failed for profile "
+                    f"{port_profile_id}: code={exc.code} message={exc.message}"
+                )
+        if stopped_count == 0 and failure_count == 0:
+            print("shutdown cleanup: no active jobs")
+        elif failure_count > 0:
             print(
-                "shutdown cleanup: stopped active job "
-                f"{cleanup_result.data.get('job_id')} (previous_status={cleanup_result.data.get('previous_status')})"
+                f"shutdown cleanup completed with {failure_count} failure(s); "
+                f"stopped {stopped_count} active job(s)"
             )
-        except ControlPlaneError as exc:
-            if exc.code == 21:
-                print("shutdown cleanup: no active job")
-            else:
-                print(f"shutdown cleanup failed: code={exc.code} message={exc.message}")
     return 0
 
 

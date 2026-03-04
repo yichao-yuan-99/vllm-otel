@@ -32,6 +32,8 @@ except ImportError:  # pragma: no cover
 
 DEFAULT_JAEGER_IMAGE = "docker://jaegertracing/all-in-one:1.57"
 DEFAULT_VLLM_IMAGE = "docker://yichaoyuan/vllm-openai-otel:v0.16.0-otel-lp-rocm"
+DEFAULT_JAEGER_QUERY_PORT = 16686
+DEFAULT_JAEGER_OTLP_GRPC_PORT = 4317
 DEFAULT_JAEGER_PULL_TIMEOUT_SECONDS = 60 * 60
 DEFAULT_VLLM_PULL_TIMEOUT_SECONDS = 2 * 60 * 60
 DEFAULT_STOP_WAIT_TIMEOUT_SECONDS = 180
@@ -53,6 +55,34 @@ def _infer_sif_name_from_image(image: str) -> str:
     token = normalized.rsplit("/", 1)[-1]
     token = token.replace(":", "-")
     return f"{token}.sif"
+
+
+def _effective_vllm_extra_args(*, extra_args: list[str], gpus_per_node: int) -> list[str]:
+    normalized_args: list[str] = []
+    skip_next = False
+
+    for index, arg in enumerate(extra_args):
+        if skip_next:
+            skip_next = False
+            continue
+
+        normalized = arg.strip().lower()
+        if normalized == "--trust-remote-code":
+            continue
+        if normalized.startswith("--trust-remote-code="):
+            continue
+        if normalized == "--distributed_executor_backend":
+            if index + 1 < len(extra_args):
+                skip_next = True
+            continue
+        if normalized.startswith("--distributed_executor_backend="):
+            continue
+        normalized_args.append(arg)
+
+    normalized_args.append("--trust-remote-code")
+    if gpus_per_node > 1:
+        normalized_args.extend(["--distributed_executor_backend", "ray"])
+    return normalized_args
 
 
 class ControlPlaneError(RuntimeError):
@@ -1407,12 +1437,14 @@ class ControlPlane:
         vllm_cache_root = self._cfg.env.get("VLLM_CACHE_ROOT", f"{xdg_cache_home}/vllm")
 
         ssh_options = " ".join(shlex.quote(opt) for opt in self._cfg.ssh_options)
-        encoded_extra_args = _encode_model_extra_args(model_spec.extra_args)
+        effective_extra_args = _effective_vllm_extra_args(
+            extra_args=model_spec.extra_args,
+            gpus_per_node=partition_spec.gpus_per_node,
+        )
+        encoded_extra_args = _encode_model_extra_args(effective_extra_args)
         force_seq_trust_remote_code = self._cfg.env.get("VLLM_FORCE_SEQ_TRUST_REMOTE_CODE")
         if force_seq_trust_remote_code is None:
-            force_seq_trust_remote_code = (
-                "true" if _model_requests_trust_remote_code(model_spec.extra_args) else "false"
-            )
+            force_seq_trust_remote_code = "true"
 
         script = textwrap.dedent(
             f"""\
@@ -1430,8 +1462,10 @@ class ControlPlane:
 
             LOGIN_HOST={shlex.quote(self._cfg.login_host)}
             VLLM_SERVICE_PORT={port_profile.vllm_port}
-            JAEGER_OTLP_PORT={port_profile.jaeger_otlp_port}
-            JAEGER_UI_PORT={port_profile.jaeger_api_port}
+            JAEGER_OTLP_LOGIN_PORT={port_profile.jaeger_otlp_port}
+            JAEGER_UI_LOGIN_PORT={port_profile.jaeger_api_port}
+            JAEGER_OTLP_LOCAL_PORT={DEFAULT_JAEGER_OTLP_GRPC_PORT}
+            JAEGER_UI_LOCAL_PORT={DEFAULT_JAEGER_QUERY_PORT}
 
             JAEGER_SIF={shlex.quote(str(self._cfg.jaeger_sif))}
             VLLM_SIF={shlex.quote(str(self._cfg.vllm_sif))}
@@ -1452,7 +1486,7 @@ class ControlPlane:
 
             OTEL_SERVICE_NAME={shlex.quote(self._cfg.env.get('OTEL_SERVICE_NAME', 'vllm-server'))}
             OTEL_EXPORTER_OTLP_TRACES_INSECURE={shlex.quote(self._cfg.env.get('OTEL_EXPORTER_OTLP_TRACES_INSECURE', 'true'))}
-            OTEL_EXPORTER_OTLP_TRACES_ENDPOINT={shlex.quote(f'grpc://127.0.0.1:{port_profile.jaeger_otlp_port}')}
+            OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="grpc://127.0.0.1:${{JAEGER_OTLP_LOCAL_PORT}}"
             VLLM_COLLECT_DETAILED_TRACES={shlex.quote(self._cfg.env.get('VLLM_COLLECT_DETAILED_TRACES', 'all'))}
             VLLM_LOGITS_PROCESSORS={shlex.quote(self._cfg.env.get('VLLM_LOGITS_PROCESSORS', 'forceSeq.force_sequence_logits_processor:ForceSequenceAdapter'))}
             VLLM_MODEL_EXTRA_ARGS_B64={shlex.quote(encoded_extra_args)}
@@ -1500,8 +1534,8 @@ class ControlPlane:
 
             # Reverse tunnels from compute node to login node.
             start_tunnel "${{VLLM_SERVICE_PORT}}" "${{VLLM_SERVICE_PORT}}"
-            start_tunnel "${{JAEGER_OTLP_PORT}}" "${{JAEGER_OTLP_PORT}}"
-            start_tunnel "${{JAEGER_UI_PORT}}" "${{JAEGER_UI_PORT}}"
+            start_tunnel "${{JAEGER_OTLP_LOGIN_PORT}}" "${{JAEGER_OTLP_LOCAL_PORT}}"
+            start_tunnel "${{JAEGER_UI_LOGIN_PORT}}" "${{JAEGER_UI_LOCAL_PORT}}"
 
             apptainer run \
               --cleanenv \
@@ -1996,18 +2030,6 @@ def _is_slurm_pending_state(status: str | None) -> bool:
         return False
     normalized = status.strip().upper()
     return normalized in {"PD", "PENDING"}
-
-
-def _model_requests_trust_remote_code(extra_args: list[str]) -> bool:
-    for arg in extra_args:
-        normalized = arg.strip().lower()
-        if normalized == "--trust-remote-code":
-            return True
-        if normalized.startswith("--trust-remote-code="):
-            value = normalized.split("=", 1)[1]
-            if value in {"1", "true", "yes", "on"}:
-                return True
-    return False
 
 
 def _utc_now_iso() -> str:

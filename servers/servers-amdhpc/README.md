@@ -97,6 +97,8 @@ Optional overrides:
 - `AMDHPC_REQUEST_TIMEOUT_SECONDS`
 - `AMDHPC_MODEL_READY_TIMEOUT_SECONDS`
 - `AMDHPC_QUERY_DURATION_SECONDS`
+- `AMDHPC_QUERY_PROGRESS_INTERVAL_SECONDS`
+- `AMDHPC_COMMAND_HEARTBEAT_SECONDS`
 
 ## Commands implemented
 
@@ -108,11 +110,12 @@ Optional overrides:
 - `start`: Slurm `job_name` is computed as `cluster.job_name_prefix + <port_profile>`.
 - `start`: submit `sbatch` job with reverse tunnels for:
   - vLLM API: `127.0.0.1:<profile.vllm_port>`
-  - Jaeger OTLP gRPC: `127.0.0.1:<profile.jaeger_otlp_port>`
-  - Jaeger UI/API: `127.0.0.1:<profile.jaeger_api_port>`
+  - Jaeger OTLP gRPC: login `127.0.0.1:<profile.jaeger_otlp_port>` -> compute `127.0.0.1:4317`
+  - Jaeger UI/API: login `127.0.0.1:<profile.jaeger_api_port>` -> compute `127.0.0.1:16686`
 - `start`: every control-plane command requires a specific `--port-profile`/`-P`, so multiple profiles can run concurrently without sharing state.
-- `start`: if model `extra_args` includes `--trust-remote-code`, force-sequence tokenizer bootstrap also enables remote code.
-- `start`: model `extra_args` from `configs/model_config.toml` are forwarded into the vLLM launch through `VLLM_MODEL_EXTRA_ARGS_B64`.
+- `start`: AMD HPC always adds `--trust-remote-code` to the vLLM serve args, and force-sequence tokenizer bootstrap is forced to use remote code as well.
+- `start`: when `partition.gpus_per_node > 1`, AMD HPC also adds `--distributed_executor_backend ray` automatically.
+- `start`: model `extra_args` from `configs/model_config.toml` are forwarded into the vLLM launch through `VLLM_MODEL_EXTRA_ARGS_B64` after that normalization.
 - `start --block/-b`: block until vLLM + Jaeger endpoints are up.
 - `start --block/-b`: streams per-step progress updates (`validate`, `submit`, `record`, `wait_services`).
 - `start --block/-b`: startup timeout starts after Slurm reaches `RUNNING` (while `PENDING`, timeout is deferred).
