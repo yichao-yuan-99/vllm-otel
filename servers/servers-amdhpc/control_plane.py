@@ -32,8 +32,8 @@ except ImportError:  # pragma: no cover
 
 DEFAULT_JAEGER_IMAGE = "docker://jaegertracing/all-in-one:1.57"
 DEFAULT_VLLM_IMAGE = "docker://yichaoyuan/vllm-openai-otel:v0.16.0-otel-lp-rocm"
-DEFAULT_JAEGER_SIF_NAME = "jaeger-all-in-one-1.57.sif"
-DEFAULT_VLLM_SIF_NAME = "vllm-openai-otel-v0.16.0-otel-lp-rocm.sif"
+DEFAULT_JAEGER_PULL_TIMEOUT_SECONDS = 60 * 60
+DEFAULT_VLLM_PULL_TIMEOUT_SECONDS = 2 * 60 * 60
 DEFAULT_STOP_WAIT_TIMEOUT_SECONDS = 180
 DEFAULT_STOP_POLL_INTERVAL_SECONDS = 2
 DEFAULT_WAIT_UP_POLL_INTERVAL_SECONDS = 2
@@ -42,6 +42,17 @@ DEFAULT_WAIT_UP_POLL_INTERVAL_SECONDS = 2
 def _encode_model_extra_args(extra_args: list[str]) -> str:
     payload = json.dumps(extra_args, separators=(",", ":")).encode("utf-8")
     return base64.b64encode(payload).decode("ascii")
+
+
+def _infer_sif_name_from_image(image: str) -> str:
+    normalized = image.strip()
+    if not normalized:
+        raise ValueError("image reference must be non-empty")
+    if "://" in normalized:
+        normalized = normalized.split("://", 1)[1]
+    token = normalized.rsplit("/", 1)[-1]
+    token = token.replace(":", "-")
+    return f"{token}.sif"
 
 
 class ControlPlaneError(RuntimeError):
@@ -90,13 +101,16 @@ class RuntimeConfig:
     log_dir: Path
     state_file: Path
     login_host: str
-    job_name: str
+    job_name_prefix: str
     job_nodes: int
     service_port: int
     jaeger_otlp_port: int
     jaeger_ui_port: int
     startup_timeout: int
     startup_timeout_after_running: bool
+    stop_wait_timeout_seconds: int
+    stop_poll_interval_seconds: float
+    wait_up_poll_interval_seconds: float
     ssh_options: list[str]
     port_profiles: dict[int, AMDHPCPortProfile]
     partitions: dict[str, PartitionSpec]
@@ -191,9 +205,9 @@ class ControlPlane:
     def config(self) -> RuntimeConfig:
         return self._cfg
 
-    def validate_startup_requirements(self) -> None:
+    def validate_startup_requirements(self) -> list[str]:
         with self._lock:
-            self._ensure_sif_files()
+            return self._prepare_sif_files()
 
     def start(self, *, port_profile_id: int, partition: str, model: str, block: bool = False) -> CommandResult:
         port_profile = self._require_port_profile(port_profile_id)
@@ -393,7 +407,7 @@ class ControlPlane:
             readiness = self._wait_for_services_up(
                 port_profile_id=port_profile.profile_id,
                 timeout_seconds=self._cfg.startup_timeout,
-                poll_interval_seconds=DEFAULT_WAIT_UP_POLL_INTERVAL_SECONDS,
+                poll_interval_seconds=self._cfg.wait_up_poll_interval_seconds,
                 expected_job_id=job_id,
                 defer_timeout_until_running=self._cfg.startup_timeout_after_running,
                 progress_callback=_on_wait_snapshot,
@@ -552,7 +566,7 @@ class ControlPlane:
                 )
 
                 wait_started_at = time.monotonic()
-                deadline = wait_started_at + DEFAULT_STOP_WAIT_TIMEOUT_SECONDS
+                deadline = wait_started_at + self._cfg.stop_wait_timeout_seconds
                 last_seen_status: str | None = None
                 while True:
                     current_status = self._slurm_job_status(active.job_id)
@@ -580,11 +594,11 @@ class ControlPlane:
                             details={
                                 "job_id": active.job_id,
                                 "last_status": current_status,
-                                "wait_timeout_seconds": DEFAULT_STOP_WAIT_TIMEOUT_SECONDS,
+                                "wait_timeout_seconds": self._cfg.stop_wait_timeout_seconds,
                                 "slurm_user": slurm_user,
                             },
                         )
-                    time.sleep(DEFAULT_STOP_POLL_INTERVAL_SECONDS)
+                    time.sleep(self._cfg.stop_poll_interval_seconds)
 
                 waited_seconds = round(time.monotonic() - wait_started_at, 3)
                 self._archive_active_job(state, port_profile_id=port_profile.profile_id, reason=reason)
@@ -680,26 +694,18 @@ class ControlPlane:
             )
 
     def start_status(self, *, port_profile_id: int) -> CommandResult:
-        with self._start_progress_lock:
-            progress = dict(
-                self._start_progress.get(
-                    port_profile_id,
-                    self._empty_progress(message="no start command has been run yet"),
-                )
-            )
-        progress["port_profile"] = port_profile_id
-        return CommandResult(code=0, message="start status", data=progress)
+        return self._progress_status(
+            kind="start",
+            port_profile_id=port_profile_id,
+            idle_message="no start command has been run yet",
+        )
 
     def stop_status(self, *, port_profile_id: int) -> CommandResult:
-        with self._stop_progress_lock:
-            progress = dict(
-                self._stop_progress.get(
-                    port_profile_id,
-                    self._empty_progress(message="no stop command has been run yet"),
-                )
-            )
-        progress["port_profile"] = port_profile_id
-        return CommandResult(code=0, message="stop status", data=progress)
+        return self._progress_status(
+            kind="stop",
+            port_profile_id=port_profile_id,
+            idle_message="no stop command has been run yet",
+        )
 
     def logs(self, *, port_profile_id: int, lines: int = 200) -> CommandResult:
         with self._lock:
@@ -755,11 +761,13 @@ class ControlPlane:
         *,
         port_profile_id: int,
         timeout_seconds: int | None = None,
-        poll_interval_seconds: float = DEFAULT_WAIT_UP_POLL_INTERVAL_SECONDS,
+        poll_interval_seconds: float | None = None,
         defer_timeout_until_running: bool | None = None,
     ) -> CommandResult:
         if timeout_seconds is None:
             timeout_seconds = self._cfg.startup_timeout
+        if poll_interval_seconds is None:
+            poll_interval_seconds = self._cfg.wait_up_poll_interval_seconds
         if defer_timeout_until_running is None:
             defer_timeout_until_running = self._cfg.startup_timeout_after_running
         if timeout_seconds <= 0:
@@ -857,6 +865,55 @@ class ControlPlane:
                 http_status=500,
             )
 
+    def _prepare_sif_files(self) -> list[str]:
+        self._require_command("apptainer")
+        actions: list[str] = []
+        actions.append(
+            self._pull_image_if_missing(
+                name="jaeger",
+                image=self._cfg.jaeger_image,
+                sif_path=self._cfg.jaeger_sif,
+                timeout_seconds=DEFAULT_JAEGER_PULL_TIMEOUT_SECONDS,
+            )
+        )
+        actions.append(
+            self._pull_image_if_missing(
+                name="vllm",
+                image=self._cfg.vllm_image,
+                sif_path=self._cfg.vllm_sif,
+                timeout_seconds=DEFAULT_VLLM_PULL_TIMEOUT_SECONDS,
+            )
+        )
+        self._ensure_sif_files()
+        return actions
+
+    def _pull_image_if_missing(
+        self,
+        *,
+        name: str,
+        image: str,
+        sif_path: Path,
+        timeout_seconds: int,
+    ) -> str:
+        if sif_path.exists():
+            return f"found existing {name} SIF: {sif_path}"
+
+        sif_path.parent.mkdir(parents=True, exist_ok=True)
+        result = self._run(["apptainer", "pull", str(sif_path), image], timeout_seconds=timeout_seconds)
+        if result.returncode != 0:
+            raise ControlPlaneError(
+                message=f"failed to pull {name} image",
+                code=91,
+                http_status=500,
+                details={
+                    "image": image,
+                    "sif_path": str(sif_path),
+                    "stdout": _truncate_text(result.stdout.strip()),
+                    "stderr": _truncate_text(result.stderr.strip()),
+                },
+            )
+        return f"pulled {name}: {image} -> {sif_path}"
+
     def _ensure_sif_files(self) -> None:
         missing: list[str] = []
         if not self._cfg.jaeger_sif.exists():
@@ -870,7 +927,6 @@ class ControlPlane:
                 http_status=400,
                 details={
                     "missing": missing,
-                    "hint": "run python3 servers/servers-amdhpc/pull_images.py --config servers/servers-amdhpc/server_config.toml",
                 },
             )
 
@@ -884,6 +940,34 @@ class ControlPlane:
             "finished_at": None,
             "updated_at": _utc_now_iso(),
         }
+
+    def _progress_state(
+        self,
+        kind: str,
+    ) -> tuple[threading.Lock, dict[int, dict[str, Any]]]:
+        if kind == "start":
+            return self._start_progress_lock, self._start_progress
+        if kind == "stop":
+            return self._stop_progress_lock, self._stop_progress
+        raise ValueError(f"unknown progress kind: {kind}")
+
+    def _progress_status(
+        self,
+        *,
+        kind: str,
+        port_profile_id: int,
+        idle_message: str,
+    ) -> CommandResult:
+        lock, progress_store = self._progress_state(kind)
+        with lock:
+            progress = dict(
+                progress_store.get(
+                    port_profile_id,
+                    self._empty_progress(message=idle_message),
+                )
+            )
+        progress["port_profile"] = port_profile_id
+        return CommandResult(code=0, message=f"{kind} status", data=progress)
 
     def _load_state(self) -> dict[str, Any]:
         if not self._cfg.state_file.exists():
@@ -1333,7 +1417,7 @@ class ControlPlane:
         script = textwrap.dedent(
             f"""\
             #!/usr/bin/env bash
-            #SBATCH --job-name={_safe_token(self._cfg.job_name)}
+            #SBATCH --job-name={_safe_token(f'{self._cfg.job_name_prefix}{port_profile.profile_id}')}
             #SBATCH --output={slurm_out}
             #SBATCH --error={slurm_err}
             #SBATCH --nodes={self._cfg.job_nodes}
@@ -1538,24 +1622,19 @@ class ControlPlane:
         started_at: str | None,
         finished_at: str | None,
     ) -> None:
-        with self._start_progress_lock:
-            self._start_progress[port_profile_id] = {
-                "status": status,
-                "phase": phase,
-                "message": message,
-                "job_id": job_id,
-                "started_at": started_at,
-                "finished_at": finished_at,
-                "updated_at": _utc_now_iso(),
-            }
+        self._set_progress(
+            kind="start",
+            port_profile_id=port_profile_id,
+            status=status,
+            phase=phase,
+            message=message,
+            job_id=job_id,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
 
     def _current_start_job_id(self, port_profile_id: int) -> str | None:
-        with self._start_progress_lock:
-            progress = self._start_progress.get(port_profile_id, {})
-            value = progress.get("job_id")
-        if isinstance(value, str) and value:
-            return value
-        return None
+        return self._current_progress_job_id("start", port_profile_id)
 
     def _set_stop_progress(
         self,
@@ -1568,8 +1647,35 @@ class ControlPlane:
         started_at: str | None,
         finished_at: str | None,
     ) -> None:
-        with self._stop_progress_lock:
-            self._stop_progress[port_profile_id] = {
+        self._set_progress(
+            kind="stop",
+            port_profile_id=port_profile_id,
+            status=status,
+            phase=phase,
+            message=message,
+            job_id=job_id,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+
+    def _current_stop_job_id(self, port_profile_id: int) -> str | None:
+        return self._current_progress_job_id("stop", port_profile_id)
+
+    def _set_progress(
+        self,
+        *,
+        kind: str,
+        port_profile_id: int,
+        status: str,
+        phase: str | None,
+        message: str,
+        job_id: str | None,
+        started_at: str | None,
+        finished_at: str | None,
+    ) -> None:
+        lock, progress_store = self._progress_state(kind)
+        with lock:
+            progress_store[port_profile_id] = {
                 "status": status,
                 "phase": phase,
                 "message": message,
@@ -1579,9 +1685,10 @@ class ControlPlane:
                 "updated_at": _utc_now_iso(),
             }
 
-    def _current_stop_job_id(self, port_profile_id: int) -> str | None:
-        with self._stop_progress_lock:
-            progress = self._stop_progress.get(port_profile_id, {})
+    def _current_progress_job_id(self, kind: str, port_profile_id: int) -> str | None:
+        lock, progress_store = self._progress_state(kind)
+        with lock:
+            progress = progress_store.get(port_profile_id, {})
             value = progress.get("job_id")
         if isinstance(value, str) and value:
             return value
@@ -1617,6 +1724,15 @@ def load_runtime_config(config_path: Path) -> RuntimeConfig:
 
     server_table = _require_table(raw, "server")
     cluster_table = _require_table(raw, "cluster")
+    images_table = raw.get("images")
+    if images_table is None:
+        images_table = {}
+    elif not isinstance(images_table, dict):
+        raise ControlPlaneError(
+            message="images must be a table",
+            code=114,
+            http_status=500,
+        )
 
     merged_env = dict(os.environ)
 
@@ -1632,7 +1748,8 @@ def load_runtime_config(config_path: Path) -> RuntimeConfig:
     )
 
     login_host = str(cluster_table.get("login_host", "login"))
-    job_name = str(cluster_table.get("job_name", "vllm_job"))
+    job_name_prefix_raw = cluster_table.get("job_name_prefix", cluster_table.get("job_name", "vllm_job_"))
+    job_name_prefix = str(job_name_prefix_raw)
     job_nodes = int(cluster_table.get("job_nodes", 1))
 
     service_port = int(cluster_table.get("service_port", int(merged_env.get("VLLM_SERVICE_PORT", "11451"))))
@@ -1647,6 +1764,33 @@ def load_runtime_config(config_path: Path) -> RuntimeConfig:
             http_status=500,
         )
     startup_timeout_after_running = startup_timeout_after_running_raw
+    stop_wait_timeout_seconds = int(
+        cluster_table.get("stop_wait_timeout_seconds", DEFAULT_STOP_WAIT_TIMEOUT_SECONDS)
+    )
+    stop_poll_interval_seconds = float(
+        cluster_table.get("stop_poll_interval_seconds", DEFAULT_STOP_POLL_INTERVAL_SECONDS)
+    )
+    wait_up_poll_interval_seconds = float(
+        cluster_table.get("wait_up_poll_interval_seconds", DEFAULT_WAIT_UP_POLL_INTERVAL_SECONDS)
+    )
+    if stop_wait_timeout_seconds <= 0:
+        raise ControlPlaneError(
+            message="cluster.stop_wait_timeout_seconds must be > 0",
+            code=115,
+            http_status=500,
+        )
+    if stop_poll_interval_seconds <= 0:
+        raise ControlPlaneError(
+            message="cluster.stop_poll_interval_seconds must be > 0",
+            code=116,
+            http_status=500,
+        )
+    if wait_up_poll_interval_seconds <= 0:
+        raise ControlPlaneError(
+            message="cluster.wait_up_poll_interval_seconds must be > 0",
+            code=117,
+            http_status=500,
+        )
 
     ssh_options_raw = cluster_table.get(
         "ssh_options",
@@ -1765,11 +1909,23 @@ def load_runtime_config(config_path: Path) -> RuntimeConfig:
     apptainer_imgs = Path(
         _expand_vars(merged_env.get("APPTAINER_IMGS", f"{Path.home()}/apptainer-images"), merged_env)
     ).expanduser()
-    jaeger_image = merged_env.get("JAEGER_IMAGE", DEFAULT_JAEGER_IMAGE)
-    vllm_image = merged_env.get("VLLM_IMAGE", DEFAULT_VLLM_IMAGE)
+    jaeger_image = str(images_table.get("jaeger_image", DEFAULT_JAEGER_IMAGE))
+    vllm_image = str(images_table.get("vllm_image", DEFAULT_VLLM_IMAGE))
+    if not jaeger_image:
+        raise ControlPlaneError(
+            message="images.jaeger_image must be non-empty",
+            code=118,
+            http_status=500,
+        )
+    if not vllm_image:
+        raise ControlPlaneError(
+            message="images.vllm_image must be non-empty",
+            code=119,
+            http_status=500,
+        )
 
-    jaeger_sif_raw = merged_env.get("JAEGER_SIF", str(apptainer_imgs / DEFAULT_JAEGER_SIF_NAME))
-    vllm_sif_raw = merged_env.get("VLLM_SIF", str(apptainer_imgs / DEFAULT_VLLM_SIF_NAME))
+    jaeger_sif_raw = merged_env.get("JAEGER_SIF", str(apptainer_imgs / _infer_sif_name_from_image(jaeger_image)))
+    vllm_sif_raw = merged_env.get("VLLM_SIF", str(apptainer_imgs / _infer_sif_name_from_image(vllm_image)))
 
     jaeger_sif = _resolve_path(repo_root, _expand_vars(jaeger_sif_raw, merged_env))
     vllm_sif = _resolve_path(repo_root, _expand_vars(vllm_sif_raw, merged_env))
@@ -1783,13 +1939,16 @@ def load_runtime_config(config_path: Path) -> RuntimeConfig:
         log_dir=log_dir,
         state_file=state_file,
         login_host=login_host,
-        job_name=job_name,
+        job_name_prefix=job_name_prefix,
         job_nodes=job_nodes,
         service_port=service_port,
         jaeger_otlp_port=jaeger_otlp_port,
         jaeger_ui_port=jaeger_ui_port,
         startup_timeout=startup_timeout,
         startup_timeout_after_running=startup_timeout_after_running,
+        stop_wait_timeout_seconds=stop_wait_timeout_seconds,
+        stop_poll_interval_seconds=stop_poll_interval_seconds,
+        wait_up_poll_interval_seconds=wait_up_poll_interval_seconds,
         ssh_options=ssh_options,
         port_profiles=port_profiles,
         partitions=partitions,

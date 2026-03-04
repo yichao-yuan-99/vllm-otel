@@ -18,7 +18,6 @@ try:
     from .client_d import (
         DEFAULT_RUNTIME_DIR as CLIENT_D_RUNTIME_DIR,
         DEFAULT_SERVER_PORT,
-        client_d_status,
         resolve_client_d_server_url,
         start_client_d,
         stop_client_d,
@@ -27,7 +26,6 @@ except ImportError:  # pragma: no cover
     from client_d import (  # type: ignore[no-redef]
         DEFAULT_RUNTIME_DIR as CLIENT_D_RUNTIME_DIR,
         DEFAULT_SERVER_PORT,
-        client_d_status,
         resolve_client_d_server_url,
         start_client_d,
         stop_client_d,
@@ -35,6 +33,9 @@ except ImportError:  # pragma: no cover
 
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, help="vLLM HPC control client")
+
+START_BLOCKING_TIMEOUT_SECONDS = 24.0 * 60.0 * 60.0
+START_CLEANUP_WAIT_FOR_SUBMISSION_SECONDS = 120.0
 
 
 def _post_json(server_url: str, endpoint: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
@@ -96,6 +97,125 @@ def _require_ok(payload: dict[str, Any]) -> None:
     raise typer.Exit(code=1)
 
 
+def _is_ok(payload: dict[str, Any]) -> bool:
+    return bool(payload.get("ok"))
+
+
+def _clientd_runtime_dir(ctx: typer.Context) -> Path:
+    obj = ctx.obj or {}
+    raw = obj.get("clientd_runtime_dir", CLIENT_D_RUNTIME_DIR)
+    if isinstance(raw, Path):
+        return raw
+    return Path(raw)
+
+
+def _stop_clientd_for_profile(
+    ctx: typer.Context,
+    *,
+    port_profile: int,
+    timeout_seconds: float = 10.0,
+) -> dict[str, Any]:
+    return stop_client_d(
+        port_profile_id=port_profile,
+        runtime_dir=_clientd_runtime_dir(ctx),
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _server_clientd_payload(
+    *,
+    ok: bool,
+    code: int,
+    message: str,
+    server_payload: dict[str, Any],
+    clientd_payload: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "ok": ok,
+        "code": code,
+        "message": message,
+        "data": {
+            "server": server_payload.get("data"),
+            "clientd": clientd_payload.get("data"),
+        },
+    }
+
+
+def _clientd_cleanup_only_payload(
+    *,
+    ok: bool,
+    code: int,
+    message: str,
+    clientd_payload: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "ok": ok,
+        "code": code,
+        "message": message,
+        "data": {"clientd_cleanup": clientd_payload.get("data")},
+    }
+
+
+def _start_result_payload(
+    *,
+    server_payload: dict[str, Any],
+    clientd_payload: dict[str, Any],
+) -> dict[str, Any]:
+    return _server_clientd_payload(
+        ok=True,
+        code=0,
+        message=str(server_payload.get("message", "start complete")),
+        server_payload=server_payload,
+        clientd_payload=clientd_payload,
+    )
+
+
+def _start_failure_payload(
+    *,
+    server_payload: dict[str, Any],
+    clientd_start_payload: dict[str, Any],
+    clientd_cleanup_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "code": int(server_payload.get("code", 1)),
+        "message": str(server_payload.get("message", "start failed")),
+        "data": {
+            "clientd_start": clientd_start_payload.get("data"),
+            "server_start": server_payload.get("data"),
+            "clientd_cleanup": None if clientd_cleanup_payload is None else clientd_cleanup_payload.get("data"),
+        },
+    }
+
+
+def _stop_result_payload(
+    *,
+    server_payload: dict[str, Any],
+    clientd_payload: dict[str, Any],
+) -> dict[str, Any]:
+    server_code = int(server_payload.get("code", 1))
+    server_ok = _is_ok(server_payload)
+    if server_ok:
+        message = str(server_payload.get("message", "stopped"))
+        ok = True
+        code = 0
+    elif server_code == 21:
+        message = "no active job; client-d stopped"
+        ok = True
+        code = 0
+    else:
+        message = str(server_payload.get("message", "stop failed"))
+        ok = False
+        code = server_code
+    return _server_clientd_payload(
+        ok=ok,
+        code=code,
+        message=message,
+        server_payload=server_payload,
+        clientd_payload=clientd_payload,
+    )
+
+
 @app.callback()
 def main(
     ctx: typer.Context,
@@ -120,92 +240,6 @@ def main(
         "clientd_runtime_dir": clientd_runtime_dir,
         "timeout_seconds": timeout_seconds,
     }
-
-
-@app.command(name="clientd-start")
-def clientd_start(
-    ssh_target: str = typer.Option(..., "--ssh-target", "-t", help="SSH target, same as in `ssh <target>`."),
-    port_profile: int = typer.Option(
-        ...,
-        "--port-profile",
-        "-P",
-        help="Port profile numeric ID from configs/port_profiles.toml.",
-    ),
-    runtime_dir: Path = typer.Option(
-        CLIENT_D_RUNTIME_DIR,
-        "--runtime-dir",
-        help="Directory for client-d pid and log files.",
-    ),
-    server_port: int = typer.Option(
-        DEFAULT_SERVER_PORT,
-        "--server-port",
-        help="Remote control server port on the login node.",
-    ),
-    ssh_option: list[str] = typer.Option(
-        [],
-        "--ssh-option",
-        help="Additional raw ssh option token. Repeat to pass multiple tokens.",
-    ),
-) -> None:
-    """Start client-d SSH tunnels."""
-    payload = start_client_d(
-        ssh_target=ssh_target,
-        port_profile_id=port_profile,
-        runtime_dir=runtime_dir,
-        remote_server_port=server_port,
-        ssh_options=ssh_option or None,
-    )
-    _require_ok(payload)
-    _print_json(payload)
-
-
-@app.command(name="clientd-stop")
-def clientd_stop(
-    port_profile: int = typer.Option(
-        ...,
-        "--port-profile",
-        "-P",
-        help="Port profile numeric ID from configs/port_profiles.toml.",
-    ),
-    runtime_dir: Path = typer.Option(
-        CLIENT_D_RUNTIME_DIR,
-        "--runtime-dir",
-        help="Directory for client-d pid and log files.",
-    ),
-    timeout_seconds: float = typer.Option(
-        10.0,
-        "--timeout-seconds",
-        help="Seconds to wait before forcing kill.",
-    ),
-) -> None:
-    """Stop client-d SSH tunnels."""
-    payload = stop_client_d(
-        port_profile_id=port_profile,
-        runtime_dir=runtime_dir,
-        timeout_seconds=timeout_seconds,
-    )
-    _require_ok(payload)
-    _print_json(payload)
-
-
-@app.command(name="clientd-status")
-def clientd_status(
-    port_profile: int = typer.Option(
-        ...,
-        "--port-profile",
-        "-P",
-        help="Port profile numeric ID from configs/port_profiles.toml.",
-    ),
-    runtime_dir: Path = typer.Option(
-        CLIENT_D_RUNTIME_DIR,
-        "--runtime-dir",
-        help="Directory for client-d pid and log files.",
-    ),
-) -> None:
-    """Show client-d status."""
-    payload = client_d_status(port_profile_id=port_profile, runtime_dir=runtime_dir)
-    _require_ok(payload)
-    _print_json(payload)
 
 
 def _run_command(ctx: typer.Context, endpoint: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -291,47 +325,136 @@ def _run_blocking_with_progress(
     return command_payload
 
 
+def _run_blocking_stop_for_profile(
+    ctx: typer.Context,
+    *,
+    port_profile: int,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    return _run_blocking_with_progress(
+        ctx,
+        endpoint="/stop",
+        payload={"port_profile": port_profile, "block": True},
+        progress_endpoint="/stop/status",
+        progress_payload={"port_profile": port_profile},
+        progress_tag="stop",
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _emit_cleanup_result(note: str, payload: dict[str, Any]) -> None:
+    typer.echo(note, err=True)
+    _print_json(payload)
+
+
+def _stop_clientd_and_emit_cleanup(
+    ctx: typer.Context,
+    *,
+    port_profile: int,
+    note: str,
+    ok: bool,
+    code: int,
+    message: str,
+) -> None:
+    clientd_payload = _stop_clientd_for_profile(ctx, port_profile=port_profile)
+    _emit_cleanup_result(
+        note,
+        _clientd_cleanup_only_payload(
+            ok=ok,
+            code=code,
+            message=message,
+            clientd_payload=clientd_payload,
+        ),
+    )
+
+
+def _emit_cleanup_stop_result(
+    ctx: typer.Context,
+    *,
+    port_profile: int,
+    server_payload: dict[str, Any],
+    success_note: str,
+    success_message: str | None = None,
+    no_job_note: str | None = None,
+    no_job_message: str | None = None,
+    error_note: str,
+) -> None:
+    clientd_payload = _stop_clientd_for_profile(ctx, port_profile=port_profile)
+    server_code = int(server_payload.get("code", 1))
+    if _is_ok(server_payload):
+        _emit_cleanup_result(
+            success_note,
+            _server_clientd_payload(
+                ok=True,
+                code=0,
+                message=success_message or str(server_payload.get("message", "cleanup complete")),
+                server_payload=server_payload,
+                clientd_payload=clientd_payload,
+            ),
+        )
+        return
+    if no_job_note is not None and server_code == 21:
+        _emit_cleanup_result(
+            no_job_note,
+            _server_clientd_payload(
+                ok=True,
+                code=0,
+                message=no_job_message or "no active job found; client-d stopped",
+                server_payload=server_payload,
+                clientd_payload=clientd_payload,
+            ),
+        )
+        return
+    _emit_cleanup_result(
+        error_note,
+        _server_clientd_payload(
+            ok=False,
+            code=server_code,
+            message=str(server_payload.get("message", "cleanup stop failed")),
+            server_payload=server_payload,
+            clientd_payload=clientd_payload,
+        ),
+    )
+
+
 def _cleanup_after_start_interrupt(ctx: typer.Context, *, port_profile: int) -> None:
     typer.echo(
         "[start] interrupt received; entering cleanup and attempting blocking stop.",
         err=True,
     )
 
-    def run_blocking_stop() -> dict[str, Any]:
-        return _run_blocking_with_progress(
-            ctx,
-            endpoint="/stop",
-            payload={"port_profile": port_profile, "block": True},
-            progress_endpoint="/stop/status",
-            progress_payload={"port_profile": port_profile},
-            progress_tag="stop",
-            timeout_seconds=24.0 * 60.0 * 60.0,
-        )
-
     try:
-        stop_payload = run_blocking_stop()
+        stop_payload = _run_blocking_stop_for_profile(
+            ctx,
+            port_profile=port_profile,
+            timeout_seconds=START_BLOCKING_TIMEOUT_SECONDS,
+        )
     except KeyboardInterrupt:
-        typer.echo(
-            "[start] cleanup interrupted again; rerun stop with the same --port-profile.",
-            err=True,
+        _stop_clientd_and_emit_cleanup(
+            ctx,
+            port_profile=port_profile,
+            note="[start] cleanup interrupted again; rerun stop with the same --port-profile.",
+            ok=False,
+            code=130,
+            message="start cleanup interrupted",
         )
         return
 
-    if stop_payload.get("ok"):
-        typer.echo("[start] cleanup complete: active job canceled.", err=True)
-        _print_json(stop_payload)
-        return
-
-    if stop_payload.get("code") != 21:
-        typer.echo("[start] cleanup stop returned an error:", err=True)
-        _print_json(stop_payload)
+    if _is_ok(stop_payload) or stop_payload.get("code") != 21:
+        _emit_cleanup_stop_result(
+            ctx,
+            port_profile=port_profile,
+            server_payload=stop_payload,
+            success_note="[start] cleanup complete: active job canceled.",
+            error_note="[start] cleanup stop returned an error:",
+        )
         return
 
     typer.echo(
         "[start] no active job yet; waiting briefly for in-flight submission before retrying stop.",
         err=True,
     )
-    deadline = time.monotonic() + 120.0
+    deadline = time.monotonic() + START_CLEANUP_WAIT_FOR_SUBMISSION_SECONDS
     last_line: str | None = None
 
     while time.monotonic() < deadline:
@@ -352,7 +475,14 @@ def _cleanup_after_start_interrupt(ctx: typer.Context, *, port_profile: int) -> 
                 last_line = line
 
             if status == "failed" and not job_id:
-                typer.echo("[start] start failed before submission; nothing to cancel.", err=True)
+                _emit_cleanup_stop_result(
+                    ctx,
+                    port_profile=port_profile,
+                    server_payload={"ok": True, "data": data},
+                    success_note="[start] start failed before submission; nothing to cancel.",
+                    success_message="start failed before submission; client-d stopped",
+                    error_note="[start] cleanup stop returned an error:",
+                )
                 return
 
             if isinstance(job_id, str) and job_id:
@@ -361,34 +491,50 @@ def _cleanup_after_start_interrupt(ctx: typer.Context, *, port_profile: int) -> 
                     err=True,
                 )
                 try:
-                    retry_payload = run_blocking_stop()
+                    retry_payload = _run_blocking_stop_for_profile(
+                        ctx,
+                        port_profile=port_profile,
+                        timeout_seconds=START_BLOCKING_TIMEOUT_SECONDS,
+                    )
                 except KeyboardInterrupt:
-                    typer.echo(
-                        "[start] cleanup interrupted again; rerun stop with the same --port-profile.",
-                        err=True,
+                    _stop_clientd_and_emit_cleanup(
+                        ctx,
+                        port_profile=port_profile,
+                        note="[start] cleanup interrupted again; rerun stop with the same --port-profile.",
+                        ok=False,
+                        code=130,
+                        message="start cleanup interrupted",
                     )
                     return
-                if retry_payload.get("ok"):
-                    typer.echo("[start] cleanup complete: active job canceled.", err=True)
-                    _print_json(retry_payload)
-                elif retry_payload.get("code") == 21:
-                    typer.echo("[start] no active job found on retry; cleanup done.", err=True)
-                else:
-                    typer.echo("[start] cleanup stop returned an error on retry:", err=True)
-                    _print_json(retry_payload)
+                _emit_cleanup_stop_result(
+                    ctx,
+                    port_profile=port_profile,
+                    server_payload=retry_payload,
+                    success_note="[start] cleanup complete: active job canceled.",
+                    no_job_note="[start] no active job found on retry; cleanup done.",
+                    error_note="[start] cleanup stop returned an error on retry:",
+                )
                 return
 
         time.sleep(1.0)
 
-    typer.echo(
-        "[start] cleanup timed out waiting for submission; rerun stop with the same --port-profile if needed.",
-        err=True,
+    _stop_clientd_and_emit_cleanup(
+        ctx,
+        port_profile=port_profile,
+        note=(
+            "[start] cleanup timed out waiting for submission; "
+            "rerun stop with the same --port-profile if needed."
+        ),
+        ok=False,
+        code=1,
+        message="start cleanup timed out waiting for submission",
     )
 
 
 @app.command()
 def start(
     ctx: typer.Context,
+    ssh_target: str = typer.Option(..., "--ssh-target", "-t", help="SSH target, same as in `ssh <target>`."),
     port_profile: int = typer.Option(
         ...,
         "--port-profile",
@@ -403,31 +549,59 @@ def start(
         "-b",
         help="Block until services are fully up.",
     ),
+    server_port: int = typer.Option(
+        DEFAULT_SERVER_PORT,
+        "--server-port",
+        help="Remote control server port on the login node.",
+    ),
+    ssh_option: list[str] = typer.Option(
+        [],
+        "--ssh-option",
+        help="Additional raw ssh option token. Repeat to pass multiple tokens.",
+    ),
 ) -> None:
-    """Submit an sbatch job for a configured partition + model."""
+    """Start client-d and submit an sbatch job for a configured partition + model."""
+    clientd_payload = start_client_d(
+        ssh_target=ssh_target,
+        port_profile_id=port_profile,
+        runtime_dir=_clientd_runtime_dir(ctx),
+        remote_server_port=server_port,
+        ssh_options=ssh_option or None,
+    )
+    _require_ok(clientd_payload)
+
     if block:
         try:
-            payload = _run_blocking_with_progress(
+            server_payload = _run_blocking_with_progress(
                 ctx,
                 endpoint="/start",
                 payload={"port_profile": port_profile, "partition": partition, "model": model, "block": True},
                 progress_endpoint="/start/status",
                 progress_payload={"port_profile": port_profile},
                 progress_tag="start",
-                timeout_seconds=24.0 * 60.0 * 60.0,
+                timeout_seconds=START_BLOCKING_TIMEOUT_SECONDS,
             )
         except KeyboardInterrupt:
             _cleanup_after_start_interrupt(ctx, port_profile=port_profile)
             raise typer.Exit(code=130)
     else:
-        payload = _run_command_with_timeout(
+        server_payload = _run_command_with_timeout(
             ctx,
             "/start",
             payload={"port_profile": port_profile, "partition": partition, "model": model, "block": False},
             timeout_seconds=None,
         )
-    _require_ok(payload)
-    _print_json(payload)
+    if not _is_ok(server_payload):
+        cleanup_payload = _stop_clientd_for_profile(ctx, port_profile=port_profile)
+        _print_json(
+            _start_failure_payload(
+                server_payload=server_payload,
+                clientd_start_payload=clientd_payload,
+                clientd_cleanup_payload=cleanup_payload,
+            )
+        )
+        raise typer.Exit(code=1)
+    _print_json(_start_result_payload(server_payload=server_payload, clientd_payload=clientd_payload))
 
 
 @app.command()
@@ -439,49 +613,32 @@ def stop(
         "-P",
         help="Port profile numeric ID from configs/port_profiles.toml.",
     ),
-    block: bool = typer.Option(
-        False,
-        "--block",
-        "-b",
-        help="Block until the job disappears from Slurm.",
+    clientd_timeout_seconds: float = typer.Option(
+        10.0,
+        "--clientd-timeout-seconds",
+        help="Seconds to wait before forcing client-d shutdown.",
     ),
 ) -> None:
-    """Stop the currently active sbatch job."""
-    if block:
-        payload = _run_blocking_with_progress(
-            ctx,
-            endpoint="/stop",
-            payload={"port_profile": port_profile, "block": True},
-            progress_endpoint="/stop/status",
-            progress_payload={"port_profile": port_profile},
-            progress_tag="stop",
-            timeout_seconds=10.0 * 60.0,
-        )
-    else:
-        payload = _run_command_with_timeout(
-            ctx,
-            "/stop",
-            payload={"port_profile": port_profile, "block": False},
-            timeout_seconds=None,
-        )
-    _require_ok(payload)
-    _print_json(payload)
-
-
-@app.command()
-def stop_poll(
-    ctx: typer.Context,
-    port_profile: int = typer.Option(
-        ...,
-        "--port-profile",
-        "-P",
-        help="Port profile numeric ID from configs/port_profiles.toml.",
-    ),
-) -> None:
-    """Check whether a previous non-block stop has fully finished."""
-    payload = _run_command(ctx, "/stop/poll", {"port_profile": port_profile})
-    _require_ok(payload)
-    _print_json(payload)
+    """Stop the active sbatch job, wait for completion, then stop client-d."""
+    server_payload = _run_blocking_with_progress(
+        ctx,
+        endpoint="/stop",
+        payload={"port_profile": port_profile, "block": True},
+        progress_endpoint="/stop/status",
+        progress_payload={"port_profile": port_profile},
+        progress_tag="stop",
+        timeout_seconds=10.0 * 60.0,
+    )
+    clientd_payload = _stop_clientd_for_profile(
+        ctx,
+        port_profile=port_profile,
+        timeout_seconds=clientd_timeout_seconds,
+    )
+    stop_payload = _stop_result_payload(server_payload=server_payload, clientd_payload=clientd_payload)
+    if not _is_ok(stop_payload):
+        _print_json(stop_payload)
+        raise typer.Exit(code=1)
+    _print_json(stop_payload)
 
 
 @app.command()

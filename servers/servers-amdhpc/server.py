@@ -66,35 +66,40 @@ def _parse_request_path(handler: BaseHTTPRequestHandler) -> tuple[str, dict[str,
 
 class RequestHandler(BaseHTTPRequestHandler):
     control_plane: ControlPlane
+    GET_ROUTE_HANDLERS = {
+        "/up": "_up_command",
+        "/stop/poll": "_stop_poll_command",
+        "/start/status": "_start_status_command",
+        "/stop/status": "_stop_status_command",
+        "/status": "_status_command",
+    }
+    POST_ROUTE_HANDLERS = {
+        "/start": "_start_command",
+        "/stop": "_stop_command",
+        "/stop/poll": "_stop_poll_command",
+        "/start/status": "_start_status_command",
+        "/stop/status": "_stop_status_command",
+        "/logs": "_logs_command",
+        "/up": "_up_command",
+        "/wait-up": "_wait_up_command",
+        "/status": "_status_command",
+        "/command/start": "_start_command",
+        "/command/stop": "_stop_command",
+        "/command/stop/poll": "_stop_poll_command",
+        "/command/start/status": "_start_status_command",
+        "/command/stop/status": "_stop_status_command",
+        "/command/logs": "_logs_command",
+        "/command/up": "_up_command",
+        "/command/wait-up": "_wait_up_command",
+        "/command/status": "_status_command",
+    }
 
     def do_GET(self) -> None:  # noqa: N802
         path, payload = _parse_request_path(self)
         if path == "/health":
             self._write_json(200, {"ok": True, "message": "healthy"})
             return
-        if path == "/up":
-            self._handle_with_result(lambda: self._up_command(payload))
-            return
-        if path == "/stop/poll":
-            self._handle_with_result(lambda: self._stop_poll_command(payload))
-            return
-        if path == "/start/status":
-            self._handle_with_result(lambda: self._start_status_command(payload))
-            return
-        if path == "/stop/status":
-            self._handle_with_result(lambda: self._stop_status_command(payload))
-            return
-        if path == "/status":
-            self._handle_with_result(lambda: self._status_command(payload))
-            return
-        self._write_json(
-            404,
-            {
-                "ok": False,
-                "code": 404,
-                "message": f"unknown endpoint: {path}",
-            },
-        )
+        self._dispatch_route(path=path, payload=payload, routes=self.GET_ROUTE_HANDLERS)
 
     def do_POST(self) -> None:  # noqa: N802
         path, _ = _parse_request_path(self)
@@ -105,40 +110,30 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._write_json(exc.http_status, error_payload(exc))
             return
 
-        routes = {
-            "/start": lambda: self._start_command(payload),
-            "/stop": lambda: self._stop_command(payload),
-            "/stop/poll": lambda: self._stop_poll_command(payload),
-            "/start/status": lambda: self._start_status_command(payload),
-            "/stop/status": lambda: self._stop_status_command(payload),
-            "/logs": lambda: self._logs_command(payload),
-            "/up": lambda: self._up_command(payload),
-            "/wait-up": lambda: self._wait_up_command(payload),
-            "/status": lambda: self._status_command(payload),
-            "/command/start": lambda: self._start_command(payload),
-            "/command/stop": lambda: self._stop_command(payload),
-            "/command/stop/poll": lambda: self._stop_poll_command(payload),
-            "/command/start/status": lambda: self._start_status_command(payload),
-            "/command/stop/status": lambda: self._stop_status_command(payload),
-            "/command/logs": lambda: self._logs_command(payload),
-            "/command/up": lambda: self._up_command(payload),
-            "/command/wait-up": lambda: self._wait_up_command(payload),
-            "/command/status": lambda: self._status_command(payload),
-        }
+        self._dispatch_route(path=path, payload=payload, routes=self.POST_ROUTE_HANDLERS)
 
-        action = routes.get(path)
-        if action is None:
-            self._write_json(
-                404,
-                {
-                    "ok": False,
-                    "code": 404,
-                    "message": f"unknown endpoint: {path}",
-                },
-            )
+    def _dispatch_route(
+        self,
+        *,
+        path: str,
+        payload: dict[str, Any],
+        routes: dict[str, str],
+    ) -> None:
+        handler_name = routes.get(path)
+        if handler_name is None:
+            self._write_unknown_endpoint(path)
             return
+        self._handle_with_result(lambda: getattr(self, handler_name)(payload))
 
-        self._handle_with_result(action)
+    def _write_unknown_endpoint(self, path: str) -> None:
+        self._write_json(
+            404,
+            {
+                "ok": False,
+                "code": 404,
+                "message": f"unknown endpoint: {path}",
+            },
+        )
 
     def _require_port_profile(self, payload: dict[str, Any], *, command_name: str) -> int:
         raw_port_profile = payload.get("port_profile")
@@ -355,12 +350,15 @@ def main() -> int:
 
     try:
         control_plane = ControlPlane(args.config)
-        control_plane.validate_startup_requirements()
+        image_actions = control_plane.validate_startup_requirements()
     except ControlPlaneError as exc:
         print(f"startup check failed: code={exc.code} message={exc.message}")
         if exc.details:
             print(json.dumps(exc.details, indent=2, sort_keys=True))
         return 2
+
+    for action in image_actions:
+        print(f"startup image prep: {action}")
 
     host = args.host or control_plane.config.host
     port = args.port or control_plane.config.port
