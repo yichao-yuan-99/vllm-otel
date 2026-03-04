@@ -415,11 +415,22 @@ class ControlPlane:
             def _on_wait_snapshot(snapshot: dict[str, Any]) -> None:
                 nonlocal last_wait_message
                 active_status = snapshot.get("active_job_status")
-                vllm_ok = bool((snapshot.get("vllm") or {}).get("ok"))
-                jaeger_ok = bool((snapshot.get("jaeger") or {}).get("ok"))
+                vllm_probe = snapshot.get("vllm") if isinstance(snapshot.get("vllm"), dict) else {}
+                jaeger_probe = snapshot.get("jaeger") if isinstance(snapshot.get("jaeger"), dict) else {}
+
+                def _probe_status(name: str, probe: dict[str, Any]) -> str:
+                    ok = bool(probe.get("ok"))
+                    http_status = probe.get("http_status")
+                    if ok:
+                        return f"{name}=up(http={http_status})"
+                    error_raw = probe.get("error")
+                    error_text = _truncate_text(str(error_raw), max_chars=120) if error_raw else "unknown"
+                    return f"{name}=down(http={http_status}, error={error_text})"
+
                 message = (
                     f"waiting for services: slurm_status={active_status}, "
-                    f"vllm_up={vllm_ok}, jaeger_up={jaeger_ok}"
+                    f"{_probe_status('vllm', vllm_probe)}, "
+                    f"{_probe_status('jaeger', jaeger_probe)}"
                 )
                 if message == last_wait_message:
                     return
@@ -1086,6 +1097,17 @@ class ControlPlane:
             state = self._load_state()
         except ControlPlaneError:
             state = {"active_jobs": {}}
+        else:
+            # Refresh persisted active jobs first so stale entries from a previous
+            # server run do not keep old artifacts protected from archiving.
+            try:
+                state_changed, _ = self._refresh_all_active_jobs(state)
+                if state_changed:
+                    self._save_state(state)
+            except ControlPlaneError:
+                # Archiving should remain best-effort; failures here should not
+                # block server startup.
+                pass
 
         for active_raw in self._active_jobs_table(state).values():
             if not isinstance(active_raw, dict):
@@ -1508,6 +1530,17 @@ class ControlPlane:
               TUNNEL_PIDS+=("$!")
             }}
 
+            verify_tunnels_alive() {{
+              local failed=0
+              for pid in "${{TUNNEL_PIDS[@]}}"; do
+                if ! kill -0 "${{pid}}" >/dev/null 2>&1; then
+                  echo "Reverse tunnel process exited before startup completed (pid=${{pid}})." >&2
+                  failed=1
+                fi
+              done
+              return "${{failed}}"
+            }}
+
             APPTAINER_HOME_ARGS=()
             if [[ -n "${{VLLM_APPTAINER_HOME}}" ]]; then
               mkdir -p "${{VLLM_APPTAINER_HOME}}"
@@ -1536,6 +1569,11 @@ class ControlPlane:
             start_tunnel "${{VLLM_SERVICE_PORT}}" "${{VLLM_SERVICE_PORT}}"
             start_tunnel "${{JAEGER_OTLP_LOGIN_PORT}}" "${{JAEGER_OTLP_LOCAL_PORT}}"
             start_tunnel "${{JAEGER_UI_LOGIN_PORT}}" "${{JAEGER_UI_LOCAL_PORT}}"
+            sleep 1
+            if ! verify_tunnels_alive; then
+              echo "One or more reverse tunnels failed to establish. Aborting startup." >&2
+              exit 72
+            fi
 
             apptainer run \
               --cleanenv \
@@ -1582,9 +1620,10 @@ class ControlPlane:
               >"${{VLLM_LOG}}" 2>&1 &
             VLLM_PID=$!
 
-            wait -n "${{JAEGER_PID}}" "${{VLLM_PID}}"
+            WAIT_PIDS=("${{JAEGER_PID}}" "${{VLLM_PID}}" "${{TUNNEL_PIDS[@]}}")
+            wait -n "${{WAIT_PIDS[@]}}"
             EXIT_CODE=$?
-            echo "One service exited with code ${{EXIT_CODE}} at $(date)."
+            echo "One service/tunnel process exited with code ${{EXIT_CODE}} at $(date)."
             exit "${{EXIT_CODE}}"
             """
         )
