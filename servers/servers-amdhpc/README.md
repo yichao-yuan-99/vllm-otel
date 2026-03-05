@@ -54,8 +54,8 @@ Server startup now ensures the required SIF files exist and pulls them automatic
 
 ```bash
 python3 servers/servers-amdhpc/client.py status -P 0
-python3 servers/servers-amdhpc/client.py start --ssh-target amd-hpc -P 0 -p mi3008x -m kimi_k2_5
-python3 servers/servers-amdhpc/client.py start --ssh-target amd-hpc -P 0 -p mi3008x -m kimi_k2_5 -b
+python3 servers/servers-amdhpc/client.py start -P 0 -p mi3008x -m kimi_k2_5
+python3 servers/servers-amdhpc/client.py start -P 0 -p mi3008x -m kimi_k2_5 -b
 python3 servers/servers-amdhpc/client.py up -P 0
 python3 servers/servers-amdhpc/client.py wait-up -P 0 --timeout-seconds 900
 python3 servers/servers-amdhpc/client.py logs -P 0 -n 200
@@ -103,7 +103,7 @@ Optional overrides:
 ## Commands implemented
 
 - `start`: always starts the local SSH tunnel first and rejects the request if a tunnel daemon is already running for that port profile.
-- `start`: requires `--ssh-target` because it owns tunnel startup now.
+- `start`: defaults `--ssh-target` to `amd-hpc` (override with `--ssh-target` as needed).
 - `start`: the selected port profile sets the local forwarded vLLM/Jaeger ports and the local forwarded control port.
 - `start`: remote vLLM/Jaeger ports on the login node also come from the selected port profile; the remote control server stays on `23971` unless overridden with `--server-port`.
 - `start`: the selected port profile is sent to the remote control server and is also used there to pick the login<->compute reverse-tunnel ports.

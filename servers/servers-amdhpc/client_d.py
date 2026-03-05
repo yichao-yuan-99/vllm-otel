@@ -482,7 +482,12 @@ def _require_ok(payload: dict[str, Any]) -> None:
 
 @app.command()
 def start(
-    ssh_target: str = typer.Option(..., "--ssh-target", "-t", help="SSH target, same as in `ssh <target>`."),
+    ssh_target: str = typer.Option(
+        "amd-hpc",
+        "--ssh-target",
+        "-t",
+        help="SSH target, same as in `ssh <target>`.",
+    ),
     port_profile: int = typer.Option(
         ...,
         "--port-profile",
