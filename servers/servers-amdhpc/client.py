@@ -1019,6 +1019,86 @@ def _run_blocking_with_progress(
     return command_payload
 
 
+def _format_profile_progress_line(progress_response: dict[str, Any], *, progress_tag: str, profile_id: int) -> str:
+    data = progress_response.get("data")
+    if isinstance(data, dict):
+        status = data.get("status")
+        phase = data.get("phase")
+        message = data.get("message")
+        updated_at = data.get("updated_at")
+        return (
+            f"[{progress_tag}] profile={profile_id} status={status} "
+            f"phase={phase} updated_at={updated_at} message={message}"
+        )
+    code = progress_response.get("code")
+    message = progress_response.get("message")
+    return f"[{progress_tag}] profile={profile_id} progress unavailable code={code} message={message}"
+
+
+def _run_group_blocking_with_progress(
+    ctx: typer.Context,
+    *,
+    endpoint: str,
+    payload: dict[str, Any],
+    progress_endpoint: str,
+    progress_profiles: list[int],
+    progress_tag: str,
+    timeout_seconds: float,
+    preferred_control_profile: int | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    worker_error: dict[str, Exception] = {}
+
+    def run_command() -> None:
+        try:
+            result["payload"] = _run_group_command_with_timeout(
+                ctx,
+                endpoint,
+                payload=payload,
+                timeout_seconds=timeout_seconds,
+                preferred_control_profile=preferred_control_profile,
+            )
+        except Exception as exc:  # noqa: BLE001
+            worker_error["error"] = exc
+
+    worker = threading.Thread(target=run_command, daemon=True)
+    worker.start()
+
+    tracked_profiles = _sorted_unique_profile_ids(progress_profiles)
+    last_lines: dict[int, str] = {}
+    while worker.is_alive():
+        for profile_id in tracked_profiles:
+            try:
+                progress_response = _run_command_with_timeout(
+                    ctx,
+                    progress_endpoint,
+                    payload={"port_profile": profile_id},
+                    timeout_seconds=15.0,
+                )
+                line = _format_profile_progress_line(
+                    progress_response,
+                    progress_tag=progress_tag,
+                    profile_id=profile_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                line = f"[{progress_tag}] profile={profile_id} progress poll failed: {exc}"
+
+            if last_lines.get(profile_id) != line:
+                typer.echo(line)
+                last_lines[profile_id] = line
+
+        worker.join(timeout=2.0)
+
+    if "error" in worker_error:
+        raise worker_error["error"]
+
+    command_payload = result.get("payload")
+    if not isinstance(command_payload, dict):
+        typer.echo(f"error: {progress_tag} command did not return a valid response", err=True)
+        raise typer.Exit(code=1)
+    return command_payload
+
+
 def _run_blocking_stop_for_profile(
     ctx: typer.Context,
     *,
@@ -1497,6 +1577,7 @@ def start_group(
     clientd_payloads: dict[str, dict[str, Any]] = {}
     started_profiles: list[int] = []
     for profile_id in profile_ids:
+        typer.echo(f"[start-group] starting client-d for profile={profile_id}")
         payload = start_client_d(
             ssh_target=ssh_target,
             port_profile_id=profile_id,
@@ -1507,6 +1588,7 @@ def start_group(
         clientd_payloads[str(profile_id)] = payload
         if _is_ok(payload):
             started_profiles.append(profile_id)
+            typer.echo(f"[start-group] client-d ready for profile={profile_id}")
             continue
 
         cleanup_payloads, cleanup_failures = _stop_local_profile_daemons(
@@ -1535,9 +1617,9 @@ def start_group(
 
     preferred_control_profile = profile_ids[0]
     try:
-        server_payload = _run_group_command_with_timeout(
+        server_payload = _run_group_blocking_with_progress(
             ctx,
-            "/group/start",
+            endpoint="/group/start",
             payload={
                 "group_name": group_name,
                 "profile_list": profile_ids,
@@ -1545,6 +1627,9 @@ def start_group(
                 "model": model,
                 "block": True,
             },
+            progress_endpoint="/start/status",
+            progress_profiles=profile_ids,
+            progress_tag="start-group",
             timeout_seconds=START_BLOCKING_TIMEOUT_SECONDS,
             preferred_control_profile=preferred_control_profile,
         )
@@ -1617,6 +1702,7 @@ def start_group(
     gateway_payloads: dict[str, dict[str, Any]] = {}
     failed_gateway_profiles: list[int] = []
     for profile_id in profile_ids:
+        typer.echo(f"[start-group] starting gateway for profile={profile_id}")
         gateway_payload = start_gateway_daemon(
             port_profile_id=profile_id,
             runtime_dir=_clientd_runtime_dir(ctx),
@@ -1624,6 +1710,8 @@ def start_group(
         gateway_payloads[str(profile_id)] = gateway_payload
         if not _is_ok(gateway_payload):
             failed_gateway_profiles.append(profile_id)
+        else:
+            typer.echo(f"[start-group] gateway ready for profile={profile_id}")
 
     if failed_gateway_profiles:
         try:
@@ -1696,12 +1784,16 @@ def group_status(
     ),
 ) -> None:
     """Show status for an active grouped service run."""
+    typer.echo(f"[group-status] querying group={group_name}")
     payload = _run_group_command_with_timeout(
         ctx,
         "/group/status",
         payload={"group_name": group_name},
         timeout_seconds=30.0,
     )
+    if _is_ok(payload):
+        profile_ids = _extract_profile_ids_from_group_status(payload)
+        typer.echo(f"[group-status] received status for {len(profile_ids)} profiles")
     _require_ok(payload)
     _print_json(payload)
 
@@ -1722,6 +1814,7 @@ def stop_group(
     ),
 ) -> None:
     """Stop a grouped service run and tear down local daemons for all group profiles."""
+    typer.echo(f"[stop-group] querying group={group_name}")
     group_status_payload = _run_group_command_with_timeout(
         ctx,
         "/group/status",
@@ -1745,13 +1838,20 @@ def stop_group(
         raise typer.Exit(code=1)
 
     preferred_control_profile = profile_ids[0]
-    server_payload = _run_group_command_with_timeout(
+    typer.echo(
+        f"[stop-group] stopping group={group_name} profiles={','.join(str(profile_id) for profile_id in profile_ids)}"
+    )
+    server_payload = _run_group_blocking_with_progress(
         ctx,
-        "/group/stop",
+        endpoint="/group/stop",
         payload={"group_name": group_name, "block": True},
+        progress_endpoint="/stop/status",
+        progress_profiles=profile_ids,
+        progress_tag="stop-group",
         timeout_seconds=STOP_BLOCKING_TIMEOUT_SECONDS,
         preferred_control_profile=preferred_control_profile,
     )
+    typer.echo("[stop-group] tearing down local gateway/client-d daemons")
     local_cleanup_payloads, cleanup_failures = _stop_local_profile_daemons(
         ctx,
         profile_ids=profile_ids,

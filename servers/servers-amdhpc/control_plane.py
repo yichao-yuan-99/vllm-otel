@@ -719,6 +719,73 @@ class ControlPlane:
                     data=result_data,
                 )
 
+            for profile in port_profiles:
+                self._set_start_progress(
+                    port_profile_id=profile.profile_id,
+                    status="running",
+                    phase="wait_services",
+                    message=(
+                        f"submitted grouped job {job_id}; waiting for grouped service readiness "
+                        f"(group={normalized_group_name})"
+                    ),
+                    job_id=job_id,
+                    started_at=start_started_at,
+                    finished_at=None,
+                )
+
+            last_wait_messages_by_profile: dict[int, str] = {}
+
+            def _on_group_wait_snapshot(snapshot: dict[str, Any]) -> None:
+                profiles_payload = snapshot.get("profiles")
+                if not isinstance(profiles_payload, list):
+                    return
+
+                for profile_snapshot in profiles_payload:
+                    if not isinstance(profile_snapshot, dict):
+                        continue
+                    profile_id_raw = profile_snapshot.get("port_profile")
+                    if not isinstance(profile_id_raw, int):
+                        continue
+
+                    active_status = profile_snapshot.get("active_job_status")
+                    vllm_probe = (
+                        profile_snapshot.get("vllm")
+                        if isinstance(profile_snapshot.get("vllm"), dict)
+                        else {}
+                    )
+                    jaeger_probe = (
+                        profile_snapshot.get("jaeger")
+                        if isinstance(profile_snapshot.get("jaeger"), dict)
+                        else {}
+                    )
+
+                    def _probe_status(name: str, probe: dict[str, Any]) -> str:
+                        ok = bool(probe.get("ok"))
+                        http_status = probe.get("http_status")
+                        if ok:
+                            return f"{name}=up(http={http_status})"
+                        error_raw = probe.get("error")
+                        error_text = _truncate_text(str(error_raw), max_chars=120) if error_raw else "unknown"
+                        return f"{name}=down(http={http_status}, error={error_text})"
+
+                    message = (
+                        f"group wait: slurm_status={active_status}, "
+                        f"{_probe_status('vllm', vllm_probe)}, "
+                        f"{_probe_status('jaeger', jaeger_probe)}"
+                    )
+                    if last_wait_messages_by_profile.get(profile_id_raw) == message:
+                        continue
+                    last_wait_messages_by_profile[profile_id_raw] = message
+                    self._set_start_progress(
+                        port_profile_id=profile_id_raw,
+                        status="running",
+                        phase="wait_services",
+                        message=message,
+                        job_id=job_id,
+                        started_at=start_started_at,
+                        finished_at=None,
+                    )
+
             readiness = self._wait_for_group_services_up(
                 group_name=normalized_group_name,
                 port_profile_ids=normalized_profile_ids,
@@ -726,6 +793,7 @@ class ControlPlane:
                 poll_interval_seconds=self._cfg.wait_up_poll_interval_seconds,
                 expected_job_id=job_id,
                 defer_timeout_until_running=self._cfg.startup_timeout_after_running,
+                progress_callback=_on_group_wait_snapshot,
             )
             result_data["readiness"] = readiness
             result_data["waited_seconds"] = readiness.get("waited_seconds")
@@ -2215,6 +2283,7 @@ class ControlPlane:
         poll_interval_seconds: float,
         expected_job_id: str | None,
         defer_timeout_until_running: bool,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         started = time.monotonic()
         timeout_started_at: float | None = None
@@ -2232,6 +2301,8 @@ class ControlPlane:
             waited_seconds = round(time.monotonic() - started, 3)
             snapshot["waited_seconds"] = waited_seconds
             last_snapshot = snapshot
+            if progress_callback is not None:
+                progress_callback(snapshot)
 
             if snapshot["ready"]:
                 return snapshot

@@ -124,7 +124,9 @@ Optional overrides:
 - `start-group`: launches client-d for each profile in `--profile-list`, then calls grouped control-plane start, then launches one local gateway daemon per profile.
 - `start-group`: grouped start is blocking; it waits until all grouped profiles report vLLM + Jaeger ready.
 - `start-group`: submits one multi-node Slurm job with one worker task per profile; node/task index maps to profile-specific ports from `--profile-list`.
+- `start-group`: streams per-profile progress lines while waiting on grouped startup (`/start/status` for each profile).
 - `group-status`: reports grouped run status (group name, profiles, job IDs, per-profile status).
+- `group-status`: prints lightweight query progress lines before returning JSON payload.
 - `start`: gateway startup defaults to `gateway/config.toml` and falls back to `gateway/config.example.toml` when `config.toml` is missing.
 - `start`: AMD HPC always adds `--trust-remote-code` to the vLLM serve args, and force-sequence tokenizer bootstrap is forced to use remote code as well.
 - `start`: when `partition.gpus_per_node > 1`, AMD HPC also adds `--distributed_executor_backend ray` automatically.
@@ -137,6 +139,7 @@ Optional overrides:
 - `stop`: always stops the local gateway daemon first, then waits for the remote job to disappear from Slurm, then stops the local tunnel.
 - `stop`: if no active job exists, it still stops the local gateway and local tunnel for that port profile.
 - `stop-group`: stops a grouped run by `--group-name`, blocks until the grouped job is gone, then tears down gateway/client-d for every profile in the group.
+- `stop-group`: streams per-profile progress lines while waiting on grouped shutdown (`/stop/status` for each profile).
 - `up`: check whether both tunneled vLLM + Jaeger endpoints are currently up for the selected port profile.
 - `wait-up`: block until both tunneled vLLM + Jaeger endpoints are up for the selected port profile.
 - `wait-up`: supports `--defer-timeout-until-running/--timeout-from-submit`.
