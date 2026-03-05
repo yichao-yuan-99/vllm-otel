@@ -39,6 +39,7 @@ DEFAULT_VLLM_PULL_TIMEOUT_SECONDS = 2 * 60 * 60
 DEFAULT_STOP_WAIT_TIMEOUT_SECONDS = 180
 DEFAULT_STOP_POLL_INTERVAL_SECONDS = 2
 DEFAULT_WAIT_UP_POLL_INTERVAL_SECONDS = 2
+DEFAULT_SQUEUE_MISS_GRACE_SECONDS = 30
 
 
 def _encode_model_extra_args(extra_args: list[str]) -> str:
@@ -1762,15 +1763,46 @@ class ControlPlane:
 
         active = ActiveJob.from_dict(active_raw)
         job_status = self._slurm_job_status(active.job_id)
+        missing_in_squeue_key = "missing_in_squeue_since"
         if job_status is None:
             stop_requested_at = active_raw.get("stop_requested_at")
-            reason = (
-                "stopped"
-                if isinstance(stop_requested_at, str) and stop_requested_at
-                else "finished"
+            if isinstance(stop_requested_at, str) and stop_requested_at:
+                self._archive_active_job(state, port_profile_id=port_profile_id, reason="stopped")
+                return (True, None, None)
+
+            missing_since_raw = active_raw.get(missing_in_squeue_key)
+            missing_since = (
+                _parse_iso_datetime(missing_since_raw)
+                if isinstance(missing_since_raw, str) and missing_since_raw
+                else None
             )
-            self._archive_active_job(state, port_profile_id=port_profile_id, reason=reason)
+            if missing_since is None:
+                active_payload = dict(active_raw)
+                active_payload[missing_in_squeue_key] = _utc_now_iso()
+                self._set_active_job(
+                    state,
+                    port_profile_id=port_profile_id,
+                    active_job=active_payload,
+                )
+                return (True, active, "UNKNOWN")
+
+            elapsed_seconds = max((datetime.now(timezone.utc) - missing_since).total_seconds(), 0.0)
+            if elapsed_seconds < DEFAULT_SQUEUE_MISS_GRACE_SECONDS:
+                return (False, active, "UNKNOWN")
+
+            self._archive_active_job(state, port_profile_id=port_profile_id, reason="finished")
             return (True, None, None)
+
+        if missing_in_squeue_key in active_raw:
+            active_payload = dict(active_raw)
+            active_payload.pop(missing_in_squeue_key, None)
+            self._set_active_job(
+                state,
+                port_profile_id=port_profile_id,
+                active_job=active_payload,
+            )
+            return (True, active, job_status)
+
         return (False, active, job_status)
 
     def _refresh_all_active_jobs(
@@ -2091,12 +2123,27 @@ class ControlPlane:
             )
             state_changed = state_changed or state_changed_for_profile
             if active is None:
+                latest_history_entry: dict[str, Any] | None = None
+                history = state.get("history")
+                if isinstance(history, list):
+                    for entry in reversed(history):
+                        if not isinstance(entry, dict):
+                            continue
+                        raw_profile_id = entry.get("port_profile_id")
+                        if isinstance(raw_profile_id, int) and raw_profile_id == port_profile_id:
+                            latest_history_entry = dict(entry)
+                            break
                 raise ControlPlaneError(
                     message=(
                         f"group '{group_name}' profile {port_profile_id} no longer has an active job"
                     ),
                     code=83,
                     http_status=409,
+                    details={
+                        "group_name": group_name,
+                        "port_profile": port_profile_id,
+                        "latest_history_entry": latest_history_entry,
+                    },
                 )
             if active.group_name != group_name:
                 raise ControlPlaneError(
@@ -3136,6 +3183,16 @@ def _is_slurm_pending_state(status: str | None) -> bool:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _parse_iso_datetime(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _resolve_path(repo_root: Path, raw_path: str) -> Path:
