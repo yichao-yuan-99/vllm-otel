@@ -41,9 +41,13 @@ python con-driver/driver.py --help
   - Poisson supports `--rate=<arrivals_per_second>` or `--mean-interval-s=<seconds>`.
 - `--max-concurrent`: maximum concurrent trial processes.
 - `--n-task`: total launches.
+- `--task-subset-start`: optional 0-based inclusive subset start index into the prepared task pool.
+- `--task-subset-end`: optional 0-based exclusive subset end index into the prepared task pool.
 - `--results-dir`: root output directory.
 - `--harbor-bin`: command prefix for Harbor (default: `harbor`).
 - `--port-profile-id`: port profile numeric ID from [`../configs/port_profiles.toml`](../configs/port_profiles.toml).
+- `--port-profile-id-list`: optional comma-separated profile IDs for cluster mode.
+- `--max-concurrent-list`: required with `--port-profile-id-list`; per-profile concurrency caps.
 - `--agent-name`: Harbor agent name. TOML keys `agent` and `agent_name` are also accepted.
 - `--sample-without-replacement`: optional; disables repeated task sampling.
 - `--vllm-log/--no-vllm-log`: optional; run a separate vLLM metrics monitor process.
@@ -55,6 +59,13 @@ python con-driver/driver.py --help
 - `--gateway-job-output-root`: run-local output subdirectory sent to gateway `/job/start` (default: `gateway-output`).
 - `--gateway-timeout-s`: timeout for gateway lifecycle API calls (default: `3600.0`).
   Set this above gateway `GATEWAY_JOB_END_TRACE_WAIT_SECONDS`.
+
+Cluster mode rules:
+
+- `--port-profile-id` and `--port-profile-id-list` are mutually exclusive.
+- With `--port-profile-id-list`, you must also provide `--max-concurrent-list`.
+- With `--port-profile-id-list`, `--max-concurrent` is optional; default is `sum(max_concurrent_list)`.
+- Profile routing fills from low to high profile ID while respecting each profile cap.
 
 Any extra args/options are forwarded to:
 
@@ -110,6 +121,8 @@ port_profile_id = 1
 agent = "terminus-2"
 dry_run = false
 sample_without_replacement = true
+task_subset_start = 0
+# task_subset_end = 250
 
 # Optional
 pattern_args = "--mean-interval-s=5"
@@ -126,6 +139,9 @@ gateway = true
 # gateway_url = "http://127.0.0.1:28171"
 gateway_job_output_root = "gateway-output"
 gateway_timeout_s = 3600.0
+# Cluster mode (mutually exclusive with port_profile_id):
+# port_profile_id_list = [1, 2, 3]
+# max_concurrent_list = [5, 5, 5]
 
 # Optional extra Harbor args only.
 # con-driver auto-populates --agent, --model, api_base/base_url, model_info,
@@ -142,6 +158,33 @@ bash con-driver/run_con_driver.sh --config con-driver/configs/config.example.tom
 ```
 
 CLI flags override config values.
+
+## Task Subset Sharding
+
+Use `task_subset_start`/`task_subset_end` to split one dataset into disjoint shards.
+Subset is applied before sampling. Indexing is 0-based and end-exclusive.
+
+Example for a 500-task dataset with no overlap:
+
+- job A: `task_subset_start = 0`, `task_subset_end = 250`, `n_task = 250`
+- job B: `task_subset_start = 250`, `task_subset_end = 500`, `n_task = 250`
+
+This covers all 500 tasks exactly once when `sample_without_replacement = true`.
+
+## Cluster Port-Profile Mode
+
+Example:
+
+```bash
+con-driver \
+  --pool="swebench-verified" \
+  --pattern=eager \
+  --n-task=500 \
+  --port-profile-id-list=0,1,2,3,4 \
+  --max-concurrent-list=5,5,5,5,5 \
+  --agent-name=terminus-2 \
+  --results-dir=con-driver/output/cluster-run
+```
 
 ## Output Layout
 

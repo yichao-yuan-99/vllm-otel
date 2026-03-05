@@ -176,6 +176,8 @@ class ActiveJob:
     slurm_err_log: str
     jaeger_log: str
     vllm_log: str
+    group_name: str | None = None
+    group_profiles: list[int] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ActiveJob":
@@ -194,6 +196,20 @@ class ActiveJob:
             slurm_err_log=str(payload["slurm_err_log"]),
             jaeger_log=str(payload["jaeger_log"]),
             vllm_log=str(payload["vllm_log"]),
+            group_name=(
+                str(payload.get("group_name"))
+                if isinstance(payload.get("group_name"), str) and str(payload.get("group_name")).strip()
+                else None
+            ),
+            group_profiles=(
+                [
+                    int(item)
+                    for item in payload.get("group_profiles", [])
+                    if isinstance(item, int) and not isinstance(item, bool)
+                ]
+                if isinstance(payload.get("group_profiles"), list)
+                else []
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -212,6 +228,8 @@ class ActiveJob:
             "slurm_err_log": self.slurm_err_log,
             "jaeger_log": self.jaeger_log,
             "vllm_log": self.vllm_log,
+            "group_name": self.group_name,
+            "group_profiles": list(self.group_profiles),
         }
 
 
@@ -268,6 +286,11 @@ class ControlPlane:
                 )
                 if state_changed:
                     self._save_state(state)
+                self._ensure_single_profile_command_allowed(
+                    state,
+                    port_profile_id=port_profile.profile_id,
+                    command_name="start",
+                )
 
                 if active is not None and job_status is not None:
                     raise ControlPlaneError(
@@ -483,12 +506,496 @@ class ControlPlane:
             )
             raise
 
+    def start_group(
+        self,
+        *,
+        group_name: str,
+        port_profile_ids: list[int],
+        partition: str,
+        model: str,
+        block: bool = True,
+    ) -> CommandResult:
+        normalized_group_name = group_name.strip()
+        if not normalized_group_name:
+            raise ControlPlaneError(
+                message="group_name must be non-empty",
+                code=71,
+                http_status=400,
+            )
+        if not port_profile_ids:
+            raise ControlPlaneError(
+                message="profile_list must contain at least one profile id",
+                code=72,
+                http_status=400,
+            )
+        if any(isinstance(value, bool) for value in port_profile_ids):
+            raise ControlPlaneError(
+                message="profile_list values must be integers",
+                code=73,
+                http_status=400,
+            )
+
+        normalized_profile_ids = [int(value) for value in port_profile_ids]
+        if len(set(normalized_profile_ids)) != len(normalized_profile_ids):
+            raise ControlPlaneError(
+                message="profile_list cannot contain duplicate profile ids",
+                code=74,
+                http_status=400,
+            )
+
+        port_profiles = [self._require_port_profile(profile_id) for profile_id in normalized_profile_ids]
+        start_started_at = _utc_now_iso()
+        for profile in port_profiles:
+            self._set_start_progress(
+                port_profile_id=profile.profile_id,
+                status="running",
+                phase="validate",
+                message=(
+                    f"validating grouped start request group={normalized_group_name} "
+                    f"partition={partition} model={model}"
+                ),
+                job_id=None,
+                started_at=start_started_at,
+                finished_at=None,
+            )
+
+        try:
+            with self._lock:
+                self._require_command("sbatch")
+                self._require_command("squeue")
+                self._ensure_sif_files()
+
+                state = self._load_state()
+                state_changed, _ = self._refresh_all_active_jobs(state)
+                if state_changed:
+                    self._save_state(state)
+
+                group_active_entries = self._active_group_entries(
+                    state,
+                    group_name=normalized_group_name,
+                )
+                if group_active_entries:
+                    raise ControlPlaneError(
+                        message=f"group '{normalized_group_name}' already has active services",
+                        code=75,
+                        http_status=409,
+                        details={
+                            "group_name": normalized_group_name,
+                            "active_profiles": [entry[0] for entry in group_active_entries],
+                        },
+                    )
+
+                conflicting_profiles: list[dict[str, Any]] = []
+                for profile in port_profiles:
+                    active_raw = self._active_job_raw(state, port_profile_id=profile.profile_id)
+                    if not isinstance(active_raw, dict):
+                        continue
+                    active = ActiveJob.from_dict(active_raw)
+                    conflicting_profiles.append(
+                        {
+                            "port_profile": profile.profile_id,
+                            "job_id": active.job_id,
+                            "group_name": active.group_name,
+                        }
+                    )
+                if conflicting_profiles:
+                    raise ControlPlaneError(
+                        message=(
+                            "cannot start grouped services because one or more profiles "
+                            "already have active jobs"
+                        ),
+                        code=76,
+                        http_status=409,
+                        details={"conflicts": conflicting_profiles},
+                    )
+
+                partition_spec = self._cfg.partitions.get(partition)
+                if partition_spec is None:
+                    raise ControlPlaneError(
+                        message=f"unknown partition '{partition}'",
+                        code=12,
+                        http_status=400,
+                        details={"allowed_partitions": sorted(self._cfg.partitions.keys())},
+                    )
+
+                model_spec = self._cfg.models.get(model)
+                if model_spec is None:
+                    raise ControlPlaneError(
+                        message=f"unknown model '{model}'",
+                        code=13,
+                        http_status=400,
+                        details={"allowed_models": sorted(self._cfg.models.keys())},
+                    )
+
+                max_weight = partition_spec.total_vram_gb * 0.75
+                if model_spec.weight_vram_gb > max_weight:
+                    raise ControlPlaneError(
+                        message=(
+                            f"model '{model}' requires {model_spec.weight_vram_gb:.1f} GB which exceeds "
+                            f"75% of partition '{partition}' VRAM ({max_weight:.1f} GB)"
+                        ),
+                        code=14,
+                        http_status=422,
+                        details={
+                            "model_weight_vram_gb": model_spec.weight_vram_gb,
+                            "partition_total_vram_gb": partition_spec.total_vram_gb,
+                            "max_allowed_weight_vram_gb": max_weight,
+                        },
+                    )
+
+                for profile in port_profiles:
+                    self._ensure_profile_ports_available_on_login(profile)
+
+                script_path = self._write_group_sbatch_script(
+                    partition_spec=partition_spec,
+                    model_spec=model_spec,
+                    port_profiles=port_profiles,
+                    group_name=normalized_group_name,
+                )
+                sbatch_result = self._run_checked(["sbatch", str(script_path)], timeout_seconds=120)
+                job_id = _extract_sbatch_job_id(f"{sbatch_result.stdout}\n{sbatch_result.stderr}")
+
+                for profile in port_profiles:
+                    slurm_out_log = str(self._cfg.log_dir / f"slurm.{job_id}.out")
+                    slurm_err_log = str(self._cfg.log_dir / f"slurm.{job_id}.err")
+                    jaeger_log = str(self._cfg.log_dir / f"jaeger.{job_id}.p{profile.profile_id}.log")
+                    vllm_log = str(self._cfg.log_dir / f"vllm.{job_id}.p{profile.profile_id}.log")
+                    new_active = ActiveJob(
+                        port_profile_id=profile.profile_id,
+                        job_id=job_id,
+                        partition=partition_spec.name,
+                        model=model_spec.name,
+                        submitted_at=_utc_now_iso(),
+                        tensor_parallel_size=partition_spec.gpus_per_node,
+                        service_port=profile.vllm_port,
+                        jaeger_otlp_port=profile.jaeger_otlp_port,
+                        jaeger_ui_port=profile.jaeger_api_port,
+                        sbatch_script=str(script_path),
+                        slurm_out_log=slurm_out_log,
+                        slurm_err_log=slurm_err_log,
+                        jaeger_log=jaeger_log,
+                        vllm_log=vllm_log,
+                        group_name=normalized_group_name,
+                        group_profiles=list(normalized_profile_ids),
+                    )
+                    self._set_active_job(
+                        state,
+                        port_profile_id=profile.profile_id,
+                        active_job=new_active.to_dict(),
+                    )
+
+                self._save_state(state)
+                result_data = {
+                    "group_name": normalized_group_name,
+                    "profile_list": list(normalized_profile_ids),
+                    "job_id": job_id,
+                    "partition": partition_spec.name,
+                    "model": model_spec.name,
+                    "time_limit": partition_spec.max_time,
+                    "tensor_parallel_size": partition_spec.gpus_per_node,
+                    "blocked": bool(block),
+                    "sbatch_script": str(script_path),
+                }
+
+            if not block:
+                finished_at = _utc_now_iso()
+                for profile in port_profiles:
+                    self._set_start_progress(
+                        port_profile_id=profile.profile_id,
+                        status="succeeded",
+                        phase="done",
+                        message=(
+                            f"submitted grouped job {job_id} "
+                            f"(group={normalized_group_name})"
+                        ),
+                        job_id=job_id,
+                        started_at=start_started_at,
+                        finished_at=finished_at,
+                    )
+                return CommandResult(
+                    code=0,
+                    message=f"submitted grouped job {job_id}",
+                    data=result_data,
+                )
+
+            readiness = self._wait_for_group_services_up(
+                group_name=normalized_group_name,
+                port_profile_ids=normalized_profile_ids,
+                timeout_seconds=self._cfg.startup_timeout,
+                poll_interval_seconds=self._cfg.wait_up_poll_interval_seconds,
+                expected_job_id=job_id,
+                defer_timeout_until_running=self._cfg.startup_timeout_after_running,
+            )
+            result_data["readiness"] = readiness
+            result_data["waited_seconds"] = readiness.get("waited_seconds")
+
+            finished_at = _utc_now_iso()
+            for profile in port_profiles:
+                self._set_start_progress(
+                    port_profile_id=profile.profile_id,
+                    status="succeeded",
+                    phase="done",
+                    message=(
+                        f"submitted grouped job {job_id} and services are up "
+                        f"(group={normalized_group_name})"
+                    ),
+                    job_id=job_id,
+                    started_at=start_started_at,
+                    finished_at=finished_at,
+                )
+            return CommandResult(
+                code=0,
+                message=f"group '{normalized_group_name}' services are up",
+                data=result_data,
+            )
+        except Exception as exc:  # noqa: BLE001
+            for profile in port_profiles:
+                self._set_start_progress(
+                    port_profile_id=profile.profile_id,
+                    status="failed",
+                    phase="failed",
+                    message=str(exc),
+                    job_id=self._current_start_job_id(profile.profile_id),
+                    started_at=start_started_at,
+                    finished_at=_utc_now_iso(),
+                )
+            raise
+
+    def stop_group(
+        self,
+        *,
+        group_name: str,
+        reason: str = "stopped",
+        block: bool = True,
+    ) -> CommandResult:
+        normalized_group_name = group_name.strip()
+        if not normalized_group_name:
+            raise ControlPlaneError(
+                message="group_name must be non-empty",
+                code=77,
+                http_status=400,
+            )
+
+        stop_started_at = _utc_now_iso()
+        try:
+            with self._lock:
+                self._require_command("squeue")
+                self._require_command("scancel")
+
+                state = self._load_state()
+                state_changed, _ = self._refresh_all_active_jobs(state)
+                if state_changed:
+                    self._save_state(state)
+
+                group_entries = self._active_group_entries(
+                    state,
+                    group_name=normalized_group_name,
+                )
+                if not group_entries:
+                    raise ControlPlaneError(
+                        message=f"no active services for group '{normalized_group_name}'",
+                        code=78,
+                        http_status=404,
+                    )
+
+                group_profile_ids = [entry[0] for entry in group_entries]
+                job_ids = {entry[1].job_id for entry in group_entries}
+                if len(job_ids) != 1:
+                    raise ControlPlaneError(
+                        message=(
+                            f"active group '{normalized_group_name}' has inconsistent job IDs; "
+                            "cannot stop safely"
+                        ),
+                        code=79,
+                        http_status=409,
+                        details={
+                            "group_name": normalized_group_name,
+                            "job_ids": sorted(job_ids),
+                            "profiles": group_profile_ids,
+                        },
+                    )
+
+                job_id = next(iter(job_ids))
+                for profile_id in group_profile_ids:
+                    self._set_stop_progress(
+                        port_profile_id=profile_id,
+                        status="running",
+                        phase="validate",
+                        message=(
+                            f"validating grouped stop request group={normalized_group_name} "
+                            f"job={job_id}"
+                        ),
+                        job_id=job_id,
+                        started_at=stop_started_at,
+                        finished_at=None,
+                    )
+
+                slurm_user = self._slurm_user()
+                status = self._slurm_job_status(job_id)
+                if status is not None:
+                    cancel = self._run(
+                        ["scancel", "-u", slurm_user, job_id],
+                        timeout_seconds=60,
+                    )
+                    if cancel.returncode != 0:
+                        stderr = cancel.stderr.strip()
+                        if "Invalid job id specified" not in stderr:
+                            raise ControlPlaneError(
+                                message=f"failed to stop grouped job {job_id}",
+                                code=80,
+                                http_status=500,
+                                details={
+                                    "stderr": _truncate_text(stderr),
+                                    "stdout": _truncate_text(cancel.stdout.strip()),
+                                },
+                            )
+
+                if not block:
+                    if status is None:
+                        for profile_id in group_profile_ids:
+                            self._archive_active_job(state, port_profile_id=profile_id, reason=reason)
+                        final_status = "not_found"
+                    else:
+                        for profile_id, active_raw in self._active_group_entries_raw(
+                            state,
+                            group_name=normalized_group_name,
+                        ):
+                            active_payload = dict(active_raw)
+                            active_payload["stop_requested_at"] = _utc_now_iso()
+                            self._set_active_job(
+                                state,
+                                port_profile_id=profile_id,
+                                active_job=active_payload,
+                            )
+                        final_status = "cancelling"
+
+                    self._save_state(state)
+                    finished_at = _utc_now_iso()
+                    for profile_id in group_profile_ids:
+                        self._set_stop_progress(
+                            port_profile_id=profile_id,
+                            status="succeeded",
+                            phase="done",
+                            message=(
+                                f"group stop requested for job {job_id} "
+                                f"(group={normalized_group_name}, final_status={final_status})"
+                            ),
+                            job_id=job_id,
+                            started_at=stop_started_at,
+                            finished_at=finished_at,
+                        )
+                    return CommandResult(
+                        code=0,
+                        message=f"group stop requested for job {job_id}",
+                        data={
+                            "group_name": normalized_group_name,
+                            "profile_list": group_profile_ids,
+                            "job_id": job_id,
+                            "previous_status": status or "not_found",
+                            "final_status": final_status,
+                            "waited_seconds": 0.0,
+                            "slurm_user": slurm_user,
+                            "blocked": False,
+                        },
+                    )
+
+                wait_started_at = time.monotonic()
+                deadline = wait_started_at + self._cfg.stop_wait_timeout_seconds
+                last_seen_status: str | None = None
+                while True:
+                    current_status = self._slurm_job_status(job_id)
+                    if current_status is None:
+                        break
+                    if current_status != last_seen_status:
+                        last_seen_status = current_status
+                        for profile_id in group_profile_ids:
+                            self._set_stop_progress(
+                                port_profile_id=profile_id,
+                                status="running",
+                                phase="wait_slurm",
+                                message=(
+                                    f"group job {job_id} still active "
+                                    f"(group={normalized_group_name}, status={current_status})"
+                                ),
+                                job_id=job_id,
+                                started_at=stop_started_at,
+                                finished_at=None,
+                            )
+                    if time.monotonic() >= deadline:
+                        raise ControlPlaneError(
+                            message=(
+                                f"timed out waiting for grouped job {job_id} to disappear "
+                                f"(group={normalized_group_name}, last_status={current_status})"
+                            ),
+                            code=81,
+                            http_status=504,
+                            details={
+                                "group_name": normalized_group_name,
+                                "job_id": job_id,
+                                "last_status": current_status,
+                                "wait_timeout_seconds": self._cfg.stop_wait_timeout_seconds,
+                                "slurm_user": slurm_user,
+                            },
+                        )
+                    time.sleep(self._cfg.stop_poll_interval_seconds)
+
+                waited_seconds = round(time.monotonic() - wait_started_at, 3)
+                for profile_id in group_profile_ids:
+                    self._archive_active_job(state, port_profile_id=profile_id, reason=reason)
+                self._save_state(state)
+
+                finished_at = _utc_now_iso()
+                for profile_id in group_profile_ids:
+                    self._set_stop_progress(
+                        port_profile_id=profile_id,
+                        status="succeeded",
+                        phase="done",
+                        message=f"stopped grouped job {job_id} (group={normalized_group_name})",
+                        job_id=job_id,
+                        started_at=stop_started_at,
+                        finished_at=finished_at,
+                    )
+
+                return CommandResult(
+                    code=0,
+                    message=f"stopped grouped job {job_id}",
+                    data={
+                        "group_name": normalized_group_name,
+                        "profile_list": group_profile_ids,
+                        "job_id": job_id,
+                        "previous_status": status or "not_found",
+                        "final_status": "not_found",
+                        "waited_seconds": waited_seconds,
+                        "slurm_user": slurm_user,
+                        "blocked": True,
+                    },
+                )
+        except Exception as exc:  # noqa: BLE001
+            with self._lock:
+                state = self._load_state()
+                group_entries = self._active_group_entries(
+                    state,
+                    group_name=normalized_group_name,
+                )
+            for profile_id, _ in group_entries:
+                self._set_stop_progress(
+                    port_profile_id=profile_id,
+                    status="failed",
+                    phase="failed",
+                    message=str(exc),
+                    job_id=self._current_stop_job_id(profile_id),
+                    started_at=stop_started_at,
+                    finished_at=_utc_now_iso(),
+                )
+            raise
+
     def stop(
         self,
         *,
         port_profile_id: int,
         reason: str = "stopped",
         block: bool = False,
+        allow_group: bool = False,
     ) -> CommandResult:
         port_profile = self._require_port_profile(port_profile_id)
         stop_started_at = _utc_now_iso()
@@ -508,6 +1015,12 @@ class ControlPlane:
                 self._require_command("scancel")
 
                 state = self._load_state()
+                if not allow_group:
+                    self._ensure_single_profile_command_allowed(
+                        state,
+                        port_profile_id=port_profile.profile_id,
+                        command_name="stop",
+                    )
                 active_raw = self._active_job_raw(state, port_profile_id=port_profile.profile_id)
                 if not isinstance(active_raw, dict):
                     raise ControlPlaneError(
@@ -681,9 +1194,15 @@ class ControlPlane:
             )
             raise
 
-    def stop_poll(self, *, port_profile_id: int) -> CommandResult:
+    def stop_poll(self, *, port_profile_id: int, allow_group: bool = False) -> CommandResult:
         with self._lock:
             state = self._load_state()
+            if not allow_group:
+                self._ensure_single_profile_command_allowed(
+                    state,
+                    port_profile_id=port_profile_id,
+                    command_name="stop-poll",
+                )
             active_raw = self._active_job_raw(state, port_profile_id=port_profile_id)
             if not isinstance(active_raw, dict):
                 return CommandResult(
@@ -758,6 +1277,11 @@ class ControlPlane:
                 )
 
             state = self._load_state()
+            self._ensure_single_profile_command_allowed(
+                state,
+                port_profile_id=port_profile_id,
+                command_name="logs",
+            )
             active_raw = self._active_job_raw(state, port_profile_id=port_profile_id)
             if not isinstance(active_raw, dict):
                 raise ControlPlaneError(
@@ -843,6 +1367,25 @@ class ControlPlane:
             selected = active_jobs.get(port_profile_id)
             active = selected[0] if selected is not None else None
             job_status = selected[1] if selected is not None else None
+            active_groups: dict[str, dict[str, Any]] = {}
+            for profile_id, (profile_active, profile_status) in active_jobs.items():
+                if not profile_active.group_name:
+                    continue
+                group_payload = active_groups.setdefault(
+                    profile_active.group_name,
+                    {
+                        "group_name": profile_active.group_name,
+                        "job_id": profile_active.job_id,
+                        "profiles": [],
+                        "active_job_status_by_profile": {},
+                    },
+                )
+                profiles_payload = group_payload.get("profiles")
+                if isinstance(profiles_payload, list):
+                    profiles_payload.append(profile_id)
+                status_payload = group_payload.get("active_job_status_by_profile")
+                if isinstance(status_payload, dict):
+                    status_payload[str(profile_id)] = profile_status
 
             return CommandResult(
                 code=0,
@@ -862,6 +1405,10 @@ class ControlPlane:
                             "active_job_status": profile_status,
                         }
                         for profile_id, (profile_active, profile_status) in active_jobs.items()
+                    },
+                    "active_groups": {
+                        group_name: payload
+                        for group_name, payload in active_groups.items()
                     },
                     "allowed_port_profiles": {
                         str(profile_id): {
@@ -890,6 +1437,52 @@ class ControlPlane:
                         }
                         for key, value in self._cfg.models.items()
                     },
+                },
+            )
+
+    def group_status(self, *, group_name: str) -> CommandResult:
+        normalized_group_name = group_name.strip()
+        if not normalized_group_name:
+            raise ControlPlaneError(
+                message="group_name must be non-empty",
+                code=87,
+                http_status=400,
+            )
+
+        with self._lock:
+            state = self._load_state()
+            state_changed, active_jobs = self._refresh_all_active_jobs(state)
+            if state_changed:
+                self._save_state(state)
+
+            group_entries = [
+                (profile_id, active, status)
+                for profile_id, (active, status) in active_jobs.items()
+                if active.group_name == normalized_group_name
+            ]
+            group_entries.sort(key=lambda item: item[0])
+            if not group_entries:
+                raise ControlPlaneError(
+                    message=f"no active services for group '{normalized_group_name}'",
+                    code=78,
+                    http_status=404,
+                )
+
+            job_ids = sorted({entry[1].job_id for entry in group_entries})
+            return CommandResult(
+                code=0,
+                message="group status",
+                data={
+                    "group_name": normalized_group_name,
+                    "job_ids": job_ids,
+                    "profiles": [
+                        {
+                            "port_profile": profile_id,
+                            "active_job": active.to_dict(),
+                            "active_job_status": status,
+                        }
+                        for profile_id, active, status in group_entries
+                    ],
                 },
             )
 
@@ -1196,6 +1789,35 @@ class ControlPlane:
                 active_jobs[int(profile_key)] = (active, job_status)
         return state_changed, active_jobs
 
+    def _active_group_entries_raw(
+        self,
+        state: dict[str, Any],
+        *,
+        group_name: str,
+    ) -> list[tuple[int, dict[str, Any]]]:
+        normalized_group_name = group_name.strip()
+        entries: list[tuple[int, dict[str, Any]]] = []
+        for profile_key, active_raw in self._active_jobs_table(state).items():
+            if not isinstance(active_raw, dict):
+                continue
+            active_group_name = active_raw.get("group_name")
+            if not isinstance(active_group_name, str) or active_group_name.strip() != normalized_group_name:
+                continue
+            entries.append((int(profile_key), active_raw))
+        entries.sort(key=lambda item: item[0])
+        return entries
+
+    def _active_group_entries(
+        self,
+        state: dict[str, Any],
+        *,
+        group_name: str,
+    ) -> list[tuple[int, ActiveJob]]:
+        return [
+            (profile_id, ActiveJob.from_dict(active_raw))
+            for profile_id, active_raw in self._active_group_entries_raw(state, group_name=group_name)
+        ]
+
     def _slurm_job_status(self, job_id: str) -> str | None:
         self._require_command("squeue")
         slurm_user = self._slurm_user()
@@ -1260,6 +1882,44 @@ class ControlPlane:
             )
         return profile
 
+    def _ensure_single_profile_command_allowed(
+        self,
+        state: dict[str, Any],
+        *,
+        port_profile_id: int,
+        command_name: str,
+    ) -> None:
+        active_raw = self._active_job_raw(state, port_profile_id=port_profile_id)
+        if not isinstance(active_raw, dict):
+            return
+        group_name = active_raw.get("group_name")
+        if not isinstance(group_name, str) or not group_name.strip():
+            return
+        group_profiles_raw = active_raw.get("group_profiles")
+        group_profiles = (
+            [
+                int(value)
+                for value in group_profiles_raw
+                if isinstance(value, int) and not isinstance(value, bool)
+            ]
+            if isinstance(group_profiles_raw, list)
+            else []
+        )
+        raise ControlPlaneError(
+            message=(
+                f"{command_name} for a single --port-profile is not allowed while "
+                f"profile {port_profile_id} belongs to group '{group_name}'. "
+                "Use group commands instead."
+            ),
+            code=82,
+            http_status=409,
+            details={
+                "port_profile": port_profile_id,
+                "group_name": group_name,
+                "group_profiles": group_profiles,
+            },
+        )
+
     def _ensure_port_available_on_login(self, port: int, *, label: str) -> None:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1284,6 +1944,11 @@ class ControlPlane:
     def _collect_readiness_snapshot(self, *, port_profile_id: int) -> dict[str, Any]:
         port_profile = self._require_port_profile(port_profile_id)
         state = self._load_state()
+        self._ensure_single_profile_command_allowed(
+            state,
+            port_profile_id=port_profile.profile_id,
+            command_name="up/wait-up",
+        )
         state_changed, active, job_status = self._refresh_active_job(state, port_profile_id=port_profile.profile_id)
         if state_changed:
             self._save_state(state)
@@ -1406,6 +2071,156 @@ class ControlPlane:
 
             time.sleep(poll_interval_seconds)
 
+    def _collect_group_readiness_snapshot(
+        self,
+        *,
+        group_name: str,
+        port_profile_ids: list[int],
+        expected_job_id: str | None,
+    ) -> dict[str, Any]:
+        state = self._load_state()
+        profiles_payload: list[dict[str, Any]] = []
+        state_changed = False
+        all_ready = True
+        all_running = True
+
+        for port_profile_id in port_profile_ids:
+            state_changed_for_profile, active, job_status = self._refresh_active_job(
+                state,
+                port_profile_id=port_profile_id,
+            )
+            state_changed = state_changed or state_changed_for_profile
+            if active is None:
+                raise ControlPlaneError(
+                    message=(
+                        f"group '{group_name}' profile {port_profile_id} no longer has an active job"
+                    ),
+                    code=83,
+                    http_status=409,
+                )
+            if active.group_name != group_name:
+                raise ControlPlaneError(
+                    message=(
+                        f"profile {port_profile_id} active job does not belong to "
+                        f"group '{group_name}'"
+                    ),
+                    code=84,
+                    http_status=409,
+                    details={
+                        "port_profile": port_profile_id,
+                        "active_group_name": active.group_name,
+                        "expected_group_name": group_name,
+                    },
+                )
+            if expected_job_id is not None and active.job_id != expected_job_id:
+                raise ControlPlaneError(
+                    message=(
+                        f"profile {port_profile_id} active job changed while waiting for "
+                        f"group '{group_name}' readiness"
+                    ),
+                    code=85,
+                    http_status=409,
+                    details={
+                        "port_profile": port_profile_id,
+                        "expected_job_id": expected_job_id,
+                        "active_job_id": active.job_id,
+                    },
+                )
+
+            port_profile = self._require_port_profile(port_profile_id)
+            vllm_url = f"http://127.0.0.1:{port_profile.vllm_port}/v1/models"
+            jaeger_url = f"http://127.0.0.1:{port_profile.jaeger_api_port}"
+            vllm_probe = self._probe_http_url(vllm_url)
+            jaeger_probe = self._probe_http_url(jaeger_url)
+
+            active_running = _is_slurm_running_state(job_status)
+            profile_ready = bool(active_running and vllm_probe["ok"] and jaeger_probe["ok"])
+            all_running = bool(all_running and active_running)
+            all_ready = bool(all_ready and profile_ready)
+            profiles_payload.append(
+                {
+                    "port_profile": port_profile_id,
+                    "group_name": group_name,
+                    "ready": profile_ready,
+                    "active_job": active.to_dict(),
+                    "active_job_status": job_status,
+                    "vllm": vllm_probe,
+                    "jaeger": jaeger_probe,
+                }
+            )
+
+        if state_changed:
+            self._save_state(state)
+
+        return {
+            "group_name": group_name,
+            "ready": all_ready,
+            "all_running": all_running,
+            "profiles": profiles_payload,
+        }
+
+    def _wait_for_group_services_up(
+        self,
+        *,
+        group_name: str,
+        port_profile_ids: list[int],
+        timeout_seconds: int,
+        poll_interval_seconds: float,
+        expected_job_id: str | None,
+        defer_timeout_until_running: bool,
+    ) -> dict[str, Any]:
+        started = time.monotonic()
+        timeout_started_at: float | None = None
+        timeout_started_at_status: str | None = None
+        last_snapshot: dict[str, Any] | None = None
+
+        while True:
+            with self._lock:
+                snapshot = self._collect_group_readiness_snapshot(
+                    group_name=group_name,
+                    port_profile_ids=port_profile_ids,
+                    expected_job_id=expected_job_id,
+                )
+
+            waited_seconds = round(time.monotonic() - started, 3)
+            snapshot["waited_seconds"] = waited_seconds
+            last_snapshot = snapshot
+
+            if snapshot["ready"]:
+                return snapshot
+
+            all_running = bool(snapshot.get("all_running"))
+            if timeout_started_at is None:
+                if defer_timeout_until_running:
+                    if all_running:
+                        timeout_started_at = time.monotonic()
+                        timeout_started_at_status = "all_running"
+                else:
+                    timeout_started_at = started
+                    timeout_started_at_status = "timeout_from_submit"
+
+            if timeout_started_at is not None:
+                elapsed_from_timeout_start = time.monotonic() - timeout_started_at
+                if elapsed_from_timeout_start > timeout_seconds:
+                    raise ControlPlaneError(
+                        message=(
+                            f"timed out waiting for grouped services to become ready "
+                            f"(group={group_name}, waited={elapsed_from_timeout_start:.1f}s)"
+                        ),
+                        code=86,
+                        http_status=504,
+                        details={
+                            "group_name": group_name,
+                            "timeout_seconds": timeout_seconds,
+                            "poll_interval_seconds": poll_interval_seconds,
+                            "defer_timeout_until_running": defer_timeout_until_running,
+                            "timeout_started_at_status": timeout_started_at_status,
+                            "last_snapshot": last_snapshot,
+                        },
+                    )
+
+            time.sleep(poll_interval_seconds)
+
     def _probe_http_url(self, url: str) -> dict[str, Any]:
         try:
             req = urlrequest.Request(url, method="GET")
@@ -1431,6 +2246,254 @@ class ControlPlane:
                 "http_status": None,
                 "error": str(exc),
             }
+
+    def _write_group_sbatch_script(
+        self,
+        *,
+        partition_spec: PartitionSpec,
+        model_spec: ModelSpec,
+        port_profiles: list[AMDHPCPortProfile],
+        group_name: str,
+    ) -> Path:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        safe_partition = _safe_token(partition_spec.name)
+        safe_model = _safe_token(model_spec.name)
+        safe_group_name = _safe_token(group_name)
+        script_path = (
+            self._cfg.run_dir
+            / f"sbatch-{timestamp}-g{safe_group_name}-{safe_partition}-{safe_model}.sh"
+        )
+
+        profile_ids_csv = ",".join(str(profile.profile_id) for profile in port_profiles)
+        vllm_ports_csv = ",".join(str(profile.vllm_port) for profile in port_profiles)
+        jaeger_otlp_ports_csv = ",".join(str(profile.jaeger_otlp_port) for profile in port_profiles)
+        jaeger_ui_ports_csv = ",".join(str(profile.jaeger_api_port) for profile in port_profiles)
+        group_size = len(port_profiles)
+
+        visible_devices = ",".join(str(idx) for idx in range(partition_spec.gpus_per_node))
+        slurm_out = self._cfg.log_dir / "slurm.%j.out"
+        slurm_err = self._cfg.log_dir / "slurm.%j.err"
+
+        tmp_root = os.environ.get("TMPDIR", "/tmp")
+        user_name = os.environ.get("USER", "user")
+        aiter_jit_dir = self._cfg.env.get("AITER_JIT_DIR", f"{tmp_root}/vllm-aiter-jit-{user_name}")
+        runtime_root = self._cfg.env.get("VLLM_RUNTIME_ROOT", f"{tmp_root}/vllm-runtime-{user_name}")
+        xdg_cache_home = self._cfg.env.get("XDG_CACHE_HOME", f"{runtime_root}/xdg-cache")
+        vllm_cache_root = self._cfg.env.get("VLLM_CACHE_ROOT", f"{xdg_cache_home}/vllm")
+
+        ssh_options = " ".join(shlex.quote(opt) for opt in self._cfg.ssh_options)
+        effective_extra_args = _effective_vllm_extra_args(
+            extra_args=model_spec.extra_args,
+            gpus_per_node=partition_spec.gpus_per_node,
+        )
+        encoded_extra_args = _encode_model_extra_args(effective_extra_args)
+        force_seq_trust_remote_code = self._cfg.env.get("VLLM_FORCE_SEQ_TRUST_REMOTE_CODE")
+        if force_seq_trust_remote_code is None:
+            force_seq_trust_remote_code = "true"
+
+        script = textwrap.dedent(
+            f"""\
+            #!/usr/bin/env bash
+            #SBATCH --job-name={_safe_token(f'{self._cfg.job_name_prefix}g_{safe_group_name}')}
+            #SBATCH --output={slurm_out}
+            #SBATCH --error={slurm_err}
+            #SBATCH --nodes={group_size}
+            #SBATCH --ntasks={group_size}
+            #SBATCH --ntasks-per-node=1
+            #SBATCH --time={partition_spec.max_time}
+            #SBATCH --partition={partition_spec.name}
+
+            set -euo pipefail
+
+            echo "Grouped job ${{SLURM_JOB_ID}} (group={shlex.quote(group_name)}) starting at $(date)"
+            echo "SLURM_JOB_NODELIST=${{SLURM_JOB_NODELIST:-unknown}}"
+
+            LOGIN_HOST={shlex.quote(self._cfg.login_host)}
+            GROUP_NAME={shlex.quote(group_name)}
+            GROUP_SIZE={group_size}
+            GROUP_PROFILE_IDS_CSV={shlex.quote(profile_ids_csv)}
+            GROUP_VLLM_PORTS_CSV={shlex.quote(vllm_ports_csv)}
+            GROUP_JAEGER_OTLP_LOGIN_PORTS_CSV={shlex.quote(jaeger_otlp_ports_csv)}
+            GROUP_JAEGER_UI_LOGIN_PORTS_CSV={shlex.quote(jaeger_ui_ports_csv)}
+            JAEGER_OTLP_LOCAL_PORT={DEFAULT_JAEGER_OTLP_GRPC_PORT}
+            JAEGER_UI_LOCAL_PORT={DEFAULT_JAEGER_QUERY_PORT}
+
+            JAEGER_SIF={shlex.quote(str(self._cfg.jaeger_sif))}
+            VLLM_SIF={shlex.quote(str(self._cfg.vllm_sif))}
+
+            VLLM_MODEL_NAME={shlex.quote(model_spec.vllm_model_name)}
+            VLLM_SERVED_MODEL_NAME={shlex.quote(model_spec.served_model_name)}
+            VLLM_TENSOR_PARALLEL_SIZE={partition_spec.gpus_per_node}
+            VLLM_VISIBLE_DEVICES={shlex.quote(visible_devices)}
+
+            VLLM_APPTAINER_HOME={shlex.quote(self._cfg.env.get('VLLM_APPTAINER_HOME', ''))}
+            HF_HOME={shlex.quote(self._cfg.env.get('HF_HOME', ''))}
+            HF_HUB_CACHE={shlex.quote(self._cfg.env.get('HF_HUB_CACHE', ''))}
+            HF_TOKEN="${{HF_TOKEN:-}}"
+
+            AITER_JIT_DIR={shlex.quote(aiter_jit_dir)}
+            XDG_CACHE_HOME={shlex.quote(xdg_cache_home)}
+            VLLM_CACHE_ROOT={shlex.quote(vllm_cache_root)}
+
+            OTEL_SERVICE_NAME={shlex.quote(self._cfg.env.get('OTEL_SERVICE_NAME', 'vllm-server'))}
+            OTEL_EXPORTER_OTLP_TRACES_INSECURE={shlex.quote(self._cfg.env.get('OTEL_EXPORTER_OTLP_TRACES_INSECURE', 'true'))}
+            OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="grpc://127.0.0.1:${{JAEGER_OTLP_LOCAL_PORT}}"
+            VLLM_COLLECT_DETAILED_TRACES={shlex.quote(self._cfg.env.get('VLLM_COLLECT_DETAILED_TRACES', 'all'))}
+            VLLM_LOGITS_PROCESSORS={shlex.quote(self._cfg.env.get('VLLM_LOGITS_PROCESSORS', 'forceSeq.force_sequence_logits_processor:ForceSequenceAdapter'))}
+            VLLM_MODEL_EXTRA_ARGS_B64={shlex.quote(encoded_extra_args)}
+            VLLM_FORCE_SEQ_TRUST_REMOTE_CODE={shlex.quote(force_seq_trust_remote_code)}
+
+            JOB_LOG_DIR={shlex.quote(str(self._cfg.log_dir))}
+            mkdir -p "${{JOB_LOG_DIR}}" "${{AITER_JIT_DIR}}" "${{XDG_CACHE_HOME}}" "${{VLLM_CACHE_ROOT}}"
+
+            SSH_OPTIONS=({ssh_options})
+
+            run_group_worker() {{
+              set -euo pipefail
+
+              local index="${{SLURM_PROCID:-${{SLURM_NODEID:-}}}}"
+              if [[ -z "${{index}}" ]]; then
+                echo "Missing SLURM_PROCID/SLURM_NODEID for grouped worker." >&2
+                exit 92
+              fi
+
+              IFS=',' read -r -a PROFILE_IDS <<<"${{GROUP_PROFILE_IDS_CSV}}"
+              IFS=',' read -r -a VLLM_PORTS <<<"${{GROUP_VLLM_PORTS_CSV}}"
+              IFS=',' read -r -a JAEGER_OTLP_PORTS <<<"${{GROUP_JAEGER_OTLP_LOGIN_PORTS_CSV}}"
+              IFS=',' read -r -a JAEGER_UI_PORTS <<<"${{GROUP_JAEGER_UI_LOGIN_PORTS_CSV}}"
+
+              if [[ "${{index}}" -lt 0 || "${{index}}" -ge "${{#PROFILE_IDS[@]}}" ]]; then
+                echo "SLURM_PROCID out of range for grouped profile mapping: index=${{index}}" >&2
+                exit 93
+              fi
+
+              local PROFILE_ID="${{PROFILE_IDS[${{index}}]}}"
+              local VLLM_SERVICE_PORT="${{VLLM_PORTS[${{index}}]}}"
+              local JAEGER_OTLP_LOGIN_PORT="${{JAEGER_OTLP_PORTS[${{index}}]}}"
+              local JAEGER_UI_LOGIN_PORT="${{JAEGER_UI_PORTS[${{index}}]}}"
+
+              local JAEGER_LOG="${{JOB_LOG_DIR}}/jaeger.${{SLURM_JOB_ID}}.p${{PROFILE_ID}}.log"
+              local VLLM_LOG="${{JOB_LOG_DIR}}/vllm.${{SLURM_JOB_ID}}.p${{PROFILE_ID}}.log"
+
+              echo "group=${{GROUP_NAME}} profile=${{PROFILE_ID}} node=$(hostname) proc=${{index}} vllm_port=${{VLLM_SERVICE_PORT}}"
+
+              local TUNNEL_PIDS=()
+              start_tunnel() {{
+                local remote_port="$1"
+                local local_port="$2"
+                ssh "${{SSH_OPTIONS[@]}}" -N -R "${{remote_port}}:127.0.0.1:${{local_port}}" "${{LOGIN_HOST}}" &
+                TUNNEL_PIDS+=("$!")
+              }}
+
+              verify_tunnels_alive() {{
+                local failed=0
+                for pid in "${{TUNNEL_PIDS[@]}}"; do
+                  if ! kill -0 "${{pid}}" >/dev/null 2>&1; then
+                    echo "Reverse tunnel process exited before startup completed (pid=${{pid}})." >&2
+                    failed=1
+                  fi
+                done
+                return "${{failed}}"
+              }}
+
+              APPTAINER_HOME_ARGS=()
+              if [[ -n "${{VLLM_APPTAINER_HOME}}" ]]; then
+                mkdir -p "${{VLLM_APPTAINER_HOME}}"
+                APPTAINER_HOME_ARGS=(-H "${{VLLM_APPTAINER_HOME}}")
+              fi
+
+              BIND_ARGS=()
+              if [[ -n "${{HF_HOME}}" ]]; then
+                BIND_ARGS+=(--bind "${{HF_HOME}}:${{HF_HOME}}")
+              fi
+              if [[ -n "${{HF_HUB_CACHE}}" ]]; then
+                BIND_ARGS+=(--bind "${{HF_HUB_CACHE}}:${{HF_HUB_CACHE}}")
+              fi
+
+              cleanup() {{
+                set +e
+                if [[ -n "${{VLLM_PID:-}}" ]]; then kill "${{VLLM_PID}}" >/dev/null 2>&1 || true; fi
+                if [[ -n "${{JAEGER_PID:-}}" ]]; then kill "${{JAEGER_PID}}" >/dev/null 2>&1 || true; fi
+                for pid in "${{TUNNEL_PIDS[@]}}"; do
+                  kill "${{pid}}" >/dev/null 2>&1 || true
+                done
+              }}
+              trap cleanup EXIT INT TERM
+
+              start_tunnel "${{VLLM_SERVICE_PORT}}" "${{VLLM_SERVICE_PORT}}"
+              start_tunnel "${{JAEGER_OTLP_LOGIN_PORT}}" "${{JAEGER_OTLP_LOCAL_PORT}}"
+              start_tunnel "${{JAEGER_UI_LOGIN_PORT}}" "${{JAEGER_UI_LOCAL_PORT}}"
+              sleep 1
+              if ! verify_tunnels_alive; then
+                echo "One or more reverse tunnels failed to establish. Aborting startup." >&2
+                exit 72
+              fi
+
+              apptainer run \
+                --cleanenv \
+                "${{APPTAINER_HOME_ARGS[@]}}" \
+                --env COLLECTOR_ZIPKIN_HOST_PORT=:9411 \
+                "${{JAEGER_SIF}}" \
+                >"${{JAEGER_LOG}}" 2>&1 &
+              JAEGER_PID=$!
+
+              VLLM_CMD=(
+                /opt/vllm-plugins/vllm_entrypoint.sh
+                --model "${{VLLM_MODEL_NAME}}"
+                --served-model-name "${{VLLM_SERVED_MODEL_NAME}}"
+                --port "${{VLLM_SERVICE_PORT}}"
+                --tensor-parallel-size "${{VLLM_TENSOR_PARALLEL_SIZE}}"
+                --otlp-traces-endpoint "${{OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}}"
+                --collect-detailed-traces "${{VLLM_COLLECT_DETAILED_TRACES}}"
+                --enable-prompt-tokens-details
+                --logits-processors "${{VLLM_LOGITS_PROCESSORS}}"
+              )
+
+              apptainer exec \
+                --rocm \
+                --cleanenv \
+                "${{APPTAINER_HOME_ARGS[@]}}" \
+                "${{BIND_ARGS[@]}}" \
+                --env PYTHONNOUSERSITE=1 \
+                --env AITER_JIT_DIR="${{AITER_JIT_DIR}}" \
+                --env XDG_CACHE_HOME="${{XDG_CACHE_HOME}}" \
+                --env VLLM_CACHE_ROOT="${{VLLM_CACHE_ROOT}}" \
+                --env HF_HOME="${{HF_HOME}}" \
+                --env HF_HUB_CACHE="${{HF_HUB_CACHE}}" \
+                --env HF_TOKEN="${{HF_TOKEN}}" \
+                --env OTEL_SERVICE_NAME="${{OTEL_SERVICE_NAME}}" \
+                --env OTEL_EXPORTER_OTLP_TRACES_INSECURE="${{OTEL_EXPORTER_OTLP_TRACES_INSECURE}}" \
+                --env OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="${{OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}}" \
+                --env HIP_VISIBLE_DEVICES="${{VLLM_VISIBLE_DEVICES}}" \
+                --env ROCR_VISIBLE_DEVICES="${{VLLM_VISIBLE_DEVICES}}" \
+                --env VLLM_MODEL_NAME="${{VLLM_MODEL_NAME}}" \
+                --env VLLM_MODEL_EXTRA_ARGS_B64="${{VLLM_MODEL_EXTRA_ARGS_B64}}" \
+                --env VLLM_FORCE_SEQ_TRUST_REMOTE_CODE="${{VLLM_FORCE_SEQ_TRUST_REMOTE_CODE}}" \
+                "${{VLLM_SIF}}" \
+                "${{VLLM_CMD[@]}}" \
+                >"${{VLLM_LOG}}" 2>&1 &
+              VLLM_PID=$!
+
+              WAIT_PIDS=("${{JAEGER_PID}}" "${{VLLM_PID}}" "${{TUNNEL_PIDS[@]}}")
+              wait -n "${{WAIT_PIDS[@]}}"
+              EXIT_CODE=$?
+              echo "group=${{GROUP_NAME}} profile=${{PROFILE_ID}} process exited with code ${{EXIT_CODE}} at $(date)."
+              exit "${{EXIT_CODE}}"
+            }}
+
+            export -f run_group_worker
+            srun \
+              --nodes="${{GROUP_SIZE}}" \
+              --ntasks="${{GROUP_SIZE}}" \
+              --ntasks-per-node=1 \
+              --kill-on-bad-exit=1 \
+              bash -lc 'run_group_worker'
+            """
+        )
+
+        script_path.write_text(script, encoding="utf-8")
+        script_path.chmod(0o750)
+        return script_path
 
     def _write_sbatch_script(
         self,

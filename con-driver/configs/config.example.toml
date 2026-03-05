@@ -6,6 +6,9 @@ max_concurrent = 500
 n_task = 500
 results_dir = "con-driver-test-3"
 port_profile_id = 1
+# Cluster mode (mutually exclusive with port_profile_id):
+# port_profile_id_list = [0, 1, 2, 3, 4]
+# max_concurrent_list = [5, 5, 5, 5, 5]
 agent = "terminus-2"
 
 # Optional
@@ -14,6 +17,9 @@ harbor_bin = "harbor" # or "uv run harbor"
 seed = 7
 dry_run = false
 sample_without_replacement = true
+# Optional task subset (0-based, end-exclusive) applied before sampling.
+# task_subset_start = 0
+# task_subset_end = 250
 
 # Gateway mode (enabled by default)
 # gateway = true

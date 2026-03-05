@@ -28,6 +28,7 @@ from con_driver.patterns import build_arrival_pattern
 from con_driver.scheduler import (
     ConcurrentDriver,
     GatewayModeConfig,
+    LaunchProfileConfig,
     SchedulerConfig,
     VLLMLogConfig,
 )
@@ -45,6 +46,8 @@ _OPTIONS_WITH_VALUE = {
     "--results-dir",
     "--harbor-bin",
     "--port-profile-id",
+    "--port-profile-id-list",
+    "--max-concurrent-list",
     "--agent-name",
     "--seed",
     "--vllm-log-interval-s",
@@ -52,6 +55,8 @@ _OPTIONS_WITH_VALUE = {
     "--gateway-url",
     "--gateway-job-output-root",
     "--gateway-timeout-s",
+    "--task-subset-start",
+    "--task-subset-end",
 }
 _FLAG_OPTIONS = {
     "--dry-run",
@@ -90,7 +95,10 @@ def _run_driver(
     gateway_url: str,
     gateway_job_output_root: str,
     gateway_timeout_s: float,
+    task_subset_start: int | None,
+    task_subset_end: int | None,
     port_profile_id: int | None,
+    launch_profiles: list[LaunchProfileConfig] | None,
     resolved_agent_name: str | None,
     resolved_model_name: str | None,
     resolved_model_context_window: int | None,
@@ -117,6 +125,15 @@ def _run_driver(
                 raise ValueError("--gateway-job-output-root must be a subdirectory path")
             if Path(normalized_subdir).is_absolute():
                 raise ValueError("--gateway-job-output-root must be a relative path")
+        task_subset_start_value = 0 if task_subset_start is None else task_subset_start
+        task_subset_end_value = task_subset_end
+        if task_subset_start_value < 0:
+            raise ValueError("--task-subset-start must be >= 0")
+        if task_subset_end_value is not None:
+            if task_subset_end_value < 0:
+                raise ValueError("--task-subset-end must be >= 0")
+            if task_subset_end_value <= task_subset_start_value:
+                raise ValueError("--task-subset-end must be greater than --task-subset-start")
 
         backend_name_normalized = backend_name.strip().lower()
         if backend_name_normalized != "harbor":
@@ -138,7 +155,7 @@ def _run_driver(
         backend = HarborBackend(
             HarborBackendConfig(
                 harbor_bin=harbor_bin_tokens,
-                harbor_args=forwarded_args,
+                harbor_args=([] if launch_profiles is not None else forwarded_args),
             )
         )
         vllm_log_config = (
@@ -170,9 +187,23 @@ def _run_driver(
             "dry_run": dry_run,
             "sample_without_replacement": sample_without_replacement,
             "seed": seed,
+            "task_subset_start": task_subset_start_value,
+            "task_subset_end": task_subset_end_value,
             "harbor_bin_tokens": harbor_bin_tokens,
             "forwarded_args": forwarded_args,
             "port_profile_id": port_profile_id,
+            "launch_profiles": (
+                [
+                    {
+                        "port_profile_id": profile.port_profile_id,
+                        "max_concurrent": profile.max_concurrent,
+                        "gateway_base_url": profile.gateway_base_url,
+                    }
+                    for profile in launch_profiles
+                ]
+                if launch_profiles is not None
+                else None
+            ),
             "resolved_agent_name": resolved_agent_name,
             "resolved_model_name": resolved_model_name,
             "resolved_model_context_window": resolved_model_context_window,
@@ -200,6 +231,9 @@ def _run_driver(
                 results_dir=results_dir,
                 dry_run=dry_run,
                 sample_with_replacement=not sample_without_replacement,
+                task_subset_start=task_subset_start_value,
+                task_subset_end=task_subset_end_value,
+                launch_profiles=launch_profiles,
                 effective_config=effective_config,
                 vllm_log=vllm_log_config,
                 gateway=gateway_config,
@@ -281,6 +315,32 @@ def _coerce_int(value: Any, *, key: str) -> int | None:
         except ValueError as exc:
             raise ValueError(f"Config key '{key}' must be an integer") from exc
     raise ValueError(f"Config key '{key}' must be an integer")
+
+
+def _coerce_int_list(value: Any, *, key: str) -> list[int] | None:
+    if value is None:
+        return None
+
+    raw_items: list[Any]
+    if isinstance(value, str):
+        raw_items = parse_comma_arg_string(value)
+    elif isinstance(value, list):
+        raw_items = list(value)
+    else:
+        raise ValueError(
+            f"Config key '{key}' must be a comma-separated string or list of integers"
+        )
+
+    values: list[int] = []
+    for index, item in enumerate(raw_items):
+        parsed = _coerce_int(item, key=f"{key}[{index}]")
+        if parsed is None:
+            raise ValueError(f"Config key '{key}[{index}]' must be an integer")
+        values.append(parsed)
+
+    if not values:
+        raise ValueError(f"Config key '{key}' cannot be empty")
+    return values
 
 
 def _coerce_bool(value: Any, *, key: str) -> bool | None:
@@ -419,12 +479,31 @@ def run(
     max_concurrent: int | None = typer.Option(
         None,
         "--max-concurrent",
-        help="Maximum number of in-flight trial processes.",
+        help=(
+            "Maximum number of in-flight trial processes. Optional when "
+            "--port-profile-id-list is set; defaults to sum(--max-concurrent-list)."
+        ),
     ),
     n_task: int | None = typer.Option(
         None,
         "--n-task",
         help="Total number of trial launches to attempt.",
+    ),
+    task_subset_start: int | None = typer.Option(
+        None,
+        "--task-subset-start",
+        help=(
+            "0-based inclusive task index into the prepared task pool before sampling. "
+            "Defaults to 0."
+        ),
+    ),
+    task_subset_end: int | None = typer.Option(
+        None,
+        "--task-subset-end",
+        help=(
+            "0-based exclusive task index into the prepared task pool before sampling. "
+            "Defaults to pool size."
+        ),
     ),
     results_dir: Path | None = typer.Option(
         None,
@@ -440,6 +519,22 @@ def run(
         None,
         "--port-profile-id",
         help="Port profile numeric ID from configs/port_profiles.toml.",
+    ),
+    port_profile_id_list: str | None = typer.Option(
+        None,
+        "--port-profile-id-list",
+        help=(
+            "Comma-separated port profile IDs for cluster mode, for example "
+            "'0,1,2,3,4'. Cannot be combined with --port-profile-id."
+        ),
+    ),
+    max_concurrent_list: str | None = typer.Option(
+        None,
+        "--max-concurrent-list",
+        help=(
+            "Comma-separated per-profile max concurrency values matching "
+            "--port-profile-id-list order, for example '5,5,5,5,5'."
+        ),
     ),
     agent_name: str | None = typer.Option(
         None,
@@ -544,17 +639,74 @@ def run(
             config_key="pattern",
         )
 
-        max_concurrent_value = _coerce_int(
+        port_profile_id_value = _coerce_int(
+            (
+                port_profile_id
+                if port_profile_id is not None
+                else config_values.get("port_profile_id")
+            ),
+            key="port_profile_id",
+        )
+        port_profile_id_list_value = _coerce_int_list(
+            (
+                port_profile_id_list
+                if port_profile_id_list is not None
+                else config_values.get("port_profile_id_list")
+            ),
+            key="port_profile_id_list",
+        )
+        max_concurrent_list_value = _coerce_int_list(
+            (
+                max_concurrent_list
+                if max_concurrent_list is not None
+                else config_values.get("max_concurrent_list")
+            ),
+            key="max_concurrent_list",
+        )
+
+        cluster_mode = port_profile_id_list_value is not None
+        if cluster_mode and port_profile_id_value is not None:
+            raise ValueError(
+                "--port-profile-id cannot be used with --port-profile-id-list."
+            )
+        if cluster_mode and max_concurrent_list_value is None:
+            raise ValueError(
+                "--max-concurrent-list is required when --port-profile-id-list is set."
+            )
+        if not cluster_mode and max_concurrent_list_value is not None:
+            raise ValueError(
+                "--max-concurrent-list requires --port-profile-id-list."
+            )
+        if (
+            cluster_mode
+            and max_concurrent_list_value is not None
+            and len(port_profile_id_list_value) != len(max_concurrent_list_value)
+        ):
+            raise ValueError(
+                "--port-profile-id-list and --max-concurrent-list must have the same number of values."
+            )
+        if max_concurrent_list_value is not None:
+            for index, value in enumerate(max_concurrent_list_value):
+                if value <= 0:
+                    raise ValueError(f"max_concurrent_list[{index}] must be > 0")
+        if port_profile_id_list_value is not None:
+            if len(set(port_profile_id_list_value)) != len(port_profile_id_list_value):
+                raise ValueError("--port-profile-id-list cannot contain duplicate IDs.")
+
+        max_concurrent_candidate = _coerce_int(
             max_concurrent
             if max_concurrent is not None
             else config_values.get("max_concurrent"),
             key="max_concurrent",
         )
-        max_concurrent_value = _resolve_required(
-            max_concurrent_value,
-            option_name="--max-concurrent",
-            config_key="max_concurrent",
-        )
+        if cluster_mode and max_concurrent_candidate is None:
+            max_concurrent_value = sum(max_concurrent_list_value or [])
+        else:
+            max_concurrent_value = _resolve_required(
+                max_concurrent_candidate,
+                option_name="--max-concurrent",
+                config_key="max_concurrent",
+            )
 
         n_task_value = _coerce_int(
             n_task if n_task is not None else config_values.get("n_task"),
@@ -564,6 +716,22 @@ def run(
             n_task_value,
             option_name="--n-task",
             config_key="n_task",
+        )
+        task_subset_start_value = _coerce_int(
+            (
+                task_subset_start
+                if task_subset_start is not None
+                else config_values.get("task_subset_start", 0)
+            ),
+            key="task_subset_start",
+        )
+        task_subset_end_value = _coerce_int(
+            (
+                task_subset_end
+                if task_subset_end is not None
+                else config_values.get("task_subset_end")
+            ),
+            key="task_subset_end",
         )
 
         results_dir_value = _coerce_path(
@@ -579,15 +747,6 @@ def run(
         seed_value = _coerce_int(
             seed if seed is not None else config_values.get("seed"),
             key="seed",
-        )
-
-        port_profile_id_value = _coerce_int(
-            (
-                port_profile_id
-                if port_profile_id is not None
-                else config_values.get("port_profile_id")
-            ),
-            key="port_profile_id",
         )
 
         agent_name_value = _coerce_str(
@@ -736,25 +895,96 @@ def run(
         forwarded_args_from_config.extend(
             _parse_token_list(config_values.get("harbor_args"), key="harbor_args")
         )
-        harbor_runtime = resolve_harbor_runtime(
-            forwarded_args_from_config=forwarded_args_from_config,
-            forwarded_args_from_cli=forwarded_args_from_cli,
-            port_profile_id=port_profile_id_value,
-            agent_name=agent_name_value,
-            gateway_enabled=gateway_value,
-            configured_gateway_url=configured_gateway_url_value,
-            gateway_timeout_s=gateway_timeout_s_value,
-            configured_vllm_log=configured_vllm_log_value,
-        )
-        synthesized_forwarded_args = harbor_runtime.forwarded_args
-        launch_env = harbor_runtime.trial_env
-        gateway_url_value = harbor_runtime.gateway_url
-        vllm_log_value = harbor_runtime.vllm_log_enabled
-        vllm_log_endpoint_value = harbor_runtime.vllm_log_endpoint
-        resolved_agent_name = harbor_runtime.resolved_agent_name
-        resolved_model_name = harbor_runtime.resolved_model_name
-        resolved_model_context_window = harbor_runtime.resolved_model_context_window
-        derived_agent_base_url = harbor_runtime.agent_base_url
+        launch_profiles_value: list[LaunchProfileConfig] | None = None
+        if cluster_mode:
+            if gateway_value and configured_gateway_url_value is not None:
+                raise ValueError(
+                    "Do not set 'gateway_url' when using --port-profile-id-list. "
+                    "Gateway URL is derived from each profile."
+                )
+            if configured_vllm_log_value is True:
+                raise ValueError(
+                    "--vllm-log is not supported with --port-profile-id-list. "
+                    "Use --no-vllm-log in cluster mode."
+                )
+
+            profile_pairs = list(
+                zip(
+                    port_profile_id_list_value or [],
+                    max_concurrent_list_value or [],
+                )
+            )
+            profile_pairs.sort(key=lambda item: item[0])
+            launch_profiles_value = []
+            resolved_agent_name = None
+            resolved_model_name = None
+            resolved_model_context_window = None
+            derived_agent_base_url = None
+            first_gateway_url: str | None = None
+            for profile_id, profile_max_concurrent in profile_pairs:
+                profile_runtime = resolve_harbor_runtime(
+                    forwarded_args_from_config=forwarded_args_from_config,
+                    forwarded_args_from_cli=forwarded_args_from_cli,
+                    port_profile_id=profile_id,
+                    agent_name=agent_name_value,
+                    gateway_enabled=gateway_value,
+                    configured_gateway_url=None,
+                    gateway_timeout_s=gateway_timeout_s_value,
+                    configured_vllm_log=False,
+                )
+                if resolved_agent_name is None:
+                    resolved_agent_name = profile_runtime.resolved_agent_name
+                elif profile_runtime.resolved_agent_name != resolved_agent_name:
+                    raise ValueError(
+                        "Resolved agent differs across port profiles in cluster mode."
+                    )
+                if resolved_model_name is None:
+                    resolved_model_name = profile_runtime.resolved_model_name
+                    resolved_model_context_window = profile_runtime.resolved_model_context_window
+                elif profile_runtime.resolved_model_name != resolved_model_name:
+                    raise ValueError(
+                        "Resolved served model differs across port profiles in cluster mode. "
+                        "All selected profiles must serve the same model."
+                    )
+                if first_gateway_url is None:
+                    first_gateway_url = profile_runtime.gateway_url
+                launch_profiles_value.append(
+                    LaunchProfileConfig(
+                        port_profile_id=profile_id,
+                        max_concurrent=profile_max_concurrent,
+                        forwarded_args=list(profile_runtime.forwarded_args),
+                        launch_env=dict(profile_runtime.trial_env),
+                        gateway_base_url=(
+                            profile_runtime.gateway_url if gateway_value else None
+                        ),
+                    )
+                )
+
+            synthesized_forwarded_args = []
+            launch_env = {}
+            gateway_url_value = first_gateway_url or "http://127.0.0.1:11457"
+            vllm_log_value = False
+            vllm_log_endpoint_value = ""
+        else:
+            harbor_runtime = resolve_harbor_runtime(
+                forwarded_args_from_config=forwarded_args_from_config,
+                forwarded_args_from_cli=forwarded_args_from_cli,
+                port_profile_id=port_profile_id_value,
+                agent_name=agent_name_value,
+                gateway_enabled=gateway_value,
+                configured_gateway_url=configured_gateway_url_value,
+                gateway_timeout_s=gateway_timeout_s_value,
+                configured_vllm_log=configured_vllm_log_value,
+            )
+            synthesized_forwarded_args = harbor_runtime.forwarded_args
+            launch_env = harbor_runtime.trial_env
+            gateway_url_value = harbor_runtime.gateway_url
+            vllm_log_value = harbor_runtime.vllm_log_enabled
+            vllm_log_endpoint_value = harbor_runtime.vllm_log_endpoint
+            resolved_agent_name = harbor_runtime.resolved_agent_name
+            resolved_model_name = harbor_runtime.resolved_model_name
+            resolved_model_context_window = harbor_runtime.resolved_model_context_window
+            derived_agent_base_url = harbor_runtime.agent_base_url
 
     except Exception as exc:
         typer.echo(f"error: {exc}", err=True)
@@ -783,7 +1013,10 @@ def run(
         gateway_url=gateway_url_value,
         gateway_job_output_root=gateway_job_output_root_value,
         gateway_timeout_s=gateway_timeout_s_value,
+        task_subset_start=task_subset_start_value,
+        task_subset_end=task_subset_end_value,
         port_profile_id=port_profile_id_value,
+        launch_profiles=launch_profiles_value,
         resolved_agent_name=resolved_agent_name,
         resolved_model_name=resolved_model_name,
         resolved_model_context_window=resolved_model_context_window,

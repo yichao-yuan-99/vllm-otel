@@ -32,5 +32,6 @@ class TrialBackend(ABC):
         task: TaskCandidate,
         trial_id: str,
         trials_dir: Path,
+        runtime_forwarded_args: Sequence[str] | None = None,
     ) -> list[str]:
         """Build a command that launches one trial for the given task."""

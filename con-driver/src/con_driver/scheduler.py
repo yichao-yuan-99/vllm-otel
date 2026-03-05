@@ -37,6 +37,9 @@ class SchedulerConfig:
     results_dir: Path
     dry_run: bool = False
     sample_with_replacement: bool = True
+    task_subset_start: int = 0
+    task_subset_end: int | None = None
+    launch_profiles: list["LaunchProfileConfig"] | None = None
     effective_config: dict[str, object] | None = None
     vllm_log: "VLLMLogConfig | None" = None
     gateway: "GatewayModeConfig | None" = None
@@ -57,6 +60,15 @@ class GatewayModeConfig:
     timeout_s: float = 3600.0
 
 
+@dataclass(frozen=True)
+class LaunchProfileConfig:
+    port_profile_id: int
+    max_concurrent: int
+    forwarded_args: list[str]
+    launch_env: dict[str, str]
+    gateway_base_url: str | None = None
+
+
 @dataclass
 class _ActiveLaunch:
     request: LaunchRequest
@@ -65,6 +77,7 @@ class _ActiveLaunch:
     started_at: datetime
     stdout_handle: TextIO
     stderr_handle: TextIO
+    launch_profile_id: int | None = None
 
 
 @dataclass
@@ -104,6 +117,28 @@ class ConcurrentDriver:
             raise ValueError("max_concurrent must be > 0")
         if config.n_task <= 0:
             raise ValueError("n_task must be > 0")
+        if config.task_subset_start < 0:
+            raise ValueError("task_subset_start must be >= 0")
+        if config.task_subset_end is not None:
+            if config.task_subset_end < 0:
+                raise ValueError("task_subset_end must be >= 0")
+            if config.task_subset_end <= config.task_subset_start:
+                raise ValueError("task_subset_end must be greater than task_subset_start")
+        if config.launch_profiles is not None:
+            if not config.launch_profiles:
+                raise ValueError("launch_profiles cannot be empty")
+            seen_profile_ids: set[int] = set()
+            for profile in config.launch_profiles:
+                if profile.max_concurrent <= 0:
+                    raise ValueError(
+                        f"launch_profiles[{profile.port_profile_id}].max_concurrent must be > 0"
+                    )
+                if profile.port_profile_id in seen_profile_ids:
+                    raise ValueError(
+                        "launch_profiles contains duplicate port_profile_id "
+                        f"{profile.port_profile_id}"
+                    )
+                seen_profile_ids.add(profile.port_profile_id)
         if config.vllm_log is not None:
             if config.vllm_log.interval_s <= 0:
                 raise ValueError("vllm_log.interval_s must be > 0")
@@ -130,6 +165,15 @@ class ConcurrentDriver:
         self._run_id = self._make_run_id()
         self._target_dir = config.results_dir.resolve()
         self._datasets_dir = self._backend.dataset_cache_root().resolve()
+        self._launch_profiles = (
+            sorted(config.launch_profiles, key=lambda profile: profile.port_profile_id)
+            if config.launch_profiles is not None
+            else None
+        )
+        self._launch_profile_cycle: list[LaunchProfileConfig] = []
+        if self._launch_profiles is not None:
+            for profile in self._launch_profiles:
+                self._launch_profile_cycle.extend([profile] * profile.max_concurrent)
         self._set_results_dir(self._target_dir)
 
     async def run(self, *, pool_specs: list[str]) -> RunSummary:
@@ -138,10 +182,14 @@ class ConcurrentDriver:
         self._target_dir.mkdir(parents=True, exist_ok=True)
         self._datasets_dir.mkdir(parents=True, exist_ok=True)
 
-        task_pool = await self._backend.prepare_task_pool(
+        full_task_pool = await self._backend.prepare_task_pool(
             pool_specs=pool_specs,
             datasets_root=self._datasets_dir,
         )
+        full_task_pool_size = len(full_task_pool)
+        task_pool = self._apply_task_subset(full_task_pool)
+        subset_start = self._config.task_subset_start
+        subset_end = self._config.task_subset_end
         dataset_mode = self._is_dataset_mode(pool_specs=pool_specs, task_pool=task_pool)
         dataset_mode_dataset = next(iter({task.dataset for task in task_pool}), None)
         if dataset_mode and dataset_mode_dataset is not None:
@@ -164,6 +212,24 @@ class ConcurrentDriver:
             "n_task": self._config.n_task,
             "dry_run": self._config.dry_run,
             "sample_with_replacement": self._config.sample_with_replacement,
+            "cluster_mode": self._launch_profiles is not None,
+            "launch_mode": "cluster" if self._launch_profiles is not None else "single_profile",
+            "task_subset_start": subset_start,
+            "task_subset_end": subset_end,
+            "task_pool_size_before_subset": full_task_pool_size,
+            "task_pool_size_after_subset": len(task_pool),
+            "launch_profiles": (
+                [
+                    {
+                        "port_profile_id": profile.port_profile_id,
+                        "max_concurrent": profile.max_concurrent,
+                        "gateway_base_url": profile.gateway_base_url,
+                    }
+                    for profile in self._launch_profiles
+                ]
+                if self._launch_profiles is not None
+                else None
+            ),
             "arrival_pattern": self._arrival_pattern.describe(),
             "target_results_dir": str(self._target_dir),
             "results_dir": str(self._results_dir),
@@ -221,6 +287,10 @@ class ConcurrentDriver:
             {
                 "event": "task_pool_ready",
                 "task_pool_size": len(task_pool),
+                "task_pool_size_before_subset": full_task_pool_size,
+                "task_pool_size_after_subset": len(task_pool),
+                "task_subset_start": subset_start,
+                "task_subset_end": subset_end,
                 "datasets": sorted({task.dataset for task in task_pool}),
                 "dataset_mode": dataset_mode,
             }
@@ -421,7 +491,12 @@ class ConcurrentDriver:
     ) -> list[LaunchResult]:
         results: list[LaunchResult] = []
         for item in launch_plan:
-            request = self._build_request(launch_index=item.launch_index, task=item.task)
+            selected_profile = self._select_launch_profile_for_dry_run(item.launch_index)
+            request = self._build_request(
+                launch_index=item.launch_index,
+                task=item.task,
+                launch_profile=selected_profile,
+            )
             now = _utc_now_iso()
             event_payload: dict[str, object] = {
                 "event": "launch_dry_run",
@@ -431,6 +506,8 @@ class ConcurrentDriver:
                 "task_path": str(request.task.path),
                 "command": request.command,
             }
+            if selected_profile is not None:
+                event_payload["port_profile_id"] = selected_profile.port_profile_id
             self._append_event(
                 event_payload
             )
@@ -470,7 +547,22 @@ class ConcurrentDriver:
         try:
             for item in launch_plan:
                 launch_index = item.launch_index
-                while len(active) >= self._config.max_concurrent:
+                selected_profile: LaunchProfileConfig | None = None
+                while True:
+                    if len(active) >= self._config.max_concurrent:
+                        await self._collect_completed(
+                            active=active,
+                            results=results,
+                            progress=progress,
+                            progress_task_id=progress_task_id,
+                            launched=launch_index,
+                        )
+                        continue
+
+                    selected_profile = self._select_launch_profile_for_live(active)
+                    if self._launch_profiles is None or selected_profile is not None:
+                        break
+
                     await self._collect_completed(
                         active=active,
                         results=results,
@@ -483,8 +575,18 @@ class ConcurrentDriver:
                 if delay > 0:
                     await asyncio.sleep(delay)
 
-                request = self._build_request(launch_index=launch_index, task=item.task)
-                active_launch = await self._start_launch(request)
+                request = self._build_request(
+                    launch_index=launch_index,
+                    task=item.task,
+                    launch_profile=selected_profile,
+                )
+                active_launch = await self._start_launch(
+                    request,
+                    launch_env=(selected_profile.launch_env if selected_profile is not None else None),
+                    launch_profile_id=(
+                        selected_profile.port_profile_id if selected_profile is not None else None
+                    ),
+                )
                 active[request.trial_id] = active_launch
                 progress.update(
                     progress_task_id,
@@ -502,6 +604,8 @@ class ConcurrentDriver:
                     "stderr_log": str(request.stderr_log),
                     "command": request.command,
                 }
+                if selected_profile is not None:
+                    event_payload["port_profile_id"] = selected_profile.port_profile_id
                 self._append_event(
                     event_payload
                 )
@@ -522,7 +626,13 @@ class ConcurrentDriver:
             await self._terminate_active(active, reason=exc)
             raise
 
-    async def _start_launch(self, request: LaunchRequest) -> _ActiveLaunch:
+    async def _start_launch(
+        self,
+        request: LaunchRequest,
+        *,
+        launch_env: dict[str, str] | None = None,
+        launch_profile_id: int | None = None,
+    ) -> _ActiveLaunch:
         request.stdout_log.parent.mkdir(parents=True, exist_ok=True)
         request.stderr_log.parent.mkdir(parents=True, exist_ok=True)
 
@@ -530,15 +640,18 @@ class ConcurrentDriver:
         stderr_handle = request.stderr_log.open("w", encoding="utf-8")
 
         try:
-            launch_env = None
-            if self._config.launch_env:
-                launch_env = os.environ.copy()
-                launch_env.update(self._config.launch_env)
+            merged_launch_env = None
+            if self._config.launch_env or launch_env:
+                merged_launch_env = os.environ.copy()
+                if self._config.launch_env:
+                    merged_launch_env.update(self._config.launch_env)
+                if launch_env:
+                    merged_launch_env.update(launch_env)
             process = await asyncio.create_subprocess_exec(
                 *request.command,
                 stdout=stdout_handle,
                 stderr=stderr_handle,
-                env=launch_env,
+                env=merged_launch_env,
             )
         except Exception:
             stdout_handle.close()
@@ -552,6 +665,7 @@ class ConcurrentDriver:
             started_at=datetime.now(UTC),
             stdout_handle=stdout_handle,
             stderr_handle=stderr_handle,
+            launch_profile_id=launch_profile_id,
         )
 
     async def _start_vllm_monitor(self) -> _VLLMMonitorProcess:
@@ -878,6 +992,7 @@ class ConcurrentDriver:
         *,
         launch_index: int,
         task: TaskCandidate,
+        launch_profile: LaunchProfileConfig | None = None,
     ) -> LaunchRequest:
         trial_id = self._make_trial_id(launch_index)
         trials_dir = self._trials_root
@@ -886,6 +1001,9 @@ class ConcurrentDriver:
             task=task,
             trial_id=trial_id,
             trials_dir=trials_dir,
+            runtime_forwarded_args=(
+                launch_profile.forwarded_args if launch_profile is not None else None
+            ),
         )
         if self._config.gateway is not None:
             api_token = self._make_agent_api_token(
@@ -901,6 +1019,9 @@ class ConcurrentDriver:
                 command = self._wrap_with_gateway_agent_wrapper(
                     command=command,
                     api_token=api_token,
+                    gateway_base_url=(
+                        launch_profile.gateway_base_url if launch_profile is not None else None
+                    ),
                 )
 
         return LaunchRequest(
@@ -918,15 +1039,17 @@ class ConcurrentDriver:
         *,
         command: list[str],
         api_token: str,
+        gateway_base_url: str | None = None,
     ) -> list[str]:
         if self._config.gateway is None:
             raise RuntimeError("Gateway wrapper requested but gateway config is disabled")
+        base_url = gateway_base_url or self._config.gateway.base_url
         return [
             sys.executable,
             "-m",
             self._GATEWAY_AGENT_WRAPPER_MODULE,
             "--gateway-url",
-            self._config.gateway.base_url,
+            base_url,
             "--api-token",
             api_token,
             "--timeout-s",
@@ -962,6 +1085,55 @@ class ConcurrentDriver:
         shuffled = list(task_pool)
         self._rng.shuffle(shuffled)
         return shuffled[: self._config.n_task]
+
+    def _apply_task_subset(self, task_pool: list[TaskCandidate]) -> list[TaskCandidate]:
+        pool_size = len(task_pool)
+        start = self._config.task_subset_start
+        end = self._config.task_subset_end if self._config.task_subset_end is not None else pool_size
+        if start > pool_size:
+            raise ValueError(
+                "task_subset_start is out of range for prepared task pool: "
+                f"task_subset_start={start}, pool_size={pool_size}"
+            )
+        if end > pool_size:
+            raise ValueError(
+                "task_subset_end is out of range for prepared task pool: "
+                f"task_subset_end={end}, pool_size={pool_size}"
+            )
+        subset = task_pool[start:end]
+        if not subset:
+            raise ValueError(
+                "task subset is empty after applying task_subset_start/task_subset_end: "
+                f"task_subset_start={start}, task_subset_end={end}, pool_size={pool_size}"
+            )
+        return subset
+
+    def _select_launch_profile_for_dry_run(self, launch_index: int) -> LaunchProfileConfig | None:
+        if not self._launch_profile_cycle:
+            return None
+        return self._launch_profile_cycle[launch_index % len(self._launch_profile_cycle)]
+
+    def _select_launch_profile_for_live(
+        self,
+        active: dict[str, _ActiveLaunch],
+    ) -> LaunchProfileConfig | None:
+        if self._launch_profiles is None:
+            return None
+
+        active_counts: dict[int, int] = {
+            profile.port_profile_id: 0 for profile in self._launch_profiles
+        }
+        for launch in active.values():
+            if launch.launch_profile_id is None:
+                continue
+            active_counts[launch.launch_profile_id] = (
+                active_counts.get(launch.launch_profile_id, 0) + 1
+            )
+
+        for profile in self._launch_profiles:
+            if active_counts.get(profile.port_profile_id, 0) < profile.max_concurrent:
+                return profile
+        return None
 
     def _prepare_directories(self) -> None:
         self._target_dir.mkdir(parents=True, exist_ok=True)
@@ -1077,6 +1249,8 @@ class ConcurrentDriver:
             payload.get("sample_without_replacement", not self._config.sample_with_replacement)
         )
         seed = payload.get("seed")
+        task_subset_start = int(payload.get("task_subset_start", self._config.task_subset_start))
+        task_subset_end = payload.get("task_subset_end", self._config.task_subset_end)
         harbor_bin_tokens = payload.get("harbor_bin_tokens", [])
         forwarded_args = payload.get("forwarded_args", [])
         vllm_log_enabled = bool(payload.get("vllm_log_enabled", False))
@@ -1124,6 +1298,7 @@ class ConcurrentDriver:
             )
         )
         port_profile_id = payload.get("port_profile_id")
+        launch_profiles = payload.get("launch_profiles")
         resolved_agent_name = payload.get("resolved_agent_name")
         resolved_model_name = payload.get("resolved_model_name")
         resolved_model_context_window = payload.get("resolved_model_context_window")
@@ -1137,6 +1312,12 @@ class ConcurrentDriver:
                 return "[]"
             quoted = ", ".join(_toml_quote(str(item)) for item in values)
             return f"[{quoted}]"
+
+        def _toml_int_list(values: object) -> str:
+            if not isinstance(values, list):
+                return "[]"
+            rendered = ", ".join(str(int(item)) for item in values)
+            return f"[{rendered}]"
 
         lines = [
             "# Auto-generated by con-driver.",
@@ -1154,9 +1335,12 @@ class ConcurrentDriver:
                 "sample_without_replacement = "
                 f"{'true' if sample_without_replacement else 'false'}"
             ),
+            f"task_subset_start = {task_subset_start}",
             f"target_results_dir = {_toml_quote(str(self._target_dir.resolve()))}",
             f"results_dir = {_toml_quote(str(self._results_dir.resolve()))}",
         ]
+        if isinstance(task_subset_end, int) and not isinstance(task_subset_end, bool):
+            lines.append(f"task_subset_end = {task_subset_end}")
         if isinstance(source_config, str) and source_config:
             lines.append(f"source_config = {_toml_quote(source_config)}")
         if isinstance(seed, int) and not isinstance(seed, bool):
@@ -1173,6 +1357,7 @@ class ConcurrentDriver:
         )
         if (
             port_profile_id is not None
+            or isinstance(launch_profiles, list)
             or isinstance(resolved_agent_name, str)
             or isinstance(resolved_model_name, str)
             or isinstance(agent_base_url, str)
@@ -1185,6 +1370,20 @@ class ConcurrentDriver:
             )
             if port_profile_id is not None:
                 lines.append(f"port_profile_id = {_toml_quote(str(port_profile_id))}")
+            if isinstance(launch_profiles, list):
+                profile_ids: list[int] = []
+                max_concurrency: list[int] = []
+                for entry in launch_profiles:
+                    if not isinstance(entry, dict):
+                        continue
+                    profile_id = entry.get("port_profile_id")
+                    profile_max_concurrent = entry.get("max_concurrent")
+                    if isinstance(profile_id, int) and isinstance(profile_max_concurrent, int):
+                        profile_ids.append(profile_id)
+                        max_concurrency.append(profile_max_concurrent)
+                if profile_ids:
+                    lines.append(f"port_profile_id_list = {_toml_int_list(profile_ids)}")
+                    lines.append(f"max_concurrent_list = {_toml_int_list(max_concurrency)}")
             if isinstance(resolved_agent_name, str) and resolved_agent_name:
                 lines.append(f"agent = {_toml_quote(resolved_agent_name)}")
             if isinstance(resolved_model_name, str) and resolved_model_name:

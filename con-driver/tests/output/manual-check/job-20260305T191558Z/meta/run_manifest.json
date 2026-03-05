@@ -1,0 +1,58 @@
+{
+  "run_id": "run-20260305T191558Z-faed95",
+  "started_at": "2026-03-05T19:15:58.469377+00:00",
+  "pool_specs": [
+    "d"
+  ],
+  "max_concurrent": 4,
+  "n_task": 4,
+  "dry_run": true,
+  "sample_with_replacement": false,
+  "task_subset_start": 0,
+  "task_subset_end": null,
+  "task_pool_size_before_subset": 6,
+  "task_pool_size_after_subset": 6,
+  "launch_profiles": [
+    {
+      "port_profile_id": 0,
+      "max_concurrent": 1,
+      "gateway_base_url": null
+    },
+    {
+      "port_profile_id": 1,
+      "max_concurrent": 3,
+      "gateway_base_url": null
+    }
+  ],
+  "arrival_pattern": {
+    "name": "eager"
+  },
+  "target_results_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/con-driver/tests/output/manual-check",
+  "results_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/con-driver/tests/output/manual-check/job-20260305T191558Z",
+  "datasets_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/con-driver/tests/output/fake-cache-2",
+  "dataset_mode": false,
+  "run_mode": "job",
+  "dataset_mode_dataset": null,
+  "dataset_mode_dataset_size": null,
+  "finished_at": "2026-03-05T19:15:58.473073+00:00",
+  "run_duration_s": 0.003696556988870725,
+  "reward_avg": null,
+  "vllm_log_enabled": false,
+  "vllm_log_dir": null,
+  "vllm_log_endpoint": null,
+  "vllm_log_interval_s": null,
+  "vllm_log_timeout_s": null,
+  "gateway_enabled": false,
+  "gateway_base_url": null,
+  "gateway_job_output_subdir": null,
+  "gateway_job_output_root": null,
+  "gateway_output_location": null,
+  "gateway_output_relative_to_results_dir": null,
+  "gateway_job_start_status": null,
+  "gateway_job_end_status": null,
+  "launched": 4,
+  "succeeded": 4,
+  "failed": 0,
+  "vllm_log_monitor_return_code": null,
+  "results_json": "/srv/local/scratch/yichaoy2/work/vllm-otel/con-driver/tests/output/manual-check/job-20260305T191558Z/meta/results.json"
+}

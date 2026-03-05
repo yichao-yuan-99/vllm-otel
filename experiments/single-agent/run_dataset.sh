@@ -7,6 +7,7 @@ DEFAULT_PORT_PROFILE_ID="4"
 
 PORT_PROFILE_ID="${DEFAULT_PORT_PROFILE_ID}"
 DATASET=""
+MAX_CONCURRENT=""
 
 list_datasets() {
   cat <<'EOF'
@@ -63,15 +64,27 @@ while [[ $# -gt 0 ]]; do
       PORT_PROFILE_ID="${1#*=}"
       shift
       ;;
+    --max-concurrent)
+      if [[ $# -lt 2 ]]; then
+        echo "missing value for --max-concurrent" >&2
+        exit 1
+      fi
+      MAX_CONCURRENT="$2"
+      shift 2
+      ;;
+    --max-concurrent=*)
+      MAX_CONCURRENT="${1#*=}"
+      shift
+      ;;
     --list-datasets)
       list_datasets
       exit 0
       ;;
     -h|--help)
       cat <<'EOF'
-usage: bash experiments/single-agent/run_dataset.sh --dataset <name> [--port-profile-id <id>]
+usage: bash experiments/single-agent/run_dataset.sh --dataset <name> [--port-profile-id <id>] [--max-concurrent <n>]
 
-Run one single-agent Harbor dataset experiment.
+Run one record Harbor dataset experiment.
 
 Datasets:
   terminal-bench@2.0
@@ -81,6 +94,7 @@ Datasets:
 
 Defaults:
   --port-profile-id 4
+  --max-concurrent from config (default is 1 in these configs)
 EOF
       exit 0
       ;;
@@ -103,12 +117,29 @@ if ! CONFIG_PATH="$(config_path_for_dataset "${DATASET}")"; then
   exit 1
 fi
 
-mkdir -p "${REPO_ROOT}/experiments/results/single-agent"
+if [[ -n "${MAX_CONCURRENT}" ]]; then
+  if ! [[ "${MAX_CONCURRENT}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "--max-concurrent must be a positive integer" >&2
+    exit 1
+  fi
+fi
 
-echo "=== single-agent dataset: ${DATASET} ==="
+mkdir -p "${REPO_ROOT}/experiments/results/record"
+
+echo "=== record dataset: ${DATASET} ==="
 echo "config: ${CONFIG_PATH}"
 echo "port_profile_id: ${PORT_PROFILE_ID}"
+if [[ -n "${MAX_CONCURRENT}" ]]; then
+  echo "max_concurrent: ${MAX_CONCURRENT}"
+fi
 
-bash "${REPO_ROOT}/con-driver/run_con_driver.sh" \
-  --config "${CONFIG_PATH}" \
+CMD=(
+  bash "${REPO_ROOT}/con-driver/run_con_driver.sh"
+  --config "${CONFIG_PATH}"
   --port-profile-id "${PORT_PROFILE_ID}"
+)
+if [[ -n "${MAX_CONCURRENT}" ]]; then
+  CMD+=(--max-concurrent "${MAX_CONCURRENT}")
+fi
+
+"${CMD[@]}"

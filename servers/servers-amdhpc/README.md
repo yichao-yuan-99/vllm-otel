@@ -5,7 +5,7 @@ This directory now supports a login-node control plane for AMD HPC clusters:
 - `servers/servers-amdhpc/server.py`: HTTP server on port `23971` by default.
 - `servers/servers-amdhpc/client.py`: Typer CLI frontend that sends JSON POST commands.
 
-The server keeps cluster partition config, loads shared model definitions, submits `sbatch` jobs, and manages one active vLLM service job per port profile.
+The server keeps cluster partition config, loads shared model definitions, submits `sbatch` jobs, and manages active vLLM service jobs per port profile (single-profile jobs and grouped multi-profile jobs).
 
 ## Files
 
@@ -56,14 +56,20 @@ Server startup now ensures the required SIF files exist and pulls them automatic
 python3 servers/servers-amdhpc/client.py status -P 0
 python3 servers/servers-amdhpc/client.py start -P 0 -p mi3008x -m kimi_k2_5
 python3 servers/servers-amdhpc/client.py start -P 0 -p mi3008x -m kimi_k2_5 -b
+python3 servers/servers-amdhpc/client.py start-group -g bench_a -L 0,1,2,3 -p mi3008x -m kimi_k2_5
+python3 servers/servers-amdhpc/client.py group-status -g bench_a
 python3 servers/servers-amdhpc/client.py up -P 0
 python3 servers/servers-amdhpc/client.py wait-up -P 0 --timeout-seconds 900
 python3 servers/servers-amdhpc/client.py logs -P 0 -n 200
+python3 servers/servers-amdhpc/client.py alive-profiles
+python3 servers/servers-amdhpc/client.py stop-alive-profiles
 python3 servers/servers-amdhpc/client.py stop -P 0
+python3 servers/servers-amdhpc/client.py stop-group -g bench_a
 ```
 
 `-P` is the short alias for `--port-profile`.
 Client default server URL is derived from the selected local tunnel record. By default the local control port is `23971 + <port_profile>` (for example: profile `0` -> `23971`, profile `1` -> `23972`).
+Client `start` now also launches a per-profile local gateway daemon in the background after services are up, and `stop` tears it down first.
 
 ## 4) Run live integration test
 
@@ -112,7 +118,14 @@ Optional overrides:
   - vLLM API: `127.0.0.1:<profile.vllm_port>`
   - Jaeger OTLP gRPC: login `127.0.0.1:<profile.jaeger_otlp_port>` -> compute `127.0.0.1:4317`
   - Jaeger UI/API: login `127.0.0.1:<profile.jaeger_api_port>` -> compute `127.0.0.1:16686`
-- `start`: every control-plane command requires a specific `--port-profile`/`-P`, so multiple profiles can run concurrently without sharing state.
+- `start`: single-profile control-plane commands use `--port-profile`/`-P`; grouped commands use `--group-name` + `--profile-list`.
+- `start`: after services are up, it auto-starts a local gateway daemon in the background for the selected port profile.
+- `start`: if `--block/-b` is not set, client still waits for `/wait-up` readiness before launching gateway.
+- `start-group`: launches client-d for each profile in `--profile-list`, then calls grouped control-plane start, then launches one local gateway daemon per profile.
+- `start-group`: grouped start is blocking; it waits until all grouped profiles report vLLM + Jaeger ready.
+- `start-group`: submits one multi-node Slurm job with one worker task per profile; node/task index maps to profile-specific ports from `--profile-list`.
+- `group-status`: reports grouped run status (group name, profiles, job IDs, per-profile status).
+- `start`: gateway startup defaults to `gateway/config.toml` and falls back to `gateway/config.example.toml` when `config.toml` is missing.
 - `start`: AMD HPC always adds `--trust-remote-code` to the vLLM serve args, and force-sequence tokenizer bootstrap is forced to use remote code as well.
 - `start`: when `partition.gpus_per_node > 1`, AMD HPC also adds `--distributed_executor_backend ray` automatically.
 - `start`: model `extra_args` from `configs/model_config.toml` are forwarded into the vLLM launch through `VLLM_MODEL_EXTRA_ARGS_B64` after that normalization.
@@ -121,13 +134,19 @@ Optional overrides:
 - `start --block/-b`: startup timeout starts after Slurm reaches `RUNNING` (while `PENDING`, timeout is deferred).
 - `start --block/-b`: if interrupted (`Ctrl-C`), client automatically enters blocking stop cleanup and then tears down the local tunnel.
 - `start`: fails fast if the selected port profile's service ports are already occupied on the login node.
-- `stop`: always waits for the remote job to disappear from Slurm and then stops the local tunnel automatically.
-- `stop`: if no active job exists, it still stops the local tunnel for that port profile.
+- `stop`: always stops the local gateway daemon first, then waits for the remote job to disappear from Slurm, then stops the local tunnel.
+- `stop`: if no active job exists, it still stops the local gateway and local tunnel for that port profile.
+- `stop-group`: stops a grouped run by `--group-name`, blocks until the grouped job is gone, then tears down gateway/client-d for every profile in the group.
 - `up`: check whether both tunneled vLLM + Jaeger endpoints are currently up for the selected port profile.
 - `wait-up`: block until both tunneled vLLM + Jaeger endpoints are up for the selected port profile.
 - `wait-up`: supports `--defer-timeout-until-running/--timeout-from-submit`.
 - `logs`: tail slurm + jaeger + vllm logs for the selected port profile.
+- `logs` for grouped runs uses profile-specific logs (`jaeger.<job_id>.p<profile>.log`, `vllm.<job_id>.p<profile>.log`).
+- `alive-profiles`: scan all configured port profiles and report which profiles are alive.
+- `alive-profiles`: each entry includes `group_name` and `group_profiles` when that profile belongs to an active grouped run.
+- `stop-alive-profiles`: group-aware stop; grouped profiles are stopped through one `group/stop` call per group.
 - `status`: show the selected port profile status plus the full active-profile map and configured partitions/models.
+- Single-profile commands (`-P`) are rejected for profiles that belong to an active group (`start`, `stop`, `stop-poll`, `up`, `wait-up`, `logs`).
 
 ## HTTP API (server)
 
@@ -135,6 +154,9 @@ All commands accept POST JSON:
 
 - `POST /start` with `{"port_profile": 0, "partition": "...", "model": "...", "block": false}`
 - `POST /stop` with `{"port_profile": 0, "block": false}`
+- `POST /group/start` with `{"group_name": "bench_a", "profile_list": [0,1,2,3], "partition": "...", "model": "...", "block": true}`
+- `POST /group/stop` with `{"group_name": "bench_a", "block": true}`
+- `POST /group/status` with `{"group_name": "bench_a"}`
 - `POST /stop/poll` with `{"port_profile": 0}`
 - `POST /start/status` with `{"port_profile": 0}`
 - `POST /stop/status` with `{"port_profile": 0}`

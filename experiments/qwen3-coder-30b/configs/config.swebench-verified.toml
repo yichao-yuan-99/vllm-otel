@@ -1,0 +1,13 @@
+[driver]
+driver_backend = "harbor"
+pattern = "eager"
+pool = "swebench-verified"
+max_concurrent = 5
+n_task = 500
+results_dir = "experiments/results/qwen3-coder-30b/swebench-verified"
+sample_without_replacement = true
+agent = "mini-swe-agent"
+
+# Optional task subset shard (0-based, end-exclusive), applied before sampling.
+# task_subset_start = 0
+# task_subset_end = 250

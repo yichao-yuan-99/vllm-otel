@@ -77,6 +77,9 @@ class RequestHandler(BaseHTTPRequestHandler):
     POST_ROUTE_HANDLERS = {
         "/start": "_start_command",
         "/stop": "_stop_command",
+        "/group/start": "_group_start_command",
+        "/group/stop": "_group_stop_command",
+        "/group/status": "_group_status_command",
         "/stop/poll": "_stop_poll_command",
         "/start/status": "_start_status_command",
         "/stop/status": "_stop_status_command",
@@ -86,6 +89,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         "/status": "_status_command",
         "/command/start": "_start_command",
         "/command/stop": "_stop_command",
+        "/command/group/start": "_group_start_command",
+        "/command/group/stop": "_group_stop_command",
+        "/command/group/status": "_group_status_command",
         "/command/stop/poll": "_stop_poll_command",
         "/command/start/status": "_start_status_command",
         "/command/stop/status": "_stop_status_command",
@@ -167,6 +173,68 @@ class RequestHandler(BaseHTTPRequestHandler):
             http_status=400,
         )
 
+    def _require_group_name(self, payload: dict[str, Any], *, command_name: str) -> str:
+        raw_group_name = payload.get("group_name")
+        if not isinstance(raw_group_name, str) or not raw_group_name.strip():
+            raise ControlPlaneError(
+                message=f"{command_name} requires non-empty 'group_name'",
+                code=216,
+                http_status=400,
+            )
+        return raw_group_name.strip()
+
+    def _require_profile_list(self, payload: dict[str, Any], *, command_name: str) -> list[int]:
+        raw_profile_list = payload.get("profile_list")
+        values: list[Any]
+        if isinstance(raw_profile_list, list):
+            values = list(raw_profile_list)
+        elif isinstance(raw_profile_list, str):
+            values = [item.strip() for item in raw_profile_list.split(",") if item.strip()]
+        else:
+            raise ControlPlaneError(
+                message=(
+                    f"{command_name} requires 'profile_list' as a list of integers "
+                    "or comma-separated string"
+                ),
+                code=217,
+                http_status=400,
+            )
+
+        if not values:
+            raise ControlPlaneError(
+                message=f"{command_name}.profile_list cannot be empty",
+                code=218,
+                http_status=400,
+            )
+
+        parsed: list[int] = []
+        for value in values:
+            if isinstance(value, bool):
+                raise ControlPlaneError(
+                    message=f"{command_name}.profile_list values must be integers",
+                    code=219,
+                    http_status=400,
+                )
+            if isinstance(value, int):
+                parsed.append(value)
+                continue
+            if isinstance(value, str):
+                try:
+                    parsed.append(int(value))
+                    continue
+                except ValueError as exc:
+                    raise ControlPlaneError(
+                        message=f"{command_name}.profile_list values must be integers",
+                        code=220,
+                        http_status=400,
+                    ) from exc
+            raise ControlPlaneError(
+                message=f"{command_name}.profile_list values must be integers",
+                code=221,
+                http_status=400,
+            )
+        return parsed
+
     def _start_command(self, payload: dict[str, Any]) -> CommandResult:
         port_profile = self._require_port_profile(payload, command_name="start")
         partition = payload.get("partition")
@@ -207,6 +275,53 @@ class RequestHandler(BaseHTTPRequestHandler):
                 http_status=400,
             )
         return self.control_plane.stop(port_profile_id=port_profile, block=block)
+
+    def _group_start_command(self, payload: dict[str, Any]) -> CommandResult:
+        group_name = self._require_group_name(payload, command_name="group/start")
+        profile_list = self._require_profile_list(payload, command_name="group/start")
+        partition = payload.get("partition")
+        model = payload.get("model")
+        block = payload.get("block", True)
+        if not isinstance(partition, str) or not partition:
+            raise ControlPlaneError(
+                message="group/start requires 'partition'",
+                code=222,
+                http_status=400,
+            )
+        if not isinstance(model, str) or not model:
+            raise ControlPlaneError(
+                message="group/start requires 'model'",
+                code=223,
+                http_status=400,
+            )
+        if not isinstance(block, bool):
+            raise ControlPlaneError(
+                message="group/start.block must be a boolean",
+                code=224,
+                http_status=400,
+            )
+        return self.control_plane.start_group(
+            group_name=group_name,
+            port_profile_ids=profile_list,
+            partition=partition,
+            model=model,
+            block=block,
+        )
+
+    def _group_stop_command(self, payload: dict[str, Any]) -> CommandResult:
+        group_name = self._require_group_name(payload, command_name="group/stop")
+        block = payload.get("block", True)
+        if not isinstance(block, bool):
+            raise ControlPlaneError(
+                message="group/stop.block must be a boolean",
+                code=225,
+                http_status=400,
+            )
+        return self.control_plane.stop_group(group_name=group_name, block=block)
+
+    def _group_status_command(self, payload: dict[str, Any]) -> CommandResult:
+        group_name = self._require_group_name(payload, command_name="group/status")
+        return self.control_plane.group_status(group_name=group_name)
 
     def _stop_poll_command(self, payload: dict[str, Any]) -> CommandResult:
         port_profile = self._require_port_profile(payload, command_name="stop-poll")
@@ -394,6 +509,7 @@ def main() -> int:
                     port_profile_id=port_profile_id,
                     reason="server_exit",
                     block=False,
+                    allow_group=True,
                 )
                 result_data = cleanup_result.data if isinstance(cleanup_result.data, dict) else {}
                 final_status = str(result_data.get("final_status", "unknown"))
@@ -430,7 +546,10 @@ def main() -> int:
                 finished_profiles: set[int] = set()
                 for port_profile_id in sorted(pending_profiles):
                     try:
-                        poll_result = control_plane.stop_poll(port_profile_id=port_profile_id)
+                        poll_result = control_plane.stop_poll(
+                            port_profile_id=port_profile_id,
+                            allow_group=True,
+                        )
                     except ControlPlaneError as exc:
                         if port_profile_id not in stop_poll_failures:
                             stop_poll_failures.add(port_profile_id)

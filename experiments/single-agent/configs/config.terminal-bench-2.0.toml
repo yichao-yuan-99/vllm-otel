@@ -4,6 +4,6 @@ pattern = "eager"
 pool = "terminal-bench@2.0"
 max_concurrent = 1
 n_task = 89
-results_dir = "experiments/results/single-agent/terminal-bench-2.0"
+results_dir = "experiments/results/record/terminal-bench-2.0"
 sample_without_replacement = true
 agent = "terminus-2"

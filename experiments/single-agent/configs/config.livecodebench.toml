@@ -4,6 +4,6 @@ pattern = "eager"
 pool = "livecodebench"
 max_concurrent = 1
 n_task = 100
-results_dir = "experiments/results/single-agent/livecodebench"
+results_dir = "experiments/results/record/livecodebench"
 sample_without_replacement = true
 agent = "terminus-2"

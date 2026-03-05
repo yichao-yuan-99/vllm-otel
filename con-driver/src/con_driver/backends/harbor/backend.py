@@ -109,14 +109,18 @@ class HarborBackend(TrialBackend):
         task: TaskCandidate,
         trial_id: str,
         trials_dir: Path,
+        runtime_forwarded_args: Sequence[str] | None = None,
     ) -> list[str]:
+        forwarded_args = list(self._config.harbor_args)
+        if runtime_forwarded_args:
+            forwarded_args.extend(str(arg) for arg in runtime_forwarded_args)
         return [
             *self._config.harbor_bin,
             "trials",
             "start",
             "-p",
             str(task.path),
-            *self._config.harbor_args,
+            *forwarded_args,
             "--trial-name",
             trial_id,
             "--trials-dir",

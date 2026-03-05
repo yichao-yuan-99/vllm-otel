@@ -1,6 +1,7 @@
-# Single-Agent
+# Record
 
-This experiment runs four Harbor datasets with `max_concurrent = 1`.
+This experiment runs four Harbor datasets for record generation.
+Default `max_concurrent` in the configs is `1`, and you can override it from the runner scripts.
 
 Datasets:
 
@@ -19,7 +20,7 @@ Shared settings across all four configs:
 
 - `driver_backend = "harbor"`
 - `pattern = "eager"`
-- `max_concurrent = 1`
+- `max_concurrent = 1` (override with `--max-concurrent <n>` in the runner scripts)
 - `sample_without_replacement = true`
 - `agent = "terminus-2"`
 - default `port_profile_id = 4` in the runner scripts
@@ -48,7 +49,7 @@ Before running:
 
 1. Start the target vLLM server and gateway for port profile `4`, or pass a different `--port-profile-id`.
 2. Make sure Harbor is installed and the repo `.venv` is usable.
-3. Expect outputs under `experiments/results/single-agent/`.
+3. Expect outputs under `experiments/results/record/`.
 
 ## Run One Dataset
 
@@ -63,7 +64,8 @@ Explicit port profile:
 ```bash
 bash experiments/single-agent/run_dataset.sh \
   --dataset swebench-verified \
-  --port-profile-id 4
+  --port-profile-id 4 \
+  --max-concurrent 8
 ```
 
 List supported datasets:
@@ -84,19 +86,25 @@ Or:
 bash experiments/single-agent/run_all.sh --port-profile-id 4
 ```
 
+Or with explicit concurrency:
+
+```bash
+bash experiments/single-agent/run_all.sh --port-profile-id 4 --max-concurrent 8
+```
+
 ## Output Layout
 
 Each dataset writes under its own results root:
 
-- `experiments/results/single-agent/terminal-bench-2.0/`
-- `experiments/results/single-agent/livecodebench/`
-- `experiments/results/single-agent/dabstep/`
-- `experiments/results/single-agent/swebench-verified/`
+- `experiments/results/record/terminal-bench-2.0/`
+- `experiments/results/record/livecodebench/`
+- `experiments/results/record/dabstep/`
+- `experiments/results/record/swebench-verified/`
 
 Each `con-driver` invocation then creates a run directory under that root,
 for example:
 
-- `experiments/results/single-agent/terminal-bench-2.0/job-<timestamp>/`
+- `experiments/results/record/terminal-bench-2.0/job-<timestamp>/`
 
 Useful files inside each run:
 
