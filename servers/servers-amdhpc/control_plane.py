@@ -2423,23 +2423,33 @@ class ControlPlane:
 
               echo "group=${{GROUP_NAME}} profile=${{PROFILE_ID}} node=$(hostname) proc=${{index}} vllm_port=${{VLLM_SERVICE_PORT}}"
 
-              local TUNNEL_PIDS=()
-              start_tunnel() {{
-                local remote_port="$1"
-                local local_port="$2"
-                ssh "${{SSH_OPTIONS[@]}}" -N -R "${{remote_port}}:127.0.0.1:${{local_port}}" "${{LOGIN_HOST}}" &
-                TUNNEL_PIDS+=("$!")
-              }}
+              local TUNNEL_PID=""
+              start_reverse_tunnels() {{
+                local retries=5
+                local attempt=1
+                local stagger_seconds=$(( (index % 4) + 1 ))
+                sleep "${{stagger_seconds}}"
 
-              verify_tunnels_alive() {{
-                local failed=0
-                for pid in "${{TUNNEL_PIDS[@]}}"; do
-                  if ! kill -0 "${{pid}}" >/dev/null 2>&1; then
-                    echo "Reverse tunnel process exited before startup completed (pid=${{pid}})." >&2
-                    failed=1
+                while [[ "${{attempt}}" -le "${{retries}}" ]]; do
+                  ssh "${{SSH_OPTIONS[@]}}" -N \
+                    -R "${{VLLM_SERVICE_PORT}}:127.0.0.1:${{VLLM_SERVICE_PORT}}" \
+                    -R "${{JAEGER_OTLP_LOGIN_PORT}}:127.0.0.1:${{JAEGER_OTLP_LOCAL_PORT}}" \
+                    -R "${{JAEGER_UI_LOGIN_PORT}}:127.0.0.1:${{JAEGER_UI_LOCAL_PORT}}" \
+                    "${{LOGIN_HOST}}" &
+                  TUNNEL_PID="$!"
+
+                  sleep 1
+                  if kill -0 "${{TUNNEL_PID}}" >/dev/null 2>&1; then
+                    return 0
                   fi
+
+                  wait "${{TUNNEL_PID}}" || true
+                  echo "Reverse tunnel startup failed (attempt ${{attempt}}/${{retries}}) for group=${{GROUP_NAME}} profile=${{PROFILE_ID}}; retrying." >&2
+                  attempt=$((attempt + 1))
+                  sleep 2
                 done
-                return "${{failed}}"
+
+                return 1
               }}
 
               APPTAINER_HOME_ARGS=()
@@ -2460,17 +2470,11 @@ class ControlPlane:
                 set +e
                 if [[ -n "${{VLLM_PID:-}}" ]]; then kill "${{VLLM_PID}}" >/dev/null 2>&1 || true; fi
                 if [[ -n "${{JAEGER_PID:-}}" ]]; then kill "${{JAEGER_PID}}" >/dev/null 2>&1 || true; fi
-                for pid in "${{TUNNEL_PIDS[@]}}"; do
-                  kill "${{pid}}" >/dev/null 2>&1 || true
-                done
+                if [[ -n "${{TUNNEL_PID:-}}" ]]; then kill "${{TUNNEL_PID}}" >/dev/null 2>&1 || true; fi
               }}
               trap cleanup EXIT INT TERM
 
-              start_tunnel "${{VLLM_SERVICE_PORT}}" "${{VLLM_SERVICE_PORT}}"
-              start_tunnel "${{JAEGER_OTLP_LOGIN_PORT}}" "${{JAEGER_OTLP_LOCAL_PORT}}"
-              start_tunnel "${{JAEGER_UI_LOGIN_PORT}}" "${{JAEGER_UI_LOCAL_PORT}}"
-              sleep 1
-              if ! verify_tunnels_alive; then
+              if ! start_reverse_tunnels; then
                 echo "One or more reverse tunnels failed to establish. Aborting startup." >&2
                 exit 72
               fi
@@ -2520,7 +2524,7 @@ class ControlPlane:
                 >"${{VLLM_LOG}}" 2>&1 &
               VLLM_PID=$!
 
-              WAIT_PIDS=("${{JAEGER_PID}}" "${{VLLM_PID}}" "${{TUNNEL_PIDS[@]}}")
+              WAIT_PIDS=("${{JAEGER_PID}}" "${{VLLM_PID}}" "${{TUNNEL_PID}}")
               wait -n "${{WAIT_PIDS[@]}}"
               EXIT_CODE=$?
               echo "group=${{GROUP_NAME}} profile=${{PROFILE_ID}} process exited with code ${{EXIT_CODE}} at $(date)."
