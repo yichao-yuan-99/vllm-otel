@@ -2393,10 +2393,9 @@ class ControlPlane:
             JOB_LOG_DIR={shlex.quote(str(self._cfg.log_dir))}
             mkdir -p "${{JOB_LOG_DIR}}" "${{AITER_JIT_DIR}}" "${{XDG_CACHE_HOME}}" "${{VLLM_CACHE_ROOT}}"
 
-            SSH_OPTIONS=({ssh_options})
-
             run_group_worker() {{
               set -euo pipefail
+              local SSH_OPTIONS=({ssh_options})
 
               local index="${{SLURM_PROCID:-${{SLURM_NODEID:-}}}}"
               if [[ -z "${{index}}" ]]; then
@@ -2528,6 +2527,17 @@ class ControlPlane:
               exit "${{EXIT_CODE}}"
             }}
 
+            export LOGIN_HOST GROUP_NAME GROUP_SIZE
+            export GROUP_PROFILE_IDS_CSV GROUP_VLLM_PORTS_CSV
+            export GROUP_JAEGER_OTLP_LOGIN_PORTS_CSV GROUP_JAEGER_UI_LOGIN_PORTS_CSV
+            export JAEGER_OTLP_LOCAL_PORT JAEGER_UI_LOCAL_PORT JAEGER_SIF VLLM_SIF
+            export VLLM_MODEL_NAME VLLM_SERVED_MODEL_NAME VLLM_TENSOR_PARALLEL_SIZE VLLM_VISIBLE_DEVICES
+            export VLLM_APPTAINER_HOME HF_HOME HF_HUB_CACHE HF_TOKEN
+            export AITER_JIT_DIR XDG_CACHE_HOME VLLM_CACHE_ROOT
+            export OTEL_SERVICE_NAME OTEL_EXPORTER_OTLP_TRACES_INSECURE OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+            export VLLM_COLLECT_DETAILED_TRACES VLLM_LOGITS_PROCESSORS
+            export VLLM_MODEL_EXTRA_ARGS_B64 VLLM_FORCE_SEQ_TRUST_REMOTE_CODE
+            export JOB_LOG_DIR
             export -f run_group_worker
             srun \
               --nodes="${{GROUP_SIZE}}" \
