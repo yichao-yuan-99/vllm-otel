@@ -4,6 +4,6 @@ pattern = "eager"
 pool = "dabstep"
 max_concurrent = 1
 n_task = 450
-results_dir = "experiments/results/record/dabstep"
+results_dir = "results/record/dabstep"
 sample_without_replacement = true
 agent = "terminus-2"

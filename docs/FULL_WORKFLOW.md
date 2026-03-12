@@ -90,7 +90,8 @@ Expected profile artifacts:
 - `$RUN_DIR/meta/config.toml`
 - `$RUN_DIR/meta/run_manifest.json`
 - `$RUN_DIR/meta/results.json`
-- `$RUN_DIR/gateway-output/run_*/...`
+- `$RUN_DIR/gateway-output/run_*/...` (single profile) or
+- `$RUN_DIR/gateway-output/profile-*/run_*/...` (cluster mode)
 
 ## 4) Compile Replay Plan
 
@@ -99,7 +100,7 @@ Compile from full profile directory:
 ```bash
 python3 -m replayer compile \
   --job-dir "$RUN_DIR" \
-  --agent-timeout-s 3000 \
+  --port-profile-id 0 \
   --plan-out "$RUN_DIR/replay-plan.json"
 ```
 
@@ -112,7 +113,7 @@ jq '.launch_policy,.workers|length' "$RUN_DIR/replay-plan.json"
 Important:
 
 - replay now requires `launch_policy` in plan (`config_ordered`).
-- replay uses `agent_timeout_s` in plan when present; compile may be given `--agent-timeout-s`.
+- replay accepts optional runtime `--agent-timeout-s`.
 - old plans without `launch_policy` are rejected by replay.
 
 ## 5) Execute Replay
@@ -124,8 +125,8 @@ REPLAY_DIR="$RUN_DIR/replay-run-$(date -u +%Y%m%dT%H%M%SZ)"
 
 python3 -m replayer replay \
   --plan "$RUN_DIR/replay-plan.json" \
-  --output-dir "$REPLAY_DIR" \
-  --gateway-lifecycle auto
+  --port-profile-id 0 \
+  --output-dir "$REPLAY_DIR"
 ```
 
 Check replay summary:

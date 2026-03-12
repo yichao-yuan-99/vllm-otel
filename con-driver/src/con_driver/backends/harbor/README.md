@@ -41,8 +41,11 @@ When `port_profile_id` is provided, `resolve_harbor_runtime(...)` resolves:
 - `resolved_model_context_window`
   - loaded from `configs/model_config.toml`
 - `agent_base_url`
-  - `http://127.0.0.1:<gateway_parse_port>/v1` when gateway is enabled
-  - `http://127.0.0.1:<vllm_port>/v1` when gateway is disabled
+  - derived from local ports
+  - for `mini-swe-agent` only: loopback hosts are rewritten to a container-reachable host
+  - default container host is `192.168.5.1` (override via `CON_DRIVER_CONTAINER_HOST`)
+  - `<gateway_parse_port>/v1` when gateway is enabled
+  - `<vllm_port>/v1` when gateway is disabled
 - synthesized Harbor forwarded args
   - `--agent <agent>`
   - `--model hosted_vllm/<served_model_name>`
@@ -90,7 +93,7 @@ When `port_profile_id` is set, Harbor resolution rejects:
 - forwarded `--agent-kwarg model_info=...`
 - top-level `agent` together with forwarded `--agent`
 
-This keeps Harbor-specific auto-resolution authoritative when simplified mode is active.
+Con-driver keeps Harbor-specific auto-resolution authoritative when simplified mode is active.
 
 ## Inputs Still Required From The User
 

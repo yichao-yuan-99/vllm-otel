@@ -5,6 +5,7 @@ import tarfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+import re
 from typing import Any, Callable
 
 
@@ -15,6 +16,7 @@ _SUPPORTED_METRIC_TYPES = {"gauge", "counter"}
 class ParsedMetricRecord:
     captured_at: str
     families: dict[str, Any]
+    port_profile_id: int | None = None
 
 
 def _parse_iso8601(value: str) -> datetime:
@@ -34,6 +36,13 @@ def _load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _profile_id_from_name(name: str) -> int | None:
+    match = re.fullmatch(r"profile-(\d+)", name)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
 def _load_block_entries(vllm_log_dir: Path) -> list[dict[str, Any]]:
     index_path = vllm_log_dir / "blocks.index.json"
     if index_path.is_file():
@@ -48,6 +57,21 @@ def _load_block_entries(vllm_log_dir: Path) -> list[dict[str, Any]]:
         {"file": path.name, "member": None}
         for path in sorted(vllm_log_dir.glob("block-*.tar.gz"))
     ]
+
+
+def _discover_metric_log_dirs(vllm_log_dir: Path) -> list[tuple[int | None, Path]]:
+    profile_dirs: list[tuple[int, Path]] = []
+    for child in sorted(vllm_log_dir.iterdir()):
+        if not child.is_dir():
+            continue
+        profile_id = _profile_id_from_name(child.name)
+        if profile_id is None:
+            continue
+        profile_dirs.append((profile_id, child))
+
+    if profile_dirs:
+        return profile_dirs
+    return [(None, vllm_log_dir)]
 
 
 def _read_jsonl_member(tar_path: Path, member_name: str | None = None) -> list[dict[str, Any]]:
@@ -79,14 +103,22 @@ def _read_jsonl_member(tar_path: Path, member_name: str | None = None) -> list[d
     return records
 
 
-def _parse_metric_record(record: dict[str, Any]) -> ParsedMetricRecord:
+def _parse_metric_record(
+    record: dict[str, Any],
+    *,
+    port_profile_id: int | None = None,
+) -> ParsedMetricRecord:
     captured_at = record.get("captured_at")
     if not isinstance(captured_at, str) or not captured_at.strip():
         raise ValueError("Metric record is missing captured_at")
 
     families_payload = record.get("families")
     if isinstance(families_payload, dict):
-        return ParsedMetricRecord(captured_at=captured_at, families=families_payload)
+        return ParsedMetricRecord(
+            captured_at=captured_at,
+            families=families_payload,
+            port_profile_id=port_profile_id,
+        )
 
     content = record.get("content")
     if isinstance(content, str):
@@ -96,7 +128,11 @@ def _parse_metric_record(record: dict[str, Any]) -> ParsedMetricRecord:
         families = parsed.get("families")
         if not isinstance(families, dict):
             raise ValueError("Parsed metric payload is missing families")
-        return ParsedMetricRecord(captured_at=captured_at, families=families)
+        return ParsedMetricRecord(
+            captured_at=captured_at,
+            families=families,
+            port_profile_id=port_profile_id,
+        )
 
     raise ValueError("Metric record must contain either families or content")
 
@@ -105,7 +141,10 @@ def count_metric_blocks_in_run_dir(run_dir: Path) -> int:
     vllm_log_dir = run_dir / "vllm-log"
     if not vllm_log_dir.is_dir():
         raise ValueError(f"Missing vllm-log directory: {vllm_log_dir}")
-    return len(_load_block_entries(vllm_log_dir))
+    total = 0
+    for _profile_id, metric_dir in _discover_metric_log_dirs(vllm_log_dir):
+        total += len(_load_block_entries(metric_dir))
+    return total
 
 
 def load_metric_records_from_run_dir(
@@ -116,22 +155,32 @@ def load_metric_records_from_run_dir(
     vllm_log_dir = run_dir / "vllm-log"
     if not vllm_log_dir.is_dir():
         raise ValueError(f"Missing vllm-log directory: {vllm_log_dir}")
-    block_entries = _load_block_entries(vllm_log_dir)
+    metric_dirs = _discover_metric_log_dirs(vllm_log_dir)
+    blocks_by_dir = [
+        (profile_id, metric_dir, _load_block_entries(metric_dir))
+        for profile_id, metric_dir in metric_dirs
+    ]
+    total_blocks = sum(len(entries) for _pid, _metric_dir, entries in blocks_by_dir)
     records: list[ParsedMetricRecord] = []
-    total_blocks = len(block_entries)
-    for index, block in enumerate(block_entries, start=1):
-        file_name = block.get("file")
-        if not isinstance(file_name, str) or not file_name:
-            continue
-        tar_path = vllm_log_dir / file_name
-        if not tar_path.is_file():
-            raise ValueError(f"Missing vllm log block: {tar_path}")
-        member_name = block.get("member")
-        member_name_value = member_name if isinstance(member_name, str) else None
-        for record in _read_jsonl_member(tar_path, member_name=member_name_value):
-            records.append(_parse_metric_record(record))
-        if on_block_loaded is not None:
-            on_block_loaded(index, total_blocks)
+    loaded_blocks = 0
+
+    for profile_id, metric_dir, block_entries in blocks_by_dir:
+        for block in block_entries:
+            file_name = block.get("file")
+            if not isinstance(file_name, str) or not file_name:
+                continue
+            tar_path = metric_dir / file_name
+            if not tar_path.is_file():
+                raise ValueError(f"Missing vllm log block: {tar_path}")
+            member_name = block.get("member")
+            member_name_value = member_name if isinstance(member_name, str) else None
+            for record in _read_jsonl_member(tar_path, member_name=member_name_value):
+                records.append(
+                    _parse_metric_record(record, port_profile_id=profile_id)
+                )
+            loaded_blocks += 1
+            if on_block_loaded is not None:
+                on_block_loaded(loaded_blocks, total_blocks)
     return records
 
 
@@ -173,6 +222,8 @@ def build_gauge_counter_timeseries(records: list[ParsedMetricRecord]) -> dict[st
                     continue
 
                 normalized_labels = {str(key): str(val) for key, val in labels.items()}
+                if record.port_profile_id is not None:
+                    normalized_labels["port_profile_id"] = str(record.port_profile_id)
                 series_key = _build_series_key(family_name, normalized_labels)
                 metric_entry = metrics.setdefault(
                     series_key,
@@ -213,9 +264,18 @@ def extract_gauge_counter_timeseries_from_run_dir(
 ) -> dict[str, Any]:
     records = load_metric_records_from_run_dir(run_dir, on_block_loaded=on_block_loaded)
     result = build_gauge_counter_timeseries(records)
+    profile_ids = sorted(
+        {
+            record.port_profile_id
+            for record in records
+            if record.port_profile_id is not None
+        }
+    )
     return {
         "source_run_dir": str(run_dir.resolve()),
         "source_vllm_log_dir": str((run_dir / "vllm-log").resolve()),
+        "cluster_mode": bool(profile_ids),
+        "port_profile_ids": profile_ids,
         "first_captured_at": result["first_captured_at"],
         "metric_count": len(result["metrics"]),
         "metrics": result["metrics"],

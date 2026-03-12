@@ -1,0 +1,91 @@
+{
+  "source_run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/con-driver/tests/output/manual-check/job-20260305T191558Z",
+  "source_type": "con-driver",
+  "source_path": "/srv/local/scratch/yichaoy2/work/vllm-otel/con-driver/tests/output/manual-check/job-20260305T191558Z/meta/results.json",
+  "experiment_started_at": "2026-03-05T19:15:58.469377+00:00",
+  "experiment_finished_at": "2026-03-05T19:15:58.473073+00:00",
+  "total_duration_s": 0.003696556988870725,
+  "trial_count": 4,
+  "trail_count": 4,
+  "trial_duration_stats_s": {
+    "avg": 0.0,
+    "min": 0.0,
+    "max": 0.0
+  },
+  "trials": [
+    {
+      "trial_id": "trial-0000-a36a353a",
+      "status": "dry-run",
+      "started_at": "2026-03-05T19:15:58.470990+00:00",
+      "finished_at": "2026-03-05T19:15:58.470990+00:00",
+      "start_offset_s": 0.001613,
+      "end_offset_s": 0.001613,
+      "duration_s": 0.0
+    },
+    {
+      "trial_id": "trial-0001-ae2e502a",
+      "status": "dry-run",
+      "started_at": "2026-03-05T19:15:58.471103+00:00",
+      "finished_at": "2026-03-05T19:15:58.471103+00:00",
+      "start_offset_s": 0.001726,
+      "end_offset_s": 0.001726,
+      "duration_s": 0.0
+    },
+    {
+      "trial_id": "trial-0002-92a3783a",
+      "status": "dry-run",
+      "started_at": "2026-03-05T19:15:58.471175+00:00",
+      "finished_at": "2026-03-05T19:15:58.471175+00:00",
+      "start_offset_s": 0.001798,
+      "end_offset_s": 0.001798,
+      "duration_s": 0.0
+    },
+    {
+      "trial_id": "trial-0003-f2400631",
+      "status": "dry-run",
+      "started_at": "2026-03-05T19:15:58.471234+00:00",
+      "finished_at": "2026-03-05T19:15:58.471234+00:00",
+      "start_offset_s": 0.001857,
+      "end_offset_s": 0.001857,
+      "duration_s": 0.0
+    }
+  ],
+  "trails": [
+    {
+      "trial_id": "trial-0000-a36a353a",
+      "status": "dry-run",
+      "started_at": "2026-03-05T19:15:58.470990+00:00",
+      "finished_at": "2026-03-05T19:15:58.470990+00:00",
+      "start_offset_s": 0.001613,
+      "end_offset_s": 0.001613,
+      "duration_s": 0.0
+    },
+    {
+      "trial_id": "trial-0001-ae2e502a",
+      "status": "dry-run",
+      "started_at": "2026-03-05T19:15:58.471103+00:00",
+      "finished_at": "2026-03-05T19:15:58.471103+00:00",
+      "start_offset_s": 0.001726,
+      "end_offset_s": 0.001726,
+      "duration_s": 0.0
+    },
+    {
+      "trial_id": "trial-0002-92a3783a",
+      "status": "dry-run",
+      "started_at": "2026-03-05T19:15:58.471175+00:00",
+      "finished_at": "2026-03-05T19:15:58.471175+00:00",
+      "start_offset_s": 0.001798,
+      "end_offset_s": 0.001798,
+      "duration_s": 0.0
+    },
+    {
+      "trial_id": "trial-0003-f2400631",
+      "status": "dry-run",
+      "started_at": "2026-03-05T19:15:58.471234+00:00",
+      "finished_at": "2026-03-05T19:15:58.471234+00:00",
+      "start_offset_s": 0.001857,
+      "end_offset_s": 0.001857,
+      "duration_s": 0.0
+    }
+  ]
+}

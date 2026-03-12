@@ -1,0 +1,48 @@
+{
+  "status": "ok",
+  "source_run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/qwen3-coder-30b/dabstep/mini-swe-agent/dabstep-20260306T194929Z",
+  "plan_path": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/qwen3-coder-30b/dabstep/mini-swe-agent/dabstep-20260306T194929Z/replay-plan.json",
+  "replay_root_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/20260308T182300Z",
+  "output_config_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/experiments/sweep-concurrency/generated/qwen3-coder-30b/big-batch-20260308T182300Z",
+  "num_tasks": 350,
+  "concurrency_list": [
+    20,
+    30,
+    40,
+    50,
+    70,
+    100
+  ],
+  "generated_configs": [
+    {
+      "concurrency": 20,
+      "config_path": "/srv/local/scratch/yichaoy2/work/vllm-otel/experiments/sweep-concurrency/generated/qwen3-coder-30b/big-batch-20260308T182300Z/replay.c20.toml",
+      "replay_output_dir": "results/replay/20260308T182300Z/qwen3-coder-30b/dabstep/mini-swe-agent/sweep-concurrency/20"
+    },
+    {
+      "concurrency": 30,
+      "config_path": "/srv/local/scratch/yichaoy2/work/vllm-otel/experiments/sweep-concurrency/generated/qwen3-coder-30b/big-batch-20260308T182300Z/replay.c30.toml",
+      "replay_output_dir": "results/replay/20260308T182300Z/qwen3-coder-30b/dabstep/mini-swe-agent/sweep-concurrency/30"
+    },
+    {
+      "concurrency": 40,
+      "config_path": "/srv/local/scratch/yichaoy2/work/vllm-otel/experiments/sweep-concurrency/generated/qwen3-coder-30b/big-batch-20260308T182300Z/replay.c40.toml",
+      "replay_output_dir": "results/replay/20260308T182300Z/qwen3-coder-30b/dabstep/mini-swe-agent/sweep-concurrency/40"
+    },
+    {
+      "concurrency": 50,
+      "config_path": "/srv/local/scratch/yichaoy2/work/vllm-otel/experiments/sweep-concurrency/generated/qwen3-coder-30b/big-batch-20260308T182300Z/replay.c50.toml",
+      "replay_output_dir": "results/replay/20260308T182300Z/qwen3-coder-30b/dabstep/mini-swe-agent/sweep-concurrency/50"
+    },
+    {
+      "concurrency": 70,
+      "config_path": "/srv/local/scratch/yichaoy2/work/vllm-otel/experiments/sweep-concurrency/generated/qwen3-coder-30b/big-batch-20260308T182300Z/replay.c70.toml",
+      "replay_output_dir": "results/replay/20260308T182300Z/qwen3-coder-30b/dabstep/mini-swe-agent/sweep-concurrency/70"
+    },
+    {
+      "concurrency": 100,
+      "config_path": "/srv/local/scratch/yichaoy2/work/vllm-otel/experiments/sweep-concurrency/generated/qwen3-coder-30b/big-batch-20260308T182300Z/replay.c100.toml",
+      "replay_output_dir": "results/replay/20260308T182300Z/qwen3-coder-30b/dabstep/mini-swe-agent/sweep-concurrency/100"
+    }
+  ]
+}

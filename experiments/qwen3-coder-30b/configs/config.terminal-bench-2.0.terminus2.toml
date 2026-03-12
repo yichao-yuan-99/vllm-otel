@@ -1,0 +1,14 @@
+[driver]
+driver_backend = "harbor"
+pattern = "eager"
+pool = "terminal-bench@2.0"
+n_task = 89
+results_dir = "experiments/results/qwen3-coder-30b/terminal-bench-2.0/terminus-2"
+sample_without_replacement = true
+agent = "terminus-2"
+port_profile_id_list = [0, 1, 2, 3, 4]
+
+# Cluster mode note:
+# - max_concurrent_list is intentionally not hardcoded here.
+# - Provide it via CLI so all profiles use the same user-chosen concurrency.
+# - If max_concurrent is not set, con-driver defaults it to sum(max_concurrent_list).

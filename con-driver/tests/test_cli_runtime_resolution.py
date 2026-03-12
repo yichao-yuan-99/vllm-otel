@@ -90,6 +90,75 @@ def test_main_synthesizes_runtime_from_port_profile(
     ]
 
 
+def test_main_synthesizes_hosted_vllm_for_mini_swe_agent(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[driver]",
+                'driver_backend = "harbor"',
+                'pool = "terminal-bench@2.0"',
+                'pattern = "eager"',
+                "max_concurrent = 1",
+                "n_task = 1",
+                'results_dir = "out"',
+                "port_profile_id = 0",
+                'agent = "mini-swe-agent"',
+                "gateway = false",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_probe_single_served_model_name(*, base_url: str, timeout_s: float) -> str:
+        assert base_url == "http://127.0.0.1:11451"
+        assert timeout_s == 3600.0
+        return "Qwen3-Coder-30B-A3B-Instruct"
+
+    def fake_run_driver(**kwargs: object) -> int:
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(
+        harbor_runtime,
+        "probe_single_served_model_name",
+        fake_probe_single_served_model_name,
+    )
+    monkeypatch.setattr(cli, "_run_driver", fake_run_driver)
+
+    exit_code = cli.main(["--config", str(config_path)])
+
+    assert exit_code == 0
+    assert captured["agent_base_url"] == "http://192.168.5.1:11451/v1"
+    assert captured["forwarded_args"] == [
+        "--agent",
+        "mini-swe-agent",
+        "--model",
+        "hosted_vllm/Qwen3-Coder-30B-A3B-Instruct",
+        "--agent-kwarg",
+        "api_base=http://192.168.5.1:11451/v1",
+        "--agent-kwarg",
+        "base_url=http://192.168.5.1:11451/v1",
+        "--agent-kwarg",
+        'model_info={"max_input_tokens":262144,"max_output_tokens":262144,"input_cost_per_token":0.0,"output_cost_per_token":0.0}',
+    ]
+    assert captured["trial_env"] == {
+        "ANTHROPIC_BASE_URL": "http://192.168.5.1:11451/v1",
+        "OPENAI_BASE_URL": "http://192.168.5.1:11451/v1",
+        "LLM_BASE_URL": "http://192.168.5.1:11451/v1",
+        "BASE_URL": "http://192.168.5.1:11451/v1",
+        "OPENAI_API_BASE": "http://192.168.5.1:11451/v1",
+        "HOSTED_VLLM_API_BASE": "http://192.168.5.1:11451/v1",
+        "VLLM_API_BASE": "http://192.168.5.1:11451/v1",
+    }
+
+
 def test_main_rejects_managed_model_override_in_simplified_mode(
     monkeypatch,
     tmp_path: Path,
@@ -307,11 +376,16 @@ def test_main_cluster_mode_uses_port_profile_list_and_defaults_max_concurrent(
     assert exit_code == 0
     assert captured["max_concurrent"] == 7
     assert captured["port_profile_id"] is None
-    assert captured["vllm_log_enabled"] is False
+    assert captured["vllm_log_enabled"] is True
+    assert captured["vllm_log_endpoint"] == "http://127.0.0.1:24123/metrics"
     launch_profiles = captured["launch_profiles"]
     assert isinstance(launch_profiles, list)
     assert [entry.port_profile_id for entry in launch_profiles] == [1, 2]
     assert [entry.max_concurrent for entry in launch_profiles] == [4, 3]
+    assert [entry.vllm_log_endpoint for entry in launch_profiles] == [
+        "http://127.0.0.1:24123/metrics",
+        "http://127.0.0.1:31987/metrics",
+    ]
 
 
 def test_main_rejects_mixing_port_profile_id_and_port_profile_id_list(

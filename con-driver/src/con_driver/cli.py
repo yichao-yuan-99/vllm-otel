@@ -198,6 +198,7 @@ def _run_driver(
                         "port_profile_id": profile.port_profile_id,
                         "max_concurrent": profile.max_concurrent,
                         "gateway_base_url": profile.gateway_base_url,
+                        "vllm_log_endpoint": profile.vllm_log_endpoint,
                     }
                     for profile in launch_profiles
                 ]
@@ -210,6 +211,19 @@ def _run_driver(
             "agent_base_url": agent_base_url,
             "vllm_log_enabled": vllm_log_enabled,
             "vllm_log_endpoint": vllm_log_endpoint,
+            "vllm_log_endpoints": (
+                [
+                    profile.vllm_log_endpoint
+                    for profile in launch_profiles
+                    if profile.vllm_log_endpoint is not None
+                ]
+                if launch_profiles is not None
+                else (
+                    [vllm_log_endpoint]
+                    if vllm_log_enabled and vllm_log_endpoint.strip()
+                    else []
+                )
+            ),
             "vllm_log_interval_s": vllm_log_interval_s,
             "vllm_log_timeout_s": vllm_log_timeout_s,
             "gateway_enabled": gateway_enabled,
@@ -902,11 +916,6 @@ def run(
                     "Do not set 'gateway_url' when using --port-profile-id-list. "
                     "Gateway URL is derived from each profile."
                 )
-            if configured_vllm_log_value is True:
-                raise ValueError(
-                    "--vllm-log is not supported with --port-profile-id-list. "
-                    "Use --no-vllm-log in cluster mode."
-                )
 
             profile_pairs = list(
                 zip(
@@ -921,6 +930,8 @@ def run(
             resolved_model_context_window = None
             derived_agent_base_url = None
             first_gateway_url: str | None = None
+            first_vllm_log_endpoint: str | None = None
+            resolved_vllm_log_enabled: bool | None = None
             for profile_id, profile_max_concurrent in profile_pairs:
                 profile_runtime = resolve_harbor_runtime(
                     forwarded_args_from_config=forwarded_args_from_config,
@@ -930,7 +941,7 @@ def run(
                     gateway_enabled=gateway_value,
                     configured_gateway_url=None,
                     gateway_timeout_s=gateway_timeout_s_value,
-                    configured_vllm_log=False,
+                    configured_vllm_log=configured_vllm_log_value,
                 )
                 if resolved_agent_name is None:
                     resolved_agent_name = profile_runtime.resolved_agent_name
@@ -946,8 +957,20 @@ def run(
                         "Resolved served model differs across port profiles in cluster mode. "
                         "All selected profiles must serve the same model."
                     )
+                if resolved_vllm_log_enabled is None:
+                    resolved_vllm_log_enabled = profile_runtime.vllm_log_enabled
+                elif profile_runtime.vllm_log_enabled != resolved_vllm_log_enabled:
+                    raise ValueError(
+                        "Resolved vllm_log setting differs across port profiles in cluster mode."
+                    )
                 if first_gateway_url is None:
                     first_gateway_url = profile_runtime.gateway_url
+                if (
+                    profile_runtime.vllm_log_enabled
+                    and first_vllm_log_endpoint is None
+                    and profile_runtime.vllm_log_endpoint.strip()
+                ):
+                    first_vllm_log_endpoint = profile_runtime.vllm_log_endpoint
                 launch_profiles_value.append(
                     LaunchProfileConfig(
                         port_profile_id=profile_id,
@@ -957,14 +980,19 @@ def run(
                         gateway_base_url=(
                             profile_runtime.gateway_url if gateway_value else None
                         ),
+                        vllm_log_endpoint=(
+                            profile_runtime.vllm_log_endpoint
+                            if profile_runtime.vllm_log_enabled
+                            else None
+                        ),
                     )
                 )
 
             synthesized_forwarded_args = []
             launch_env = {}
             gateway_url_value = first_gateway_url or "http://127.0.0.1:11457"
-            vllm_log_value = False
-            vllm_log_endpoint_value = ""
+            vllm_log_value = bool(resolved_vllm_log_enabled)
+            vllm_log_endpoint_value = first_vllm_log_endpoint or ""
         else:
             harbor_runtime = resolve_harbor_runtime(
                 forwarded_args_from_config=forwarded_args_from_config,

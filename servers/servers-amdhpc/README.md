@@ -57,6 +57,7 @@ python3 servers/servers-amdhpc/client.py status -P 0
 python3 servers/servers-amdhpc/client.py start -P 0 -p mi3008x -m kimi_k2_5
 python3 servers/servers-amdhpc/client.py start -P 0 -p mi3008x -m kimi_k2_5 -b
 python3 servers/servers-amdhpc/client.py start-group -g bench_a -L 0,1,2,3 -p mi3008x -m kimi_k2_5
+python3 servers/servers-amdhpc/client.py start-group -g bench_a -L 0,1,2,3,4 -p mi2104x -m qwen3_coder_30b
 python3 servers/servers-amdhpc/client.py group-status -g bench_a
 python3 servers/servers-amdhpc/client.py up -P 0
 python3 servers/servers-amdhpc/client.py wait-up -P 0 --timeout-seconds 900
@@ -146,7 +147,9 @@ Optional overrides:
 - `logs`: tail slurm + jaeger + vllm logs for the selected port profile.
 - `logs` for grouped runs uses profile-specific logs (`jaeger.<job_id>.p<profile>.log`, `vllm.<job_id>.p<profile>.log`).
 - `alive-profiles`: scan all configured port profiles and report which profiles are alive.
-- `alive-profiles`: each entry includes `group_name` and `group_profiles` when that profile belongs to an active grouped run.
+- `alive-profiles`: grouped info is deduplicated into top-level `data.groups`; profile entries keep only `group_name`.
+- `alive-profiles`: per-profile output is compact (status summary fields) and no longer embeds full raw `/status` payloads.
+- `alive-profiles --verbose`: include full raw per-profile payloads under `profiles[*].raw`.
 - `stop-alive-profiles`: group-aware stop; grouped profiles are stopped through one `group/stop` call per group.
 - `status`: show the selected port profile status plus the full active-profile map and configured partitions/models.
 - Single-profile commands (`-P`) are rejected for profiles that belong to an active group (`start`, `stop`, `stop-poll`, `up`, `wait-up`, `logs`).

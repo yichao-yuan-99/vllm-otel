@@ -26,26 +26,23 @@ Compile profile to plan:
 ```bash
 python -m replayer compile \
   --job-dir tests/output/con-driver/job-<timestamp> \
-  --agent-timeout-s 3000 \
+  --port-profile-id 0 \
   --plan-out tests/output/replay-plan.json
 ```
-
-If the profiled job was recorded with `runtime.port_profile_id`, compile should
-reuse that port profile automatically. `--port-profile-id` may override it.
 
 Replay from compiled plan:
 
 ```bash
 python -m replayer replay \
   --plan tests/output/replay-plan.json \
-  --output-dir tests/output/replay-run \
-  --gateway-lifecycle auto
+  --port-profile-id 0 \
+  --output-dir tests/output/replay-run
 ```
 
-If the compiled plan includes `replay_target.port_profile_id`, replay should
-resolve `gateway_url`, `api_base`, and `tokenize_endpoint` from
-`configs/port_profiles.toml`. Replay should use `gateway_port` (raw listener),
-not `gateway_parse_port`. `--port-profile-id` may override the plan.
+Replay resolves `gateway_url`, `api_base`, and `tokenize_endpoint` from
+`configs/port_profiles.toml` and requires `--port-profile-id`. Replay should use
+`gateway_port` (raw listener), not `gateway_parse_port`.
+Replay ignores legacy URL values stored in the plan for runtime routing.
 
 ## Function 1: `compile_profile_to_plan`
 
@@ -61,10 +58,12 @@ Output:
 Behavior:
 
 - validate required profile files
+- discover gateway traces from both:
+  - `gateway-output/run_*`
+  - `gateway-output/profile-*/run_*` (cluster mode)
 - resolve backend-aware replay target fields
-- for `harbor`, extract gateway/model/api_base from `meta/config.toml` and fallback to `meta/results.json` command parsing when needed
-- when `runtime.port_profile_id` is present, resolve replay endpoints from the
-  shared port profile convention instead of hard-coding host ports
+- for `harbor`, extract model from `meta/config.toml` and fallback to `meta/results.json` command parsing when needed
+- resolve compile-time tokenizer endpoint from `--port-profile-id`
 - replay compares raw vLLM responses and does not apply reasoning-specific
   parsing during deterministic comparison
 - resolve `T0` (job start) from `meta/run_manifest.json.started_at` with configured fallback

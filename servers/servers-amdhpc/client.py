@@ -596,11 +596,13 @@ def _collect_profile_liveness(
     ctx: typer.Context,
     *,
     include_remote_status: bool = True,
+    verbose: bool = False,
 ) -> dict[str, Any]:
     runtime_dir = _clientd_runtime_dir(ctx)
     has_server_override = _has_server_url_override(ctx)
     profiles = load_port_profiles()
     profile_entries: list[dict[str, Any]] = []
+    group_entries: dict[str, dict[str, Any]] = {}
 
     for profile_id, profile in sorted(profiles.items()):
         clientd_payload = client_d_status(
@@ -629,7 +631,7 @@ def _collect_profile_liveness(
                 if isinstance(status_data, dict):
                     active_job_data = status_data.get("active_job")
                     if isinstance(active_job_data, dict):
-                        active_job = active_job_data
+                        active_job = dict(active_job_data)
                     active_job_status_raw = status_data.get("active_job_status")
                     if isinstance(active_job_status_raw, str):
                         active_job_status = active_job_status_raw
@@ -637,47 +639,157 @@ def _collect_profile_liveness(
                 status_error = str(status_payload.get("message", "status request failed"))
 
         group_name: str | None = None
-        group_profiles: list[int] = []
         if isinstance(active_job, dict):
-            group_name_raw = active_job.get("group_name")
+            group_name_raw = active_job.pop("group_name", None)
             if isinstance(group_name_raw, str) and group_name_raw.strip():
                 group_name = group_name_raw.strip()
-            group_profiles_raw = active_job.get("group_profiles")
-            if isinstance(group_profiles_raw, list):
-                group_profiles = [
+            group_profiles_raw = active_job.pop("group_profiles", None)
+            group_profiles = (
+                [
                     int(value)
                     for value in group_profiles_raw
                     if isinstance(value, int) and not isinstance(value, bool)
                 ]
+                if isinstance(group_profiles_raw, list)
+                else []
+            )
+            if group_name is not None:
+                group_entry = group_entries.setdefault(
+                    group_name,
+                    {
+                        "group_name": group_name,
+                        "profiles": [],
+                        "job_id": active_job.get("job_id"),
+                        "active_job_status_by_profile": {},
+                    },
+                )
+                profiles_payload = group_entry.get("profiles")
+                if isinstance(profiles_payload, list):
+                    profiles_payload.append(profile_id)
+                    profiles_payload.extend(group_profiles)
+                active_status_payload = group_entry.get("active_job_status_by_profile")
+                if isinstance(active_status_payload, dict):
+                    active_status_payload[str(profile_id)] = active_job_status
+
+        compact_active_job: dict[str, Any] | None = None
+        if isinstance(active_job, dict):
+            compact_active_job = {
+                "job_id": active_job.get("job_id"),
+                "partition": active_job.get("partition"),
+                "model": active_job.get("model"),
+                "submitted_at": active_job.get("submitted_at"),
+                "service_port": active_job.get("service_port"),
+                "jaeger_otlp_port": active_job.get("jaeger_otlp_port"),
+                "jaeger_ui_port": active_job.get("jaeger_ui_port"),
+            }
+
+        clientd_record = (
+            clientd_data.get("record")
+            if isinstance(clientd_data, dict)
+            else None
+        )
+        clientd_record = clientd_record if isinstance(clientd_record, dict) else {}
+
+        clientd_summary = {
+            "running": clientd_running,
+            "pid": clientd_data.get("pid") if isinstance(clientd_data, dict) else None,
+            "ssh_target": clientd_record.get("ssh_target"),
+            "started_at": clientd_record.get("started_at"),
+            "ports": clientd_record.get("ports"),
+            "server_url": clientd_data.get("server_url") if isinstance(clientd_data, dict) else None,
+        }
+        gateway_summary = {
+            "running": gateway_running,
+            "pid": gateway_status.get("pid"),
+            "started_at": (
+                gateway_status.get("record", {}).get("started_at")
+                if isinstance(gateway_status.get("record"), dict)
+                else None
+            ),
+            "config_path": (
+                gateway_status.get("record", {}).get("config_path")
+                if isinstance(gateway_status.get("record"), dict)
+                else None
+            ),
+            "host": (
+                gateway_status.get("record", {}).get("host")
+                if isinstance(gateway_status.get("record"), dict)
+                else None
+            ),
+        }
 
         alive = bool(clientd_running or gateway_running or active_job is not None)
+        status_ok = _is_ok(status_payload) if isinstance(status_payload, dict) else None
+        status_code = (
+            int(status_payload.get("code"))
+            if isinstance(status_payload, dict) and isinstance(status_payload.get("code"), int)
+            else None
+        )
+        status_message = (
+            str(status_payload.get("message"))
+            if isinstance(status_payload, dict) and isinstance(status_payload.get("message"), str)
+            else None
+        )
         profile_entries.append(
             {
                 "port_profile": profile_id,
                 "label": profile.label,
                 "alive": alive,
                 "group_name": group_name,
-                "group_profiles": group_profiles,
                 "clientd_running": clientd_running,
                 "gateway_running": gateway_running,
-                "active_job": active_job,
+                "active_job": compact_active_job,
                 "active_job_status": active_job_status,
                 "status_error": status_error,
+                "status_ok": status_ok,
+                "status_code": status_code,
+                "status_message": status_message,
+                "clientd": clientd_summary,
+                "gateway": gateway_summary,
+            }
+        )
+        if verbose:
+            profile_entries[-1]["raw"] = {
+                "active_job": active_job,
                 "clientd": clientd_data if isinstance(clientd_data, dict) else {},
                 "gateway": gateway_status,
                 "status": status_payload,
             }
-        )
 
     alive_profile_ids = [
         int(entry["port_profile"])
         for entry in profile_entries
         if bool(entry.get("alive"))
     ]
+    normalized_group_entries: dict[str, dict[str, Any]] = {}
+    for group_name, entry in group_entries.items():
+        profiles_payload = entry.get("profiles")
+        normalized_profiles = (
+            _sorted_unique_profile_ids(
+                [
+                    int(value)
+                    for value in profiles_payload
+                    if isinstance(value, int) and not isinstance(value, bool)
+                ]
+            )
+            if isinstance(profiles_payload, list)
+            else []
+        )
+        normalized_group_entries[group_name] = {
+            "group_name": group_name,
+            "profiles": normalized_profiles,
+            "job_id": entry.get("job_id"),
+            "active_job_status_by_profile": (
+                entry.get("active_job_status_by_profile")
+                if isinstance(entry.get("active_job_status_by_profile"), dict)
+                else {}
+            ),
+        }
     return {
         "checked_profiles": [int(profile_id) for profile_id in sorted(profiles.keys())],
         "alive_profile_ids": alive_profile_ids,
         "alive_count": len(alive_profile_ids),
+        "groups": normalized_group_entries,
         "profiles": profile_entries,
     }
 
@@ -1997,6 +2109,11 @@ def alive_profiles(
             "or when --server-url is set."
         ),
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        help="Include full raw per-profile status payloads.",
+    ),
 ) -> None:
     """List all configured port profiles and mark which ones are currently alive."""
     payload = {
@@ -2006,6 +2123,7 @@ def alive_profiles(
         "data": _collect_profile_liveness(
             ctx,
             include_remote_status=include_remote_status,
+            verbose=verbose,
         ),
     }
     _print_json(payload)
@@ -2032,6 +2150,7 @@ def stop_alive_profiles(
     liveness = _collect_profile_liveness(
         ctx,
         include_remote_status=include_remote_status,
+        verbose=False,
     )
     alive_profile_ids = [int(value) for value in liveness.get("alive_profile_ids", [])]
     if not alive_profile_ids:
@@ -2061,6 +2180,8 @@ def stop_alive_profiles(
 
     results: dict[str, dict[str, Any]] = {}
     alive_profile_id_set = set(alive_profile_ids)
+    groups_payload = liveness.get("groups")
+    groups_by_name = groups_payload if isinstance(groups_payload, dict) else {}
     stopped_profile_ids: set[int] = set()
     failed_profile_ids: set[int] = set()
     handled_profiles: set[int] = set()
@@ -2077,7 +2198,12 @@ def stop_alive_profiles(
         )
 
         if group_name is not None:
-            group_profiles_raw = profile_liveness.get("group_profiles")
+            group_payload = groups_by_name.get(group_name)
+            group_profiles_raw = (
+                group_payload.get("profiles")
+                if isinstance(group_payload, dict)
+                else []
+            )
             group_profile_ids = (
                 [
                     int(value)
@@ -2085,7 +2211,7 @@ def stop_alive_profiles(
                     if isinstance(value, int) and not isinstance(value, bool)
                 ]
                 if isinstance(group_profiles_raw, list)
-                else []
+                else [profile_id]
             )
             group_profile_ids.append(profile_id)
             group_profile_ids = [

@@ -124,7 +124,7 @@ if [[ -n "${MAX_CONCURRENT}" ]]; then
   fi
 fi
 
-mkdir -p "${REPO_ROOT}/experiments/results/record"
+mkdir -p "${REPO_ROOT}/results/record"
 
 echo "=== record dataset: ${DATASET} ==="
 echo "config: ${CONFIG_PATH}"

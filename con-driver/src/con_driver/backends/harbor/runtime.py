@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Sequence
+from urllib.parse import urlsplit, urlunsplit
 
 from con_driver.runtime_resolution import (
     build_endpoint_env,
@@ -19,6 +21,10 @@ _AGENT_OPTION_NAMES = {"--agent"}
 _MODEL_OPTION_NAMES = {"--model"}
 _AGENT_KWARG_OPTION_NAMES = {"--agent-kwarg", "--ak"}
 _AUTO_MANAGED_AGENT_KWARGS = {"api_base", "base_url", "model_info"}
+_CONTAINER_HOST_REWRITE_AGENTS = {"mini-swe-agent"}
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_DEFAULT_CONTAINER_HOST = "192.168.5.1"
+_CONTAINER_HOST_ENV = "CON_DRIVER_CONTAINER_HOST"
 
 
 @dataclass(frozen=True)
@@ -94,6 +100,25 @@ def _append_agent_kwarg(tokens: list[str], *, key: str, value: str) -> None:
     tokens.extend(["--agent-kwarg", f"{key}={value}"])
 
 
+def _resolve_forwarded_model_name(*, agent_name: str, served_model_name: str) -> str:
+    _ = agent_name
+    return f"hosted_vllm/{served_model_name}"
+
+
+def _container_reachable_base_url(base_url: str | None) -> str | None:
+    if base_url is None:
+        return None
+    parsed = urlsplit(base_url)
+    host = parsed.hostname
+    if host not in _LOOPBACK_HOSTS:
+        return base_url
+    container_host = os.environ.get(_CONTAINER_HOST_ENV, _DEFAULT_CONTAINER_HOST).strip()
+    if not container_host:
+        container_host = _DEFAULT_CONTAINER_HOST
+    netloc = container_host if parsed.port is None else f"{container_host}:{parsed.port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+
 def resolve_harbor_runtime(
     *,
     forwarded_args_from_config: Sequence[str],
@@ -116,10 +141,11 @@ def resolve_harbor_runtime(
         if resolved_port_profile is not None
         else None
     )
+    service_base_url = None
     agent_base_url = None
     if resolved_port_profile is not None:
         service_base_url = derived_gateway_base_url if gateway_enabled else derived_vllm_base_url
-        agent_base_url = f"{service_base_url}/v1"
+        agent_base_url = f"{service_base_url}/v1" if service_base_url is not None else None
 
     gateway_url = configured_gateway_url or derived_gateway_base_url or "http://127.0.0.1:11457"
     vllm_log_enabled = (
@@ -153,6 +179,14 @@ def resolve_harbor_runtime(
         raise ValueError(
             "Top-level 'agent'/'agent_name' requires 'port_profile_id' so con-driver "
             "can resolve the serving endpoint and model."
+        )
+    if (
+        resolved_agent_name in _CONTAINER_HOST_REWRITE_AGENTS
+        and service_base_url is not None
+    ):
+        reachable_base_url = _container_reachable_base_url(service_base_url)
+        agent_base_url = (
+            f"{reachable_base_url}/v1" if reachable_base_url is not None else None
         )
 
     forwarded_model_name = _extract_single_forwarded_option_value(
@@ -201,7 +235,15 @@ def resolve_harbor_runtime(
 
         if forwarded_agent_name is None:
             synthesized_forwarded_args.extend(["--agent", resolved_agent_name])
-        synthesized_forwarded_args.extend(["--model", f"hosted_vllm/{resolved_model_name}"])
+        synthesized_forwarded_args.extend(
+            [
+                "--model",
+                _resolve_forwarded_model_name(
+                    agent_name=resolved_agent_name,
+                    served_model_name=resolved_model_name,
+                ),
+            ]
+        )
         _append_agent_kwarg(
             synthesized_forwarded_args,
             key="api_base",

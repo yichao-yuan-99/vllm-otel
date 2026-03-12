@@ -81,3 +81,83 @@ jaeger_api_port = 65284
 jaeger_otlp_port = 64319
 gateway_port = 63257
 gateway_parse_port = 63171
+
+[profiles."10"]
+label = "random-10"
+vllm_port = 13231
+jaeger_api_port = 15784
+jaeger_otlp_port = 14319
+gateway_port = 13257
+gateway_parse_port = 13173
+
+[profiles."11"]
+label = "random-11"
+vllm_port = 14231
+jaeger_api_port = 16784
+jaeger_otlp_port = 15319
+gateway_port = 14257
+gateway_parse_port = 14173
+
+[profiles."12"]
+label = "random-12"
+vllm_port = 15231
+jaeger_api_port = 17784
+jaeger_otlp_port = 16319
+gateway_port = 15257
+gateway_parse_port = 15173
+
+[profiles."13"]
+label = "random-13"
+vllm_port = 16231
+jaeger_api_port = 18784
+jaeger_otlp_port = 17319
+gateway_port = 16257
+gateway_parse_port = 16173
+
+[profiles."14"]
+label = "random-14"
+vllm_port = 17231
+jaeger_api_port = 19784
+jaeger_otlp_port = 18319
+gateway_port = 17257
+gateway_parse_port = 17173
+
+[profiles."15"]
+label = "random-15"
+vllm_port = 18231
+jaeger_api_port = 20784
+jaeger_otlp_port = 19319
+gateway_port = 18257
+gateway_parse_port = 18173
+
+[profiles."16"]
+label = "random-16"
+vllm_port = 19231
+jaeger_api_port = 21784
+jaeger_otlp_port = 20319
+gateway_port = 19257
+gateway_parse_port = 19173
+
+[profiles."17"]
+label = "random-17"
+vllm_port = 20231
+jaeger_api_port = 22784
+jaeger_otlp_port = 21319
+gateway_port = 20257
+gateway_parse_port = 20173
+
+[profiles."18"]
+label = "random-18"
+vllm_port = 21231
+jaeger_api_port = 23784
+jaeger_otlp_port = 22319
+gateway_port = 21257
+gateway_parse_port = 21173
+
+[profiles."19"]
+label = "random-19"
+vllm_port = 22231
+jaeger_api_port = 24784
+jaeger_otlp_port = 23319
+gateway_port = 22257
+gateway_parse_port = 22173

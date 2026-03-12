@@ -1,264 +1,204 @@
-# End-to-End Test Workflow
+# End-to-End Test Workflow (AMDHPC, Single Node)
 
-This document reflects the current repo behavior for:
+This runbook is aligned with the current codebase and uses:
 
-- `servers/servers-docker`
-- host `gateway`
+- `servers/servers-amdhpc` control plane
+- single profile (`-P <id>`)
+- partition `mi2104x` (single-node flow; use `start`, not `start-group`)
 - host `con-driver`
 - `replayer`
 
-All examples below use `port_profile_id = 3`.
-
-## Port Profile 3
-
-From `configs/port_profiles.toml`:
-
-- `vllm_port = 40823`
-- `gateway_port = 40857`
-- `gateway_parse_port = 48171`
-- `jaeger_api_port = 44612`
-- `jaeger_otlp_port = 41735`
-
-Use these checks:
-
-```bash
-curl -s http://localhost:40823/v1/models
-curl -s http://localhost:40857/healthz
-curl -s http://localhost:48171/healthz
-```
-
-Do not use `http://localhost:40823/healthz` for vLLM; in this repo the vLLM
-readiness check is `/v1/models`, not `/healthz`.
-
-## Current Behavior Summary
-
-- Gateway always binds both `gateway_port` and `gateway_parse_port`.
-- If the served model has no configured `reasoning_parser`, the parse-port
-  listener is still present but behaves the same as the raw port.
-- Gateway artifacts always record the raw vLLM response in
-  `requests/model_inference.jsonl`, even if the client talked to
-  `gateway_parse_port`.
-- `con-driver` uses `gateway_parse_port` by default when `port_profile_id` is
-  set.
-- `replayer` compiles and replays against the raw `gateway_port`, not the parse
-  port.
-- Harbor dataset downloads are cached in
-  `con-driver/.cache/harbor-datasets/`, not inside `results_dir`.
-- Gateway does not impose a client-side timeout on forwarded vLLM requests.
-- If the downstream client disconnects, gateway cancels the upstream vLLM
-  request as well.
-
-## 1. Start vLLM + Jaeger
+## 0) Prerequisites
 
 From repo root:
 
 ```bash
 cp gateway/config.example.toml gateway/config.toml
+python3 -m pip install -e ./servers/servers-amdhpc
 ```
 
-Export any required Hugging Face environment variables in the current shell,
-then start the Docker runtime on profile `3`:
+Set required environment variables in your shell before startup (for example
+`HF_HOME`, `HF_HUB_CACHE`, optional `HF_TOKEN`, and any image override vars
+used by your cluster setup).
+
+## 1) Choose Port Profile And Export Ports
+
+Pick one profile ID (example uses `0`):
 
 ```bash
-python3 servers/servers-docker/client.py start -m qwen3_coder_30b -p 3 -l h100_nvl_gpu23 -b
+export PORT_PROFILE_ID=0
 ```
 
-Check vLLM:
+Load profile ports from `configs/port_profiles.toml`:
 
 ```bash
-curl -s http://localhost:40823/v1/models
+eval "$(python3 - <<'PY'
+import os
+import pathlib
+import tomllib
+
+profile_id = str(int(os.environ["PORT_PROFILE_ID"]))
+cfg = tomllib.loads(pathlib.Path("configs/port_profiles.toml").read_text(encoding="utf-8"))
+profile = cfg["profiles"][profile_id]
+print(f'export VLLM_PORT={profile["vllm_port"]}')
+print(f'export GATEWAY_PORT={profile["gateway_port"]}')
+print(f'export GATEWAY_PARSE_PORT={profile["gateway_parse_port"]}')
+print(f'export JAEGER_API_PORT={profile["jaeger_api_port"]}')
+print(f'export JAEGER_OTLP_PORT={profile["jaeger_otlp_port"]}')
+PY
+)"
 ```
 
-## 2. Start Gateway On Host
-
-In a separate terminal:
+Optional quick print:
 
 ```bash
-python3 -m gateway start --config gateway/config.toml --port-profile-id 3
+echo "profile=$PORT_PROFILE_ID vllm=$VLLM_PORT gw=$GATEWAY_PORT parse=$GATEWAY_PARSE_PORT jaeger_ui=$JAEGER_API_PORT jaeger_otlp=$JAEGER_OTLP_PORT"
 ```
 
-Check both listeners:
+## 2) Start AMDHPC Control Server (Login Node)
+
+Run this on the AMD HPC login node (keep it running):
 
 ```bash
-curl -s http://localhost:40857/healthz
-curl -s http://localhost:48171/healthz
+python3 servers/servers-amdhpc/server.py --config servers/servers-amdhpc/server_config.toml
 ```
 
-Listener semantics:
+If you launch from your local machine, run it through your SSH target in a
+persistent shell/session (for example `tmux`).
 
-- `40857`: raw gateway listener
-- `48171`: parsed gateway listener
+## 3) Start Single-Node Runtime For The Selected Profile
 
-If the served model has no configured reasoning parser, both ports still exist
-but their client-visible behavior is the same.
+From repo root on your local machine:
 
-## 3. Run con-driver
+```bash
+python3 servers/servers-amdhpc/client.py start \
+  -P "$PORT_PROFILE_ID" \
+  -p mi2104x \
+  -m qwen3_coder_30b \
+  -b
+```
 
-Use the checked-in gateway config and override the profile on the CLI:
+Notes:
+
+- This is single-profile/single-node flow (no `start-group`).
+- Client startup also launches a local gateway daemon for the selected profile.
+- Default SSH target is `amd-hpc`; override with `-t <ssh-target>` if needed.
+
+Health checks:
+
+```bash
+curl -s "http://127.0.0.1:${VLLM_PORT}/v1/models"
+curl -s "http://127.0.0.1:${GATEWAY_PORT}/healthz"
+curl -s "http://127.0.0.1:${GATEWAY_PARSE_PORT}/healthz"
+```
+
+## 4) Run con-driver Profile Job
 
 ```bash
 mkdir -p tests/output
 bash con-driver/run_con_driver.sh \
   --config con-driver/tests/config.gateway.toml \
-  --port-profile-id 3
+  --port-profile-id "$PORT_PROFILE_ID"
 ```
 
-Notes:
-
-- `con-driver` runs from the shared `./.venv`.
-- Do not pass `api_key` manually; `con-driver` injects a unique token per run.
-- Harbor datasets are downloaded into the shared cache:
-
-```text
-con-driver/.cache/harbor-datasets/
-```
-
-## 4. Inspect The Latest con-driver Run
+Resolve the latest run directory:
 
 ```bash
 RUN_DIR="$(ls -dt tests/output/con-driver/job-* tests/output/con-driver/*-* 2>/dev/null | head -n1)"
 echo "$RUN_DIR"
+```
+
+Sanity checks:
+
+```bash
 cat "$RUN_DIR/meta/run_manifest.json"
 cat "$RUN_DIR/meta/events.jsonl"
 cat "$RUN_DIR/meta/results.json"
 ```
 
-What to check:
-
-- `run_manifest.json` has `gateway_enabled: true`
-- `run_manifest.json` has non-empty `gateway_output_location`
-- `events.jsonl` includes `gateway_job_start` and `gateway_job_end`
-- `results.json` launch commands go through `python -m con_driver.gateway_wrapper`
-- launch commands include an appended `api_key=condrv_...`
-
-## 5. Inspect Gateway Artifacts
-
-Gateway artifacts live inside each con-driver run:
-
-```bash
-ART_DIR="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))[\"gateway_output_location\"])' "$RUN_DIR/meta/run_manifest.json")"
-echo "$ART_DIR"
-find "$ART_DIR" -maxdepth 2 -type f | sort
-```
-
-Pick one artifact directory:
-
-```bash
-RUN_ART_DIR="$(find "$ART_DIR" -maxdepth 1 -type d -name 'run_*' | head -n1)"
-echo "$RUN_ART_DIR"
-```
-
-Inspect the files:
-
-```bash
-cat "$RUN_ART_DIR/manifest.json"
-cat "$RUN_ART_DIR/events/lifecycle.jsonl"
-cat "$RUN_ART_DIR/requests/model_inference.jsonl"
-```
-
-Important artifact contract:
-
-- `requests/model_inference.jsonl` stores the exact raw vLLM `response`
-- this is true even when the client used `gateway_parse_port`
-- if the parse listener rewrote the client-visible payload, that rewrite is not
-  what gets stored in the artifact
-
-## 6. Check Jaeger
-
-Use the trace ID from the artifact:
-
-```bash
-TRACE_ID="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))[\"trace_id\"])' "$RUN_ART_DIR/manifest.json")"
-echo "$TRACE_ID"
-```
-
-Open Jaeger at:
-
-```text
-http://localhost:44612
-```
-
-Expected shape:
-
-- `agent_run` root span
-- repeated `model_inference` spans for gateway -> vLLM calls
-- `agent_action` spans between inference calls
-- vLLM-side spans attached to the propagated trace context
-
-## 7. Compile Replay Plan
-
-Compile from the full profiled con-driver job:
+## 5) Compile Replay Plan
 
 ```bash
 python -m replayer compile \
   --job-dir "$RUN_DIR" \
-  --port-profile-id 3 \
-  --agent-timeout-s 3000 \
+  --port-profile-id "$PORT_PROFILE_ID" \
   --plan-out "$RUN_DIR/replay-plan.json"
 ```
 
-Check the compiled target:
+Compile now derives tokenizer endpoint from `--port-profile-id`; there is no
+backend override and no compile-time `--agent-timeout-s`.
+
+## 6) Reallocate Runtime For Clean vLLM Cache
+
+Before replay, force a fresh node allocation so replay does not reuse warm KV
+cache state from profiling.
+
+Deallocate current runtime:
 
 ```bash
-cat "$RUN_DIR/replay-plan.json"
+python3 servers/servers-amdhpc/client.py stop -P "$PORT_PROFILE_ID"
 ```
 
-Current replay contract:
-
-- replay targets raw gateway `40857`
-- replay does not target parsed gateway `48171`
-- replay compares against the raw artifact payloads recorded by gateway
-
-## 8. Run Replay
+Allocate again on the same profile/partition/model:
 
 ```bash
-REPLAY_OUT="tests/output/replayer/$(basename "$RUN_DIR").replayed-profile3"
+python3 servers/servers-amdhpc/client.py start \
+  -P "$PORT_PROFILE_ID" \
+  -p mi2104x \
+  -m qwen3_coder_30b \
+  -b
+```
+
+Quick readiness checks:
+
+```bash
+curl -s "http://127.0.0.1:${VLLM_PORT}/v1/models"
+curl -s "http://127.0.0.1:${GATEWAY_PORT}/healthz"
+```
+
+## 7) Replay And Validate
+
+Replay:
+
+```bash
+REPLAY_OUT="tests/output/replayer/$(basename "$RUN_DIR").replayed-profile${PORT_PROFILE_ID}"
 python -m replayer replay \
   --plan "$RUN_DIR/replay-plan.json" \
-  --port-profile-id 3 \
-  --output-dir "$REPLAY_OUT" \
-  --gateway-lifecycle auto
+  --port-profile-id "$PORT_PROFILE_ID" \
+  --output-dir "$REPLAY_OUT"
 ```
 
-Inspect replay output:
+Inspect replay outputs:
 
 ```bash
 cat "$REPLAY_OUT/replay/summary.json"
 find "$REPLAY_OUT/replay/workers" -maxdepth 1 -type f | sort
 ```
 
-## 9. Validate Replay
+Validate:
 
 ```bash
 python -m replayer.validate \
   --source-job-dir "$RUN_DIR" \
   --replay-run-dir "$REPLAY_OUT" \
   --report-out "$REPLAY_OUT/replay/validation-report.json"
-```
-
-Inspect:
-
-```bash
 cat "$REPLAY_OUT/replay/validation-report.json"
 ```
 
-## 10. Logs And Cleanup
+## 8) Logs And Cleanup
 
-Docker logs:
-
-```bash
-python3 servers/servers-docker/client.py logs -n 200
-```
-
-Direct vLLM container logs:
+Inspect current profile status/logs:
 
 ```bash
-docker logs --tail 200 vllm-openai-otel-lp
+python3 servers/servers-amdhpc/client.py status -P "$PORT_PROFILE_ID"
+python3 servers/servers-amdhpc/client.py logs -P "$PORT_PROFILE_ID" -n 200
 ```
 
-Stop the Docker runtime:
+Stop services and local daemons for this profile:
 
 ```bash
-python3 servers/servers-docker/client.py stop -b
-python3 servers/servers-docker/client.py daemon-stop
+python3 servers/servers-amdhpc/client.py stop -P "$PORT_PROFILE_ID"
 ```
+
+The `stop` flow blocks on remote shutdown, then tears down local gateway and
+client-d for that profile.

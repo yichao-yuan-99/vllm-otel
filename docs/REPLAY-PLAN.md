@@ -21,10 +21,16 @@ A full prior job directory from con-driver + gateway profiling:
 - `meta/run_manifest.json`
 - `meta/results.json`
 - `trials/trial-*/result.json`
-- `gateway-output/run_*/manifest.json`
-- `gateway-output/run_*/events/lifecycle.jsonl`
-- `gateway-output/run_*/requests/model_inference.jsonl`
-- `gateway-output/run_*/trace/jaeger_trace.json`
+- single-profile gateway layout:
+  - `gateway-output/run_*/manifest.json`
+  - `gateway-output/run_*/events/lifecycle.jsonl`
+  - `gateway-output/run_*/requests/model_inference.jsonl`
+  - `gateway-output/run_*/trace/jaeger_trace.json`
+- cluster-mode gateway layout:
+  - `gateway-output/profile-*/run_*/manifest.json`
+  - `gateway-output/profile-*/run_*/events/lifecycle.jsonl`
+  - `gateway-output/profile-*/run_*/requests/model_inference.jsonl`
+  - `gateway-output/profile-*/run_*/trace/jaeger_trace.json`
 
 ## Compiler Output
 
@@ -65,11 +71,7 @@ Rules:
     }
   },
   "replay_target": {
-    "port_profile_id": "0",
-    "gateway_url": "http://127.0.0.1:11457",
-    "api_base": "http://127.0.0.1:11457/v1",
     "model": "hosted_vllm/Qwen3-Coder-30B-A3B-Instruct",
-    "tokenize_endpoint": "http://127.0.0.1:11451/tokenize",
     "deterministic_required": true
   },
   "workers": [
@@ -122,22 +124,15 @@ Rules:
 2. Map trial -> gateway run:
    - read `--api-token` from `meta/results.json` launch command
    - hash with `sha256`
-   - match `gateway-output/run_*/manifest.json.api_token_hash`
+   - match `manifest.api_token_hash` across:
+     - `gateway-output/run_*/manifest.json`
+     - `gateway-output/profile-*/run_*/manifest.json`
 3. Detect backend from `meta/config.toml`:
    - primary: `[backend].name`
    - fallback: `[run].driver_backend`
 4. Extract target config using backend-specific rules.
    - For `harbor` backend:
-     - gateway URL: `[gateway].url`
      - model: parse `[backend].forwarded_args` for `--model <value>`
-     - api_base: parse `[backend].forwarded_args` for
-       `--agent-kwarg api_base=<url>`
-     - if `meta/config.toml[runtime].port_profile_id` is present, prefer the
-       shared port-profile convention to resolve:
-       - `replay_target.port_profile_id`
-       - `replay_target.gateway_url` using `gateway_port` (raw listener)
-       - `replay_target.api_base` using the raw gateway listener
-       - `replay_target.tokenize_endpoint`
      - if `forwarded_args` is missing/incomplete, fallback to per-launch command
        parsing in `meta/results.json[].command` with the same extraction logic.
    - For non-`harbor` backends:

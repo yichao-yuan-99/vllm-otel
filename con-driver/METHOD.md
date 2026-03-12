@@ -20,7 +20,7 @@ Provide a small, deterministic scheduler that launches many `harbor trials start
 2. If `port_profile_id` is set, resolve ports from `configs/port_profiles.toml`, probe the live served model from `vLLM /v1/models`, and synthesize Harbor model/endpoint args.
 3. Resolve Harbor command prefix and forwarded Harbor args.
 4. Prepare the task pool by downloading datasets with `harbor datasets download`.
-5. Create a run output directory and (if gateway mode is enabled) call `POST /job/start` with a per-run output location.
+5. Create a run output directory and (if gateway mode is enabled) call `POST /job/start` with a per-run output location on the active gateway endpoint(s).
 6. Build a launch plan from sampled tasks.
 7. For each launch in gateway mode:
    - generate a unique API token,
@@ -29,7 +29,7 @@ Provide a small, deterministic scheduler that launches many `harbor trials start
 8. Launch up to `max_concurrent` subprocesses using selected arrival pattern.
 9. Persist events and run manifest under `results_dir`.
 10. Compute aggregate success/failure and optional reward average from trial `result.json` files.
-11. If gateway mode is enabled, call `POST /job/end` with final run status.
+11. If gateway mode is enabled, call `POST /job/end` with final run status on the same gateway endpoint(s).
 
 ## Constraints
 

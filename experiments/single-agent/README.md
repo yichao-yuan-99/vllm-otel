@@ -49,7 +49,7 @@ Before running:
 
 1. Start the target vLLM server and gateway for port profile `4`, or pass a different `--port-profile-id`.
 2. Make sure Harbor is installed and the repo `.venv` is usable.
-3. Expect outputs under `experiments/results/record/`.
+3. Expect outputs under `results/record/`.
 
 ## Run One Dataset
 
@@ -96,15 +96,15 @@ bash experiments/single-agent/run_all.sh --port-profile-id 4 --max-concurrent 8
 
 Each dataset writes under its own results root:
 
-- `experiments/results/record/terminal-bench-2.0/`
-- `experiments/results/record/livecodebench/`
-- `experiments/results/record/dabstep/`
-- `experiments/results/record/swebench-verified/`
+- `results/record/terminal-bench-2.0/`
+- `results/record/livecodebench/`
+- `results/record/dabstep/`
+- `results/record/swebench-verified/`
 
 Each `con-driver` invocation then creates a run directory under that root,
 for example:
 
-- `experiments/results/record/terminal-bench-2.0/job-<timestamp>/`
+- `results/record/terminal-bench-2.0/job-<timestamp>/`
 
 Useful files inside each run:
 

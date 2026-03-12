@@ -20,9 +20,17 @@ Run-level extractor script:
 
 - `post-process/vllm-metrics/extract_run.py`
 - reads `<run-dir>/vllm-log/`
+- supports single-profile and cluster-mode layouts
 - extracts only `vllm*` `gauge` and `counter` series
 - writes `<run-dir>/post-processed/vllm-log/gauge-counter-timeseries.json`
 - for counters, stores deltas `v_t - v_{t-1}` with first value fixed to `0.0`
+
+Timeseries summary script:
+
+- `post-process/vllm-metrics/summarize_timeseries.py`
+- reads `<run-dir>/post-processed/vllm-log/gauge-counter-timeseries.json`
+- computes `min`, `max`, `avg` for each metric series
+- writes `<run-dir>/post-processed/vllm-log/gauge-counter-timeseries.stats.json`
 
 ## Usage
 
@@ -31,6 +39,7 @@ Typical workflow:
 1. start from a run directory that already contains `vllm-log/`
 2. optionally inspect or parse one raw scrape record
 3. extract run-level gauge/counter timeseries for downstream plotting
+4. compute run-level min/max/avg summary from extracted timeseries
 
 ### Parse One Raw Record
 
@@ -56,8 +65,12 @@ Behavior:
 
 Input:
 
-- `<run-dir>/vllm-log/blocks.index.json`
-- `<run-dir>/vllm-log/block-*.tar.gz`
+- Single-profile mode:
+  - `<run-dir>/vllm-log/blocks.index.json` (optional)
+  - `<run-dir>/vllm-log/block-*.tar.gz`
+- Cluster mode:
+  - `<run-dir>/vllm-log/profile-*/blocks.index.json` (optional)
+  - `<run-dir>/vllm-log/profile-*/block-*.tar.gz`
 
 Command:
 
@@ -91,12 +104,104 @@ Behavior:
 - converts counters to per-scrape deltas
 - writes one consolidated timeseries JSON file for visualization
 
+### Extract All Runs Under One Root Directory
+
+When you have many replay/con-driver outputs under one root path, use recursive
+discovery mode:
+
+```bash
+python post-process/vllm-metrics/extract_run.py \
+  --root-dir tests/output/con-driver
+```
+
+Discovery rule:
+
+- any subdirectory that has a direct `vllm-log/` child is treated as a run directory
+- `post-processed/vllm-log/` is ignored to avoid re-processing output directories
+
+Optional worker count:
+
+```bash
+python post-process/vllm-metrics/extract_run.py \
+  --root-dir tests/output/con-driver \
+  --max-procs 8
+```
+
+Optional dry-run:
+
+```bash
+python post-process/vllm-metrics/extract_run.py \
+  --root-dir tests/output/con-driver \
+  --dry-run
+```
+
+### Summarize Extracted Timeseries
+
+Input:
+
+- `<run-dir>/post-processed/vllm-log/gauge-counter-timeseries.json`
+
+Command:
+
+```bash
+python post-process/vllm-metrics/summarize_timeseries.py \
+  --run-dir tests/output/con-driver/job-20260301T014756Z
+```
+
+Default output:
+
+```text
+<run-dir>/post-processed/vllm-log/gauge-counter-timeseries.stats.json
+```
+
+Custom input/output:
+
+```bash
+python post-process/vllm-metrics/summarize_timeseries.py \
+  --run-dir tests/output/con-driver/job-20260301T014756Z \
+  --input tmp/gauge-counter-timeseries.json \
+  --output tmp/gauge-counter-timeseries.stats.json
+```
+
+Behavior:
+
+- reads each metric series from `gauge-counter-timeseries.json`
+- computes `min`, `max`, `avg` and `sample_count` for that series
+- writes one summary JSON file next to the extracted timeseries by default
+
+Batch summarize from a root directory:
+
+```bash
+python post-process/vllm-metrics/summarize_timeseries.py \
+  --root-dir tests/output/con-driver
+```
+
+Discovery rule:
+
+- any subdirectory that has `post-processed/vllm-log/gauge-counter-timeseries.json`
+
+Optional worker count:
+
+```bash
+python post-process/vllm-metrics/summarize_timeseries.py \
+  --root-dir tests/output/con-driver \
+  --max-procs 8
+```
+
+Optional dry-run:
+
+```bash
+python post-process/vllm-metrics/summarize_timeseries.py \
+  --root-dir tests/output/con-driver \
+  --dry-run
+```
+
 ### Downstream Step
 
 After extraction, the normal next step is visualization:
 
 ```bash
-python visualization/vllm-metrics/generate_all_figures.py \
+python post-process/visualization/vllm-metrics/generate_all_figures.py \
   --run-dir tests/output/con-driver/job-20260301T014756Z
 ```
 
@@ -112,6 +217,15 @@ Each run that enables vLLM logging writes:
 - `vllm-log/block-000000.tar.gz`
 - `vllm-log/block-000001.tar.gz`
 - ...
+
+In cluster mode, each profile has its own subdirectory:
+
+- `vllm-log/profile-0/block-000000.tar.gz`
+- `vllm-log/profile-1/block-000000.tar.gz`
+- ...
+
+When cluster mode is detected, post-process adds `port_profile_id` to metric
+labels so timeseries from different profiles do not collide.
 
 Each `.tar.gz` contains exactly one member:
 
@@ -165,6 +279,8 @@ Output shape:
 {
   "source_run_dir": "...",
   "source_vllm_log_dir": "...",
+  "cluster_mode": true,
+  "port_profile_ids": [0, 1, 2, 3, 4],
   "first_captured_at": "...",
   "metric_count": 123,
   "metrics": {

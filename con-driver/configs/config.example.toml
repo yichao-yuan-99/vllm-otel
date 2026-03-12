@@ -27,7 +27,8 @@ sample_without_replacement = true
 # gateway_job_output_root = "gateway-output"
 # gateway_timeout_s = 3600.0
 
-# vLLM metrics logging defaults to enabled when port_profile_id is set.
+# vLLM metrics logging defaults to enabled when port_profile_id or
+# port_profile_id_list is set.
 # vllm_log = true
 # vllm_log endpoint is always resolved from port_profile_id
 # vllm_log_interval_s = 1.0
@@ -40,6 +41,8 @@ sample_without_replacement = true
 #   --agent-kwarg api_base=...
 #   --agent-kwarg base_url=...
 #   --agent-kwarg model_info=...
+# For mini-swe-agent only, loopback agent endpoints are rewritten for container
+# reachability using CON_DRIVER_CONTAINER_HOST (default: 192.168.5.1).
 # Agent-specific defaults like Terminus trajectory_config live in
 # con-driver/configs/agent_defaults.toml.
 #

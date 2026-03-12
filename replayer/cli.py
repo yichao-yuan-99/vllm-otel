@@ -82,6 +82,7 @@ def write_json(path: Path, payload: Any) -> None:
 
 DEFAULT_VLLM_LOG_INTERVAL_S = 1.0
 DEFAULT_VLLM_LOG_TIMEOUT_S = 3600.0
+DEFAULT_COMPILE_TOKENIZE_TIMEOUT_S = 3600.0
 _MONITOR_INTERRUPT_GRACE_SEC = 3600.0
 _MONITOR_TERMINATE_GRACE_SEC = 3600.0
 
@@ -152,33 +153,24 @@ def create_compile_progress() -> Any:
 def resolve_replay_vllm_log_config(
     *,
     port_profile_id: int | None,
-    configured_vllm_log: bool | None,
     interval_s: float,
     timeout_s: float,
 ) -> ReplayVLLMLogConfig:
-    enabled = (
-        configured_vllm_log
-        if configured_vllm_log is not None
-        else (True if port_profile_id is not None else False)
-    )
-    endpoint = ""
-    if port_profile_id is not None:
-        from gateway.port_profiles import load_port_profile
-
-        profile = load_port_profile(port_profile_id)
-        endpoint = f"http://127.0.0.1:{profile.vllm_port}/metrics"
-    if enabled and port_profile_id is None:
+    if port_profile_id is None:
         raise ValueError(
-            "vLLM metrics logging requires replay_target.port_profile_id or "
-            "--port-profile-id so the endpoint can be resolved from "
-            "configs/port_profiles.toml."
+            "vLLM metrics logging requires --port-profile-id so the endpoint "
+            "can be resolved from configs/port_profiles.toml."
         )
+    from gateway.port_profiles import load_port_profile
+
+    profile = load_port_profile(port_profile_id)
+    endpoint = f"http://127.0.0.1:{profile.vllm_port}/metrics"
     if interval_s <= 0:
         raise ValueError("--vllm-log-interval-s must be > 0")
     if timeout_s <= 0:
         raise ValueError("--vllm-log-timeout-s must be > 0")
     return ReplayVLLMLogConfig(
-        enabled=enabled,
+        enabled=True,
         endpoint=endpoint,
         interval_s=interval_s,
         timeout_s=timeout_s,
@@ -288,6 +280,125 @@ def parse_toml(path: Path) -> dict[str, Any]:
     return data
 
 
+def parse_optional_path(value: Any, *, field_name: str) -> Path | None:
+    if value is None:
+        return None
+    if isinstance(value, Path):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        return Path(stripped)
+    raise ValueError(f"{field_name} must be a path")
+
+
+def parse_optional_str(value: Any, *, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        return stripped
+    raise ValueError(f"{field_name} must be a string")
+
+
+def parse_optional_bool(value: Any, *, field_name: str) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "y", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "n", "off"}:
+            return False
+    raise ValueError(f"{field_name} must be a boolean")
+
+
+def parse_optional_int(value: Any, *, field_name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be an integer")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return int(stripped)
+        except ValueError as exc:
+            raise ValueError(f"{field_name} must be an integer") from exc
+    raise ValueError(f"{field_name} must be an integer")
+
+
+def parse_optional_float(value: Any, *, field_name: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a number")
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return float(stripped)
+        except ValueError as exc:
+            raise ValueError(f"{field_name} must be a number") from exc
+    raise ValueError(f"{field_name} must be a number")
+
+
+def resolve_required_option(value: Any, *, option_name: str, config_key: str) -> Any:
+    if value is None:
+        raise ValueError(
+            f"Missing required option '{option_name}' (or set '{config_key}' in --config)."
+        )
+    return value
+
+
+def load_replayer_subcommand_config(
+    *,
+    config_path: Path | None,
+    section_name: str,
+) -> dict[str, Any]:
+    if config_path is None:
+        return {}
+
+    resolved_config_path = config_path.expanduser().resolve()
+    if not resolved_config_path.exists():
+        raise ValueError(f"Config file does not exist: {resolved_config_path}")
+    if not resolved_config_path.is_file():
+        raise ValueError(f"Config path is not a file: {resolved_config_path}")
+
+    config_payload = parse_toml(resolved_config_path)
+    root_payload: Any = config_payload
+    if "replayer" in config_payload:
+        root_payload = config_payload["replayer"]
+        if not isinstance(root_payload, dict):
+            raise ValueError("Config key 'replayer' must be a table")
+    elif not isinstance(root_payload, dict):
+        raise ValueError("Config root must be a table")
+
+    resolved: dict[str, Any] = {}
+    for key, value in root_payload.items():
+        if key in {"compile", "replay"} and isinstance(value, dict):
+            continue
+        resolved[key] = value
+
+    section_payload = root_payload.get(section_name)
+    if section_payload is not None:
+        if not isinstance(section_payload, dict):
+            raise ValueError(f"Config key '{section_name}' must be a table")
+        resolved.update(section_payload)
+    return resolved
+
+
 def join_url(base: str, path: str) -> str:
     return f"{base.rstrip('/')}/{path.lstrip('/')}"
 
@@ -373,23 +484,16 @@ def extract_api_token_from_command(command: list[Any]) -> str | None:
     return None
 
 
-def parse_model_and_api_base_from_tokens(tokens: list[str]) -> tuple[str | None, str | None]:
-    model_name: str | None = None
-    api_base: str | None = None
+def parse_model_from_tokens(tokens: list[str]) -> str | None:
     for idx, token in enumerate(tokens):
         if token == "--model" and idx + 1 < len(tokens):
             model_name = tokens[idx + 1]
-        if token == "--agent-kwarg" and idx + 1 < len(tokens):
-            kv_value = tokens[idx + 1]
-            if kv_value.startswith("api_base="):
-                api_base = kv_value.split("=", 1)[1]
-    return model_name, api_base
+            if isinstance(model_name, str) and model_name.strip():
+                return model_name.strip()
+    return None
 
 
-def detect_backend(config: dict[str, Any], backend_override: str | None) -> str:
-    if backend_override:
-        return backend_override.strip().lower()
-
+def detect_backend(config: dict[str, Any]) -> str:
     backend_section = config.get("backend")
     if isinstance(backend_section, dict):
         backend_name = backend_section.get("name")
@@ -514,47 +618,32 @@ def build_launch_policy_from_config(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def extract_harbor_target_config(
+def extract_harbor_compile_model(
     config: dict[str, Any],
     results_entries: list[dict[str, Any]],
-) -> tuple[str, str, str]:
-    gateway_section = config.get("gateway")
-    if not isinstance(gateway_section, dict):
-        raise ValueError("Missing [gateway] section in meta/config.toml")
-    gateway_url = gateway_section.get("url")
-    if not isinstance(gateway_url, str) or not gateway_url.strip():
-        raise ValueError("Missing [gateway].url in meta/config.toml")
-    gateway_url = gateway_url.strip()
-
+) -> str:
     model_name: str | None = None
-    api_base: str | None = None
     backend_section = config.get("backend")
     if isinstance(backend_section, dict):
         forwarded_args = backend_section.get("forwarded_args")
         if isinstance(forwarded_args, list):
             tokens = [str(item) for item in forwarded_args]
-            model_name, api_base = parse_model_and_api_base_from_tokens(tokens)
+            model_name = parse_model_from_tokens(tokens)
 
-    if not model_name or not api_base:
+    if not model_name:
         for entry in results_entries:
             command = entry.get("command")
             if not isinstance(command, list):
                 continue
             tokens = [str(item) for item in command]
-            command_model, command_api_base = parse_model_and_api_base_from_tokens(tokens)
-            if not model_name and command_model:
+            command_model = parse_model_from_tokens(tokens)
+            if command_model:
                 model_name = command_model
-            if not api_base and command_api_base:
-                api_base = command_api_base
-            if model_name and api_base:
                 break
 
     if not model_name:
         raise ValueError("Unable to extract --model for harbor backend")
-    if not api_base:
-        raise ValueError("Unable to extract api_base for harbor backend")
-
-    return gateway_url, api_base, model_name
+    return model_name
 
 
 def parse_port_profile_id(value: Any, *, field_name: str = "port_profile_id") -> int | None:
@@ -573,66 +662,19 @@ def parse_port_profile_id(value: Any, *, field_name: str = "port_profile_id") ->
     raise ValueError(f"{field_name} must be an integer, got {value!r}")
 
 
-def extract_runtime_port_profile_id(config: dict[str, Any]) -> int | None:
-    runtime_section = config.get("runtime")
-    if not isinstance(runtime_section, dict):
-        return None
-    return parse_port_profile_id(
-        runtime_section.get("port_profile_id"),
-        field_name="runtime.port_profile_id",
-    )
-
-
-def extract_gateway_enabled(config: dict[str, Any]) -> bool:
-    gateway_section = config.get("gateway")
-    if not isinstance(gateway_section, dict):
-        return False
-    raw_enabled = gateway_section.get("enabled")
-    if isinstance(raw_enabled, bool):
-        return raw_enabled
-    gateway_url = gateway_section.get("url")
-    return isinstance(gateway_url, str) and bool(gateway_url.strip())
-
-
 def resolve_compile_target(
     *,
     config: dict[str, Any],
     results_entries: list[dict[str, Any]],
-    port_profile_id_override: int | None,
-    tokenize_endpoint_override: str | None,
-) -> tuple[str, str, str, str, int | None]:
-    gateway_url, api_base, configured_model = extract_harbor_target_config(
-        config,
-        results_entries,
-    )
-    source_port_profile_id = extract_runtime_port_profile_id(config)
-    effective_port_profile_id = (
-        port_profile_id_override
-        if port_profile_id_override is not None
-        else source_port_profile_id
+    port_profile_id: int,
+) -> tuple[str, str]:
+    configured_model = extract_harbor_compile_model(config, results_entries)
+    _, _, tokenize_endpoint = build_replay_target_from_port_profile(
+        port_profile_id,
+        gateway_enabled=True,
     )
 
-    if effective_port_profile_id is not None:
-        gateway_enabled = extract_gateway_enabled(config)
-        resolved_gateway_url, resolved_api_base, resolved_tokenize_endpoint = (
-            build_replay_target_from_port_profile(
-                effective_port_profile_id,
-                gateway_enabled=gateway_enabled,
-            )
-        )
-        gateway_url = resolved_gateway_url
-        api_base = resolved_api_base
-        tokenize_endpoint = tokenize_endpoint_override or resolved_tokenize_endpoint
-    else:
-        tokenize_endpoint = tokenize_endpoint_override or "http://127.0.0.1:11451/tokenize"
-
-    return (
-        gateway_url,
-        api_base,
-        configured_model,
-        tokenize_endpoint,
-        effective_port_profile_id,
-    )
+    return configured_model, tokenize_endpoint
 
 
 def resolve_replay_target(
@@ -640,48 +682,23 @@ def resolve_replay_target(
     replay_target: dict[str, Any],
     port_profile_id_override: int | None,
 ) -> tuple[str, str | None, str | None, str | None]:
-    api_base = replay_target.get("api_base")
-    if not isinstance(api_base, str) or not api_base.strip():
-        raise ValueError("Missing replay_target.api_base in plan")
-    api_base = api_base.strip()
-
-    gateway_url = replay_target.get("gateway_url")
-    if isinstance(gateway_url, str):
-        gateway_url = gateway_url.strip() or None
-    else:
-        gateway_url = None
-
-    tokenize_endpoint = replay_target.get("tokenize_endpoint")
-    if isinstance(tokenize_endpoint, str):
-        tokenize_endpoint = tokenize_endpoint.strip() or None
-    else:
-        tokenize_endpoint = None
-
-    effective_port_profile_id = (
-        port_profile_id_override
-        if port_profile_id_override is not None
-        else parse_port_profile_id(
-            replay_target.get("port_profile_id"),
-            field_name="replay_target.port_profile_id",
-        )
+    del replay_target
+    effective_port_profile_id = parse_port_profile_id(
+        port_profile_id_override,
+        field_name="--port-profile-id",
     )
+    if effective_port_profile_id is None:
+        raise ValueError("Replay requires --port-profile-id.")
 
-    if effective_port_profile_id is not None:
-        gateway_enabled = resolve_gateway_lifecycle_mode("auto", gateway_url, api_base)
-        (
-            resolved_gateway_url,
-            api_base,
-            resolved_tokenize_endpoint,
-        ) = build_replay_target_from_port_profile(
-            effective_port_profile_id,
-            gateway_enabled=gateway_enabled,
-        )
-        gateway_url = resolved_gateway_url
-        tokenize_endpoint = resolved_tokenize_endpoint
-
-    return api_base, gateway_url, tokenize_endpoint, (
-        str(effective_port_profile_id) if effective_port_profile_id is not None else None
+    (
+        gateway_url,
+        api_base,
+        tokenize_endpoint,
+    ) = build_replay_target_from_port_profile(
+        effective_port_profile_id,
+        gateway_enabled=True,
     )
+    return api_base, gateway_url, tokenize_endpoint, str(effective_port_profile_id)
 
 
 def resolve_t0(
@@ -702,6 +719,41 @@ def resolve_t0(
             return dt, "meta/events.jsonl.gateway_job_start.time"
 
     raise ValueError("Unable to resolve T0 from run_manifest/events")
+
+
+def _parse_gateway_profile_dir_name(name: str) -> int | None:
+    prefix = "profile-"
+    if not name.startswith(prefix):
+        return None
+    raw = name[len(prefix) :]
+    if not raw:
+        return None
+    try:
+        return parse_port_profile_id(raw, field_name="gateway-output profile dir")
+    except ValueError:
+        return None
+
+
+def discover_gateway_run_dirs(
+    gateway_output_dir: Path,
+) -> list[tuple[Path, int | None]]:
+    run_dirs: list[tuple[Path, int | None]] = []
+
+    for run_dir in sorted(gateway_output_dir.glob("run_*")):
+        if run_dir.is_dir():
+            run_dirs.append((run_dir, None))
+
+    for child in sorted(gateway_output_dir.iterdir()):
+        if not child.is_dir():
+            continue
+        profile_id = _parse_gateway_profile_dir_name(child.name)
+        if profile_id is None:
+            continue
+        for run_dir in sorted(child.glob("run_*")):
+            if run_dir.is_dir():
+                run_dirs.append((run_dir, profile_id))
+
+    return run_dirs
 
 
 def extract_agent_start_time(lifecycle_records: list[dict[str, Any]]) -> datetime:
@@ -820,6 +872,66 @@ def parse_optional_positive_timeout_s(value: Any, *, field_name: str) -> float |
     if value is None:
         return None
     return parse_required_positive_timeout_s(value, field_name=field_name)
+
+
+def parse_optional_positive_int(value: Any, *, field_name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a positive integer")
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = int(value.strip())
+        except ValueError as exc:
+            raise ValueError(
+                f"{field_name} must be a positive integer, got {value!r}"
+            ) from exc
+    else:
+        raise ValueError(f"{field_name} must be a positive integer")
+    if parsed <= 0:
+        raise ValueError(f"{field_name} must be > 0")
+    return parsed
+
+
+def build_replay_worker_schedule(
+    *,
+    workers: list[dict[str, Any]],
+    num_tasks: int | None,
+) -> tuple[list[dict[str, Any]], bool]:
+    if num_tasks is None:
+        return workers, False
+    if num_tasks <= len(workers):
+        return workers[:num_tasks], False
+    if not workers:
+        raise ValueError("--num-tasks requires at least one worker in the replay plan")
+
+    scheduled_workers: list[dict[str, Any]] = []
+    worker_count = len(workers)
+    for index in range(num_tasks):
+        source_index = index % worker_count
+        wrap_round = index // worker_count
+        source_worker = workers[source_index]
+        if wrap_round == 0:
+            scheduled_workers.append(source_worker)
+            continue
+        source_worker_id = str(
+            source_worker.get("worker_id") or source_worker.get("trial_id") or "worker"
+        )
+        worker_copy = copy.deepcopy(source_worker)
+        worker_copy["worker_id"] = (
+            f"{source_worker_id}__wrap{wrap_round + 1}__task{index + 1}"
+        )
+        worker_copy["wrapped_from_worker_id"] = source_worker_id
+        worker_copy["wrapped_from_task_index"] = source_index + 1
+        source_api_token = source_worker.get("api_token")
+        if isinstance(source_api_token, str) and source_api_token:
+            worker_copy["api_token"] = (
+                f"{source_api_token}__wrap{wrap_round + 1}__task{index + 1}"
+            )
+        scheduled_workers.append(worker_copy)
+    return scheduled_workers, True
 
 
 CLIENT_DISCONNECT_ACCEPTABLE_GATEWAY_ERROR_MIN_S = 60.0
@@ -1003,9 +1115,72 @@ def compute_agent_action_deltas(
 
 
 def cmd_compile(args: argparse.Namespace) -> int:
-    job_dir = Path(args.job_dir).expanduser().resolve()
+    config_file_path = parse_optional_path(
+        getattr(args, "config", None),
+        field_name="--config",
+    )
+    compile_config = load_replayer_subcommand_config(
+        config_path=config_file_path,
+        section_name="compile",
+    )
+
+    job_dir_value = parse_optional_path(
+        (
+            args.job_dir
+            if getattr(args, "job_dir", None) is not None
+            else compile_config.get("job_dir")
+        ),
+        field_name="job_dir",
+    )
+    job_dir = resolve_required_option(
+        job_dir_value,
+        option_name="--job-dir",
+        config_key="job_dir",
+    ).expanduser().resolve()
     if not job_dir.exists() or not job_dir.is_dir():
         raise ValueError(f"Invalid --job-dir: {job_dir}")
+
+    backend_override = parse_optional_str(
+        compile_config.get("backend"),
+        field_name="backend",
+    )
+    if backend_override is not None:
+        raise ValueError(
+            "Compile backend override is no longer supported. "
+            "Backend is detected from meta/config.toml."
+        )
+    compile_port_profile_id_value = parse_optional_int(
+        (
+            args.port_profile_id
+            if getattr(args, "port_profile_id", None) is not None
+            else compile_config.get("port_profile_id")
+        ),
+        field_name="port_profile_id",
+    )
+    compile_port_profile_id = parse_port_profile_id(
+        resolve_required_option(
+            compile_port_profile_id_value,
+            option_name="--port-profile-id",
+            config_key="port_profile_id",
+        ),
+        field_name="--port-profile-id",
+    )
+    request_timeout_s_override = parse_optional_positive_timeout_s(
+        (
+            args.request_timeout_s
+            if getattr(args, "request_timeout_s", None) is not None
+            else compile_config.get("request_timeout_s")
+        ),
+        field_name="--request-timeout-s",
+    )
+    plan_out_override = parse_optional_path(
+        (
+            args.plan_out
+            if getattr(args, "plan_out", None) is not None
+            else compile_config.get("plan_out")
+        ),
+        field_name="plan_out",
+    )
 
     config_path = job_dir / "meta" / "config.toml"
     run_manifest_path = job_dir / "meta" / "run_manifest.json"
@@ -1021,25 +1196,19 @@ def cmd_compile(args: argparse.Namespace) -> int:
         raise ValueError(f"Expected list in {results_path}")
     events_records = read_jsonl(events_path)
 
-    backend_name = detect_backend(config, args.backend)
+    backend_name = detect_backend(config)
     if backend_name != "harbor":
         raise ValueError(f"unsupported backend: {backend_name!r}")
-    agent_timeout_s = parse_optional_positive_timeout_s(
-        getattr(args, "agent_timeout_s", None),
-        field_name="--agent-timeout-s",
-    )
 
-    (
-        gateway_url,
-        api_base,
-        configured_model,
-        tokenize_endpoint,
-        replay_port_profile_id,
-    ) = resolve_compile_target(
+    configured_model, tokenize_endpoint = resolve_compile_target(
         config=config,
         results_entries=results_entries,
-        port_profile_id_override=args.port_profile_id,
-        tokenize_endpoint_override=args.tokenize_endpoint,
+        port_profile_id=compile_port_profile_id,
+    )
+    request_timeout_s = (
+        request_timeout_s_override
+        if request_timeout_s_override is not None
+        else DEFAULT_COMPILE_TOKENIZE_TIMEOUT_S
     )
     launch_policy = build_launch_policy_from_config(config)
 
@@ -1067,11 +1236,16 @@ def cmd_compile(args: argparse.Namespace) -> int:
     if not gateway_output_dir.exists() or not gateway_output_dir.is_dir():
         raise ValueError(f"Missing gateway-output directory: {gateway_output_dir}")
 
-    run_infos: list[tuple[Path, dict[str, Any], int]] = []
+    discovered_run_dirs = discover_gateway_run_dirs(gateway_output_dir)
+    if not discovered_run_dirs:
+        raise ValueError(
+            "No run_* artifacts found under gateway-output. "
+            "Expected either gateway-output/run_* or gateway-output/profile-*/run_*."
+        )
+
+    run_infos: list[tuple[Path, dict[str, Any], int, int | None]] = []
     total_requests = 0
-    for run_dir in sorted(gateway_output_dir.glob("run_*")):
-        if not run_dir.is_dir():
-            continue
+    for run_dir, source_port_profile_id in discovered_run_dirs:
         manifest_path = run_dir / "manifest.json"
         require_file(manifest_path)
         run_manifest_payload = read_json(manifest_path)
@@ -1081,7 +1255,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
         request_count = 0
         if isinstance(request_count_raw, int) and not isinstance(request_count_raw, bool):
             request_count = max(0, request_count_raw)
-        run_infos.append((run_dir, run_manifest_payload, request_count))
+        run_infos.append((run_dir, run_manifest_payload, request_count, source_port_profile_id))
         total_requests += request_count
 
     worker_plans: list[dict[str, Any]] = []
@@ -1112,7 +1286,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
                 workers_total=compile_progress_state["workers_total"],
             )
 
-        for run_dir, run_manifest_payload, expected_request_count in run_infos:
+        for run_dir, run_manifest_payload, expected_request_count, _source_port_profile_id in run_infos:
             manifest_path = run_dir / "manifest.json"
             lifecycle_path = run_dir / "events" / "lifecycle.jsonl"
             requests_path = run_dir / "requests" / "model_inference.jsonl"
@@ -1197,7 +1371,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
                         index=index,
                         configured_model=configured_model,
                         tokenize_endpoint=tokenize_endpoint,
-                        request_timeout_s=args.request_timeout_s,
+                        request_timeout_s=request_timeout_s,
                         delta_agent_action_after_s=delta_agent_action_after[index],
                     )
                 )
@@ -1224,8 +1398,8 @@ def cmd_compile(args: argparse.Namespace) -> int:
     for launch_priority, worker in enumerate(worker_plans):
         worker["launch_priority"] = launch_priority
 
-    if args.plan_out:
-        plan_path = Path(args.plan_out).expanduser().resolve()
+    if plan_out_override is not None:
+        plan_path = plan_out_override.expanduser().resolve()
     else:
         plan_path = (job_dir / "replay-plan.json").resolve()
 
@@ -1237,18 +1411,12 @@ def cmd_compile(args: argparse.Namespace) -> int:
         "t0": t0_iso,
         "t0_source": t0_source,
         "replay_target": {
-            "port_profile_id": replay_port_profile_id,
-            "gateway_url": gateway_url,
-            "api_base": api_base,
             "model": configured_model,
-            "tokenize_endpoint": tokenize_endpoint,
             "deterministic_required": True,
         },
         "launch_policy": launch_policy,
         "workers": worker_plans,
     }
-    if agent_timeout_s is not None:
-        plan_payload["agent_timeout_s"] = agent_timeout_s
     write_json(plan_path, plan_payload)
 
     summary = {
@@ -1258,10 +1426,10 @@ def cmd_compile(args: argparse.Namespace) -> int:
         "launch_strategy": launch_policy.get("strategy"),
         "worker_count": len(worker_plans),
         "request_count": sum(len(worker["requests"]) for worker in worker_plans),
-        "port_profile_id": replay_port_profile_id,
+        "port_profile_id": compile_port_profile_id,
     }
-    if agent_timeout_s is not None:
-        summary["agent_timeout_s"] = agent_timeout_s
+    if config_file_path is not None:
+        summary["source_config"] = str(config_file_path.expanduser().resolve())
     print(json.dumps(summary, indent=2, ensure_ascii=True))
     return 0
 
@@ -1276,26 +1444,6 @@ def sleep_with_stop(stop_event: threading.Event, seconds: float) -> bool:
             return True
         stop_event.wait(timeout=min(0.2, remaining))
     return False
-
-
-def resolve_gateway_lifecycle_mode(
-    mode: str,
-    gateway_url: str | None,
-    api_base: str,
-) -> bool:
-    mode = mode.lower()
-    if mode == "off":
-        return False
-    if mode == "on":
-        if not gateway_url:
-            raise ValueError("gateway lifecycle mode 'on' requires gateway_url")
-        return True
-    if mode != "auto":
-        raise ValueError(f"Invalid gateway lifecycle mode: {mode}")
-    if not gateway_url:
-        return False
-    expected_prefix = f"{gateway_url.rstrip('/')}/v1"
-    return api_base.rstrip("/").startswith(expected_prefix)
 
 
 def timed_cancel_http_json(
@@ -1539,26 +1687,40 @@ def merge_dict_overlay(base: dict[str, Any], overlay: dict[str, Any]) -> dict[st
     return merged
 
 
-def parse_launch_policy_override_json(raw: str | None) -> dict[str, Any] | None:
+def parse_launch_policy_override_payload(
+    raw: Any,
+    *,
+    field_name: str = "--launch-policy-override-json",
+) -> dict[str, Any] | None:
     if raw is None:
         return None
-    stripped = raw.strip()
-    if not stripped:
-        return None
-    try:
-        parsed = json.loads(stripped)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid --launch-policy-override-json payload: {exc}") from exc
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if not stripped:
+            return None
+        try:
+            parsed: Any = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid {field_name} payload: {exc}") from exc
+    elif isinstance(raw, dict):
+        parsed = raw
+    else:
+        raise ValueError(f"{field_name} must be a JSON object or JSON string")
     if not isinstance(parsed, dict):
-        raise ValueError("--launch-policy-override-json must decode to a JSON object")
+        raise ValueError(f"{field_name} must decode to a JSON object")
     launch_policy_payload = parsed.get("launch_policy")
     if launch_policy_payload is not None:
         if not isinstance(launch_policy_payload, dict):
-            raise ValueError(
-                "--launch-policy-override-json field launch_policy must be a JSON object"
-            )
+            raise ValueError(f"{field_name} field launch_policy must be a JSON object")
         return launch_policy_payload
     return parsed
+
+
+def parse_launch_policy_override_json(raw: str | None) -> dict[str, Any] | None:
+    return parse_launch_policy_override_payload(
+        raw,
+        field_name="--launch-policy-override-json",
+    )
 
 
 def resolve_replay_launch_policy(
@@ -1643,18 +1805,148 @@ def resolve_replay_launch_policy(
 
 
 def cmd_replay(args: argparse.Namespace) -> int:
-    plan_path = Path(args.plan).expanduser().resolve()
+    config_file_path = parse_optional_path(
+        getattr(args, "config", None),
+        field_name="--config",
+    )
+    replay_config = load_replayer_subcommand_config(
+        config_path=config_file_path,
+        section_name="replay",
+    )
+
+    plan_value = parse_optional_path(
+        (
+            args.plan
+            if getattr(args, "plan", None) is not None
+            else replay_config.get("plan")
+        ),
+        field_name="plan",
+    )
+    plan_path = resolve_required_option(
+        plan_value,
+        option_name="--plan",
+        config_key="plan",
+    ).expanduser().resolve()
     require_file(plan_path)
     plan = read_json(plan_path)
     if not isinstance(plan, dict):
         raise ValueError(f"Invalid replay plan payload: {plan_path}")
+
+    output_dir_override = parse_optional_path(
+        (
+            args.output_dir
+            if getattr(args, "output_dir", None) is not None
+            else replay_config.get("output_dir")
+        ),
+        field_name="output_dir",
+    )
+    requested_num_tasks = parse_optional_positive_int(
+        (
+            args.num_tasks
+            if getattr(args, "num_tasks", None) is not None
+            else replay_config.get("num_tasks")
+        ),
+        field_name="--num-tasks",
+    )
+    randomize_seed = parse_optional_int(
+        (
+            args.randomize_seed
+            if getattr(args, "randomize_seed", None) is not None
+            else replay_config.get("randomize_seed")
+        ),
+        field_name="--randomize-seed",
+    )
+    time_constraint_s = parse_optional_positive_timeout_s(
+        (
+            args.time_constraint_s
+            if getattr(args, "time_constraint_s", None) is not None
+            else replay_config.get("time_constraint_s")
+        ),
+        field_name="--time-constraint-s",
+    )
+    if time_constraint_s is not None and requested_num_tasks is not None:
+        raise ValueError(
+            "--time-constraint-s cannot be combined with --num-tasks. "
+            "Time-constrained replay is unbounded by task count."
+        )
+    port_profile_id_override = parse_port_profile_id(
+        parse_optional_int(
+            getattr(args, "port_profile_id", None),
+            field_name="--port-profile-id",
+        ),
+        field_name="--port-profile-id",
+    )
+    if port_profile_id_override is None:
+        raise ValueError("Missing required option '--port-profile-id'.")
+    launch_policy_override = parse_launch_policy_override_payload(
+        (
+            args.launch_policy_override_json
+            if getattr(args, "launch_policy_override_json", None) is not None
+            else replay_config.get(
+                "launch_policy_override_json",
+                replay_config.get("launch_policy_override"),
+            )
+        ),
+        field_name="launch_policy_override_json",
+    )
+    configured_vllm_log = parse_optional_bool(
+        replay_config.get("vllm_log"),
+        field_name="vllm_log",
+    )
+    if bool(getattr(args, "vllm_log_explicit_on", False)):
+        raise ValueError(
+            "--vllm-log is not needed. Replay always enables vLLM logging."
+        )
+    if bool(getattr(args, "vllm_log_explicit_off", False)):
+        raise ValueError(
+            "--no-vllm-log is no longer supported. Replay always enables vLLM logging."
+        )
+    if configured_vllm_log is False:
+        raise ValueError(
+            "Replay no longer supports disabling vLLM logging. "
+            "Remove replay.vllm_log = false."
+        )
+    vllm_log_interval_s = parse_optional_float(
+        (
+            args.vllm_log_interval_s
+            if getattr(args, "vllm_log_interval_s", None) is not None
+            else replay_config.get("vllm_log_interval_s")
+        ),
+        field_name="vllm_log_interval_s",
+    )
+    vllm_log_interval_s = float(
+        vllm_log_interval_s
+        if vllm_log_interval_s is not None
+        else DEFAULT_VLLM_LOG_INTERVAL_S
+    )
+    vllm_log_timeout_s = parse_optional_float(
+        (
+            args.vllm_log_timeout_s
+            if getattr(args, "vllm_log_timeout_s", None) is not None
+            else replay_config.get("vllm_log_timeout_s")
+        ),
+        field_name="vllm_log_timeout_s",
+    )
+    vllm_log_timeout_s = float(
+        vllm_log_timeout_s
+        if vllm_log_timeout_s is not None
+        else DEFAULT_VLLM_LOG_TIMEOUT_S
+    )
+    agent_timeout_s = parse_optional_positive_timeout_s(
+        (
+            args.agent_timeout_s
+            if getattr(args, "agent_timeout_s", None) is not None
+            else replay_config.get("agent_timeout_s")
+        ),
+        field_name="--agent-timeout-s",
+    )
 
     replay_target = plan.get("replay_target")
     if not isinstance(replay_target, dict):
         raise ValueError("Missing replay_target in plan")
     api_base, gateway_url, tokenize_endpoint, resolved_port_profile_id = resolve_replay_target(
         replay_target=replay_target,
-        port_profile_id_override=args.port_profile_id,
+        port_profile_id_override=port_profile_id_override,
     )
     resolved_port_profile_id_int = parse_port_profile_id(
         resolved_port_profile_id,
@@ -1667,10 +1959,6 @@ def cmd_replay(args: argparse.Namespace) -> int:
     for worker in workers:
         if not isinstance(worker, dict):
             raise ValueError("Worker item must be an object")
-    agent_timeout_s = parse_optional_positive_timeout_s(
-        plan.get("agent_timeout_s"),
-        field_name="plan.agent_timeout_s",
-    )
 
     launch_policy_payload = plan.get("launch_policy")
     if not isinstance(launch_policy_payload, dict):
@@ -1689,13 +1977,43 @@ def cmd_replay(args: argparse.Namespace) -> int:
         effective_launch_policy,
     ) = resolve_replay_launch_policy(
         launch_policy_payload=launch_policy_payload,
-        launch_policy_override=parse_launch_policy_override_json(
-            getattr(args, "launch_policy_override_json", None)
-        ),
+        launch_policy_override=launch_policy_override,
     )
 
-    if args.output_dir:
-        output_dir = Path(args.output_dir).expanduser().resolve()
+    def _launch_priority(worker: dict[str, Any]) -> int:
+        value = worker.get("launch_priority")
+        if isinstance(value, bool):
+            return 1_000_000_000
+        if isinstance(value, int):
+            return value
+        return 1_000_000_000
+
+    ordered_workers = sorted(
+        workers,
+        key=lambda worker: (
+            _launch_priority(worker),
+            float(worker.get("run_offset_s", 0.0)),
+            str(worker.get("worker_id") or worker.get("trial_id") or "worker"),
+        ),
+    )
+    if randomize_seed is not None:
+        randomize_rng = Random(randomize_seed)
+        ordered_workers = list(ordered_workers)
+        randomize_rng.shuffle(ordered_workers)
+
+    if time_constraint_s is None:
+        scheduled_workers, tasks_wrapped = build_replay_worker_schedule(
+            workers=ordered_workers,
+            num_tasks=requested_num_tasks,
+        )
+    else:
+        if not ordered_workers:
+            raise ValueError("--time-constraint-s requires at least one worker in the replay plan")
+        scheduled_workers = []
+        tasks_wrapped = False
+
+    if output_dir_override is not None:
+        output_dir = output_dir_override.expanduser().resolve()
     else:
         source_job_dir = str(plan.get("source_job_dir") or "")
         source_name = Path(source_job_dir).name if source_job_dir else plan_path.stem
@@ -1709,21 +2027,34 @@ def cmd_replay(args: argparse.Namespace) -> int:
     replay_plan_copy_path = output_dir / "replay" / "replay-plan.json"
     write_json(replay_plan_copy_path, plan)
 
-    use_gateway_lifecycle = resolve_gateway_lifecycle_mode(
-        args.gateway_lifecycle,
-        gateway_url,
-        api_base,
-    )
+    use_gateway_lifecycle = True
     vllm_log_config = resolve_replay_vllm_log_config(
         port_profile_id=resolved_port_profile_id_int,
-        configured_vllm_log=args.vllm_log,
-        interval_s=args.vllm_log_interval_s,
-        timeout_s=args.vllm_log_timeout_s,
+        interval_s=vllm_log_interval_s,
+        timeout_s=vllm_log_timeout_s,
     )
 
     stop_event = threading.Event()
     lock = threading.Lock()
+    stop_lock = threading.Lock()
     worker_results: dict[str, dict[str, Any]] = {}
+    stop_reason: dict[str, str | None] = {"value": None}
+
+    def set_stop_reason(reason: str) -> None:
+        with stop_lock:
+            if stop_reason["value"] is None:
+                stop_reason["value"] = reason
+        stop_event.set()
+
+    def current_stop_reason() -> str | None:
+        with stop_lock:
+            return stop_reason["value"]
+
+    replay_deadline_at = (
+        time.monotonic() + time_constraint_s
+        if time_constraint_s is not None
+        else None
+    )
     summary = {
         "source_plan": str(plan_path),
         "output_dir": str(output_dir),
@@ -1742,28 +2073,43 @@ def cmd_replay(args: argparse.Namespace) -> int:
         "vllm_log_interval_s": vllm_log_config.interval_s,
         "vllm_log_timeout_s": vllm_log_config.timeout_s,
         "vllm_log_dir": str(output_dir / "vllm-log") if vllm_log_config.enabled else None,
-        "workers_total": len(workers),
+        "workers_total": len(scheduled_workers),
         "workers_completed": 0,
         "workers_failed": 0,
         "workers_timed_out": 0,
+        "workers_time_bound_finished": 0,
         "requests_sent": 0,
         "requests_failed": 0,
+        "time_constraint_reached": False,
     }
+    if randomize_seed is not None:
+        summary["randomize_seed"] = randomize_seed
+    if time_constraint_s is not None:
+        summary["time_constraint_s"] = time_constraint_s
+        summary["workers_total"] = 0
+    if config_file_path is not None:
+        summary["source_config"] = str(config_file_path.expanduser().resolve())
     if agent_timeout_s is not None:
         summary["agent_timeout_s"] = agent_timeout_s
+    if requested_num_tasks is not None:
+        summary["num_tasks_requested"] = requested_num_tasks
+        summary["workers_in_plan"] = len(workers)
+        summary["tasks_wrapped"] = tasks_wrapped
     progress_nonlocal: list[Any] = [_NullProgress()]
     progress_task_id_nonlocal = [0]
     progress_state = {"launched": 0, "active": 0}
     summary_path = output_dir / "replay" / "summary.json"
 
-    def _update_progress(*, advance: int = 0) -> None:
-        progress_nonlocal[0].update(
-            progress_task_id_nonlocal[0],
-            advance=advance,
-            launched=progress_state["launched"],
-            active=progress_state["active"],
-            failed=summary["workers_failed"],
-        )
+    def _update_progress(*, advance: int = 0, total: int | None = None) -> None:
+        kwargs: dict[str, Any] = {
+            "advance": advance,
+            "launched": progress_state["launched"],
+            "active": progress_state["active"],
+            "failed": summary["workers_failed"],
+        }
+        if total is not None:
+            kwargs["total"] = total
+        progress_nonlocal[0].update(progress_task_id_nonlocal[0], **kwargs)
 
     def call_gateway(path: str, payload: dict[str, Any]) -> Any:
         if not gateway_url:
@@ -1800,15 +2146,47 @@ def cmd_replay(args: argparse.Namespace) -> int:
         }
         if agent_timeout_s is not None:
             record["agent_timeout_s"] = agent_timeout_s
+        if time_constraint_s is not None:
+            record["time_constraint_s"] = time_constraint_s
 
         api_token = worker.get("api_token")
         if not isinstance(api_token, str) or not api_token:
             api_token = None
+        agent_started = False
+
+        def _status_from_stop_reason() -> str:
+            return (
+                "time_bound_finished"
+                if current_stop_reason() == "time_constraint"
+                else "cancelled"
+            )
+
+        def _deadline_kind(agent_deadline: float | None) -> str:
+            if replay_deadline_at is None:
+                return "agent_timeout"
+            if agent_deadline is None:
+                return "time_constraint"
+            return "time_constraint" if replay_deadline_at <= agent_deadline else "agent_timeout"
+
+        def _remaining(deadline_at: float | None) -> float | None:
+            if deadline_at is None:
+                return None
+            return max(0.0, deadline_at - time.monotonic())
 
         try:
             delta_agent_start_s = float(worker.get("delta_agent_start_s", 0.0))
-            if not sleep_with_stop(stop_event, max(0.0, delta_agent_start_s)):
-                record["status"] = "cancelled"
+            sleep_result = sleep_with_stop_or_deadline(
+                stop_event,
+                seconds=max(0.0, delta_agent_start_s),
+                deadline_at=replay_deadline_at,
+            )
+            if sleep_result == "stopped":
+                record["status"] = _status_from_stop_reason()
+                return
+            if sleep_result == "deadline":
+                record["status"] = "time_bound_finished"
+                summary["time_constraint_reached"] = True
+                set_stop_reason("time_constraint")
                 return
 
             if use_gateway_lifecycle:
@@ -1817,25 +2195,38 @@ def cmd_replay(args: argparse.Namespace) -> int:
                         f"Missing worker api_token for gateway lifecycle: {worker_id}"
                     )
                 call_gateway("/agent/start", {"api_token": api_token})
+                agent_started = True
 
             agent_deadline_at = (
                 time.monotonic() + agent_timeout_s
                 if agent_timeout_s is not None
                 else None
             )
+            runtime_deadline_at = agent_deadline_at
+            if replay_deadline_at is not None and (
+                runtime_deadline_at is None
+                or replay_deadline_at < runtime_deadline_at
+            ):
+                runtime_deadline_at = replay_deadline_at
 
             delta_first_request_s = float(worker.get("delta_first_request_s", 0.0))
             sleep_result = sleep_with_stop_or_deadline(
                 stop_event,
                 seconds=max(0.0, delta_first_request_s),
-                deadline_at=agent_deadline_at,
+                deadline_at=runtime_deadline_at,
             )
             if sleep_result == "stopped":
-                record["status"] = "cancelled"
+                record["status"] = _status_from_stop_reason()
                 return
             if sleep_result == "deadline":
-                record["status"] = "timed_out"
-                record["error"] = f"agent timeout exceeded after {agent_timeout_s:.3f}s"
+                deadline_kind = _deadline_kind(agent_deadline_at)
+                if deadline_kind == "time_constraint":
+                    record["status"] = "time_bound_finished"
+                    summary["time_constraint_reached"] = True
+                    set_stop_reason("time_constraint")
+                else:
+                    record["status"] = "timed_out"
+                    record["error"] = f"agent timeout exceeded after {agent_timeout_s:.3f}s"
                 return
 
             planned_requests = worker.get("requests")
@@ -1845,7 +2236,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
             for req in planned_requests:
                 if stop_event.is_set():
-                    record["status"] = "cancelled"
+                    record["status"] = _status_from_stop_reason()
                     return
                 if not isinstance(req, dict):
                     raise RuntimeError(f"Invalid request object in worker={worker_id}")
@@ -1865,21 +2256,30 @@ def cmd_replay(args: argparse.Namespace) -> int:
                 if agent_deadline_at is None:
                     remaining_agent_s = None
                 else:
-                    remaining_agent_s = max(0.0, agent_deadline_at - time.monotonic())
+                    remaining_agent_s = _remaining(agent_deadline_at)
                     if remaining_agent_s <= 0:
                         record["status"] = "timed_out"
                         record["error"] = f"agent timeout exceeded after {agent_timeout_s:.3f}s"
                         return
+                remaining_replay_s = _remaining(replay_deadline_at)
+                if remaining_replay_s is not None and remaining_replay_s <= 0:
+                    record["status"] = "time_bound_finished"
+                    summary["time_constraint_reached"] = True
+                    set_stop_reason("time_constraint")
+                    return
 
                 replay_mode = str(req.get("replay_mode") or "deterministic_forced_tokens")
                 if replay_mode == "client_disconnect_after_duration":
                     cancel_after_s = float(req.get("cancel_after_s", 0.0))
-                    if remaining_agent_s is None:
-                        effective_cancel_after_s = cancel_after_s
-                        agent_timeout_wins = False
-                    else:
-                        effective_cancel_after_s = min(cancel_after_s, remaining_agent_s)
-                        agent_timeout_wins = remaining_agent_s <= cancel_after_s
+                    timeout_candidates: list[tuple[str, float]] = [("client_disconnect", cancel_after_s)]
+                    if remaining_agent_s is not None:
+                        timeout_candidates.append(("agent_timeout", remaining_agent_s))
+                    if remaining_replay_s is not None:
+                        timeout_candidates.append(("time_constraint", remaining_replay_s))
+                    timeout_reason, effective_cancel_after_s = min(
+                        timeout_candidates,
+                        key=lambda item: item[1],
+                    )
                     timed_result = timed_cancel_http_json(
                         method=method,
                         url=join_url(api_base, path),
@@ -1893,17 +2293,29 @@ def cmd_replay(args: argparse.Namespace) -> int:
                         summary["requests_sent"] += 1
                     outcome = timed_result.get("outcome")
                     if outcome == "stopped":
-                        record["status"] = "cancelled"
+                        record["status"] = _status_from_stop_reason()
                         return
-                    if outcome == "cancelled" and agent_timeout_wins:
-                        record["status"] = "timed_out"
-                        record["error"] = (
-                            f"agent timeout exceeded after {agent_timeout_s:.3f}s"
-                        )
-                        record["requests_failed"] += 1
-                        with lock:
-                            summary["requests_failed"] += 1
-                        return
+                    if outcome == "cancelled":
+                        if timeout_reason == "client_disconnect":
+                            pass
+                        elif timeout_reason == "agent_timeout":
+                            record["status"] = "timed_out"
+                            record["error"] = (
+                                f"agent timeout exceeded after {agent_timeout_s:.3f}s"
+                            )
+                            record["requests_failed"] += 1
+                            with lock:
+                                summary["requests_failed"] += 1
+                            return
+                        elif timeout_reason == "time_constraint":
+                            record["status"] = "time_bound_finished"
+                            summary["time_constraint_reached"] = True
+                            set_stop_reason("time_constraint")
+                            return
+                        else:
+                            raise RuntimeError(
+                                f"Unexpected timeout reason for client-disconnect replay: {timeout_reason!r}"
+                            )
                     if (
                         outcome == "completed_early"
                         and is_acceptable_client_disconnect_early_error(timed_result)
@@ -1912,16 +2324,22 @@ def cmd_replay(args: argparse.Namespace) -> int:
                         sleep_result = sleep_with_stop_or_deadline(
                             stop_event,
                             seconds=float(req.get("delta_agent_action_after_s", 0.0)),
-                            deadline_at=agent_deadline_at,
+                            deadline_at=runtime_deadline_at,
                         )
                         if sleep_result == "stopped":
-                            record["status"] = "cancelled"
+                            record["status"] = _status_from_stop_reason()
                             return
                         if sleep_result == "deadline":
-                            record["status"] = "timed_out"
-                            record["error"] = (
-                                f"agent timeout exceeded after {agent_timeout_s:.3f}s"
-                            )
+                            deadline_kind = _deadline_kind(agent_deadline_at)
+                            if deadline_kind == "time_constraint":
+                                record["status"] = "time_bound_finished"
+                                summary["time_constraint_reached"] = True
+                                set_stop_reason("time_constraint")
+                            else:
+                                record["status"] = "timed_out"
+                                record["error"] = (
+                                    f"agent timeout exceeded after {agent_timeout_s:.3f}s"
+                                )
                             return
                         continue
                     if outcome != "cancelled":
@@ -1935,7 +2353,13 @@ def cmd_replay(args: argparse.Namespace) -> int:
                             f"error={timed_result.get('error')}"
                         )
                 else:
-                    if remaining_agent_s is None:
+                    request_timeout_candidates: list[tuple[str, float]] = []
+                    if remaining_agent_s is not None:
+                        request_timeout_candidates.append(("agent_timeout", remaining_agent_s))
+                    if remaining_replay_s is not None:
+                        request_timeout_candidates.append(("time_constraint", remaining_replay_s))
+
+                    if not request_timeout_candidates:
                         status, response_payload = http_json(
                             method=method,
                             url=join_url(api_base, path),
@@ -1946,11 +2370,15 @@ def cmd_replay(args: argparse.Namespace) -> int:
                         with lock:
                             summary["requests_sent"] += 1
                     else:
+                        request_timeout_reason, request_cancel_after_s = min(
+                            request_timeout_candidates,
+                            key=lambda item: item[1],
+                        )
                         timed_result = timed_cancel_http_json(
                             method=method,
                             url=join_url(api_base, path),
                             payload=body,
-                            cancel_after_s=remaining_agent_s,
+                            cancel_after_s=request_cancel_after_s,
                             connect_timeout_s=replay_http_timeout_s,
                             headers=headers,
                             stop_event=stop_event,
@@ -1959,16 +2387,25 @@ def cmd_replay(args: argparse.Namespace) -> int:
                         with lock:
                             summary["requests_sent"] += 1
                         if outcome == "stopped":
-                            record["status"] = "cancelled"
+                            record["status"] = _status_from_stop_reason()
                             return
                         if outcome == "cancelled":
-                            record["status"] = "timed_out"
-                            record["error"] = (
-                                f"agent timeout exceeded after {agent_timeout_s:.3f}s"
-                            )
-                            record["requests_failed"] += 1
-                            with lock:
-                                summary["requests_failed"] += 1
+                            if request_timeout_reason == "agent_timeout":
+                                record["status"] = "timed_out"
+                                record["error"] = (
+                                    f"agent timeout exceeded after {agent_timeout_s:.3f}s"
+                                )
+                                record["requests_failed"] += 1
+                                with lock:
+                                    summary["requests_failed"] += 1
+                            elif request_timeout_reason == "time_constraint":
+                                record["status"] = "time_bound_finished"
+                                summary["time_constraint_reached"] = True
+                                set_stop_reason("time_constraint")
+                            else:
+                                raise RuntimeError(
+                                    f"Unexpected request timeout reason: {request_timeout_reason!r}"
+                                )
                             return
                         if outcome != "completed_early":
                             record["requests_failed"] += 1
@@ -2026,25 +2463,35 @@ def cmd_replay(args: argparse.Namespace) -> int:
                 sleep_result = sleep_with_stop_or_deadline(
                     stop_event,
                     seconds=max(0.0, delay_after_s),
-                    deadline_at=agent_deadline_at,
+                    deadline_at=runtime_deadline_at,
                 )
                 if sleep_result == "stopped":
-                    record["status"] = "cancelled"
+                    record["status"] = _status_from_stop_reason()
                     return
                 if sleep_result == "deadline":
-                    record["status"] = "timed_out"
-                    record["error"] = f"agent timeout exceeded after {agent_timeout_s:.3f}s"
+                    deadline_kind = _deadline_kind(agent_deadline_at)
+                    if deadline_kind == "time_constraint":
+                        record["status"] = "time_bound_finished"
+                        summary["time_constraint_reached"] = True
+                        set_stop_reason("time_constraint")
+                    else:
+                        record["status"] = "timed_out"
+                        record["error"] = f"agent timeout exceeded after {agent_timeout_s:.3f}s"
                     return
 
             record["status"] = "completed"
         except Exception as exc:  # noqa: BLE001
             record["status"] = "failed"
             record["error"] = str(exc)
-            stop_event.set()
+            set_stop_reason("failure")
         finally:
-            if use_gateway_lifecycle and api_token:
+            if use_gateway_lifecycle and api_token and agent_started:
                 try:
-                    rc = 0 if record["status"] in {"completed", "timed_out"} else 1
+                    rc = (
+                        0
+                        if record["status"] in {"completed", "timed_out", "time_bound_finished"}
+                        else 1
+                    )
                     call_gateway(
                         "/agent/end",
                         {"api_token": api_token, "return_code": rc},
@@ -2053,7 +2500,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
                     if record["status"] == "completed":
                         record["status"] = "failed"
                         record["error"] = f"agent/end failed: {exc}"
-                    stop_event.set()
+                    set_stop_reason("failure")
 
             record["finished_at"] = now_iso8601_utc()
             with lock:
@@ -2062,19 +2509,13 @@ def cmd_replay(args: argparse.Namespace) -> int:
                     summary["workers_completed"] += 1
                 elif record["status"] == "timed_out":
                     summary["workers_timed_out"] += 1
+                elif record["status"] == "time_bound_finished":
+                    summary["workers_time_bound_finished"] += 1
                 elif record["status"] == "failed":
                     summary["workers_failed"] += 1
                 progress_state["active"] = max(progress_state["active"] - 1, 0)
                 _update_progress(advance=1)
             write_json(worker_log_path, record)
-
-    def _launch_priority(worker: dict[str, Any]) -> int:
-        value = worker.get("launch_priority")
-        if isinstance(value, bool):
-            return 1_000_000_000
-        if isinstance(value, int):
-            return value
-        return 1_000_000_000
 
     try:
         if use_gateway_lifecycle:
@@ -2085,25 +2526,17 @@ def cmd_replay(args: argparse.Namespace) -> int:
                 {"output_location": str(gateway_output_dir)},
             )
 
-        ordered_workers = sorted(
-            workers,
-            key=lambda worker: (
-                _launch_priority(worker),
-                float(worker.get("run_offset_s", 0.0)),
-                str(worker.get("worker_id") or worker.get("trial_id") or "worker"),
-            ),
-        )
-
         threads: list[threading.Thread] = []
-        for worker in ordered_workers:
-            worker_id = str(worker.get("worker_id") or worker.get("trial_id") or "worker")
-            thread = threading.Thread(
-                target=worker_fn,
-                args=(worker,),
-                name=f"replay-{worker_id}",
-            )
-            thread.daemon = True
-            threads.append(thread)
+        if time_constraint_s is None:
+            for worker in scheduled_workers:
+                worker_id = str(worker.get("worker_id") or worker.get("trial_id") or "worker")
+                thread = threading.Thread(
+                    target=worker_fn,
+                    args=(worker,),
+                    name=f"replay-{worker_id}",
+                )
+                thread.daemon = True
+                threads.append(thread)
 
         started_threads: list[threading.Thread] = []
 
@@ -2111,49 +2544,179 @@ def cmd_replay(args: argparse.Namespace) -> int:
             progress_nonlocal[0] = progress
             progress_task_id_nonlocal[0] = progress.add_task(
                 "replaying",
-                total=len(threads),
+                total=len(threads) if time_constraint_s is None else 1,
                 launched=0,
                 active=0,
                 failed=0,
             )
             try:
                 next_launch_at = time.monotonic()
-                for thread in threads:
-                    while True:
-                        active_threads = [item for item in started_threads if item.is_alive()]
-                        if len(active_threads) < launch_max_concurrent:
-                            break
+                if time_constraint_s is None:
+                    for thread in threads:
+                        while True:
+                            active_threads = [item for item in started_threads if item.is_alive()]
+                            if len(active_threads) != len(started_threads):
+                                started_threads = active_threads
+                            if len(active_threads) < launch_max_concurrent:
+                                break
+                            if stop_event.is_set():
+                                break
+                            for active_thread in active_threads:
+                                active_thread.join(timeout=0.2)
                         if stop_event.is_set():
                             break
-                        for active_thread in active_threads:
-                            active_thread.join(timeout=0.2)
-                    if stop_event.is_set():
-                        break
 
-                    launch_delay = next_launch_at - time.monotonic()
-                    if launch_delay > 0 and not sleep_with_stop(stop_event, launch_delay):
-                        break
+                        launch_delay = next_launch_at - time.monotonic()
+                        if launch_delay > 0 and not sleep_with_stop(stop_event, launch_delay):
+                            break
 
-                    with lock:
-                        progress_state["launched"] += 1
-                        progress_state["active"] += 1
-                        _update_progress()
-                    try:
-                        thread.start()
-                    except Exception:
                         with lock:
-                            progress_state["launched"] = max(progress_state["launched"] - 1, 0)
-                            progress_state["active"] = max(progress_state["active"] - 1, 0)
+                            progress_state["launched"] += 1
+                            progress_state["active"] += 1
                             _update_progress()
-                        raise
-                    started_threads.append(thread)
-                    next_launch_at = time.monotonic() + max(0.0, next_launch_delay_s())
+                        try:
+                            thread.start()
+                        except Exception:
+                            with lock:
+                                progress_state["launched"] = max(progress_state["launched"] - 1, 0)
+                                progress_state["active"] = max(progress_state["active"] - 1, 0)
+                                _update_progress()
+                            raise
+                        started_threads.append(thread)
+                        next_launch_at = time.monotonic() + max(0.0, next_launch_delay_s())
+                else:
+                    if replay_deadline_at is None:
+                        raise RuntimeError("internal error: missing replay_deadline_at")
+
+                    source_cycle: list[int] = list(range(len(ordered_workers)))
+                    source_cursor = 0
+                    source_repeat_count: dict[str, int] = {}
+                    source_rng = (
+                        Random(randomize_seed)
+                        if randomize_seed is not None
+                        else None
+                    )
+                    if source_rng is not None:
+                        source_rng.shuffle(source_cycle)
+                    launch_count = 0
+
+                    def next_worker_payload() -> dict[str, Any]:
+                        nonlocal source_cursor, launch_count, source_cycle
+                        if source_cursor >= len(source_cycle):
+                            source_cursor = 0
+                            source_cycle = list(range(len(ordered_workers)))
+                            if source_rng is not None:
+                                source_rng.shuffle(source_cycle)
+                        source_index = source_cycle[source_cursor]
+                        source_cursor += 1
+                        source_worker = ordered_workers[source_index]
+                        launch_count += 1
+
+                        source_worker_id = str(
+                            source_worker.get("worker_id")
+                            or source_worker.get("trial_id")
+                            or "worker"
+                        )
+                        next_repeat = source_repeat_count.get(source_worker_id, 0) + 1
+                        source_repeat_count[source_worker_id] = next_repeat
+
+                        if next_repeat == 1:
+                            return source_worker
+
+                        worker_copy = copy.deepcopy(source_worker)
+                        worker_copy["worker_id"] = (
+                            f"{source_worker_id}__wrap{next_repeat}__task{launch_count}"
+                        )
+                        worker_copy["wrapped_from_worker_id"] = source_worker_id
+                        worker_copy["wrapped_from_task_index"] = source_index + 1
+                        source_api_token = source_worker.get("api_token")
+                        if isinstance(source_api_token, str) and source_api_token:
+                            worker_copy["api_token"] = (
+                                f"{source_api_token}__wrap{next_repeat}__task{launch_count}"
+                            )
+                        return worker_copy
+
+                    while True:
+                        if stop_event.is_set():
+                            break
+                        if time.monotonic() >= replay_deadline_at:
+                            summary["time_constraint_reached"] = True
+                            set_stop_reason("time_constraint")
+                            break
+
+                        while True:
+                            active_threads = [item for item in started_threads if item.is_alive()]
+                            if len(active_threads) != len(started_threads):
+                                started_threads = active_threads
+                            if len(active_threads) < launch_max_concurrent:
+                                break
+                            if stop_event.is_set():
+                                break
+                            if time.monotonic() >= replay_deadline_at:
+                                summary["time_constraint_reached"] = True
+                                set_stop_reason("time_constraint")
+                                break
+                            for active_thread in active_threads:
+                                active_thread.join(timeout=0.2)
+                        if stop_event.is_set():
+                            break
+
+                        launch_delay = next_launch_at - time.monotonic()
+                        if launch_delay > 0:
+                            sleep_result = sleep_with_stop_or_deadline(
+                                stop_event,
+                                seconds=launch_delay,
+                                deadline_at=replay_deadline_at,
+                            )
+                            if sleep_result == "stopped":
+                                break
+                            if sleep_result == "deadline":
+                                summary["time_constraint_reached"] = True
+                                set_stop_reason("time_constraint")
+                                break
+                        if stop_event.is_set():
+                            break
+
+                        worker = next_worker_payload()
+                        worker_id = str(worker.get("worker_id") or worker.get("trial_id") or "worker")
+                        thread = threading.Thread(
+                            target=worker_fn,
+                            args=(worker,),
+                            name=f"replay-{worker_id}",
+                        )
+                        thread.daemon = True
+                        with lock:
+                            summary["workers_total"] += 1
+                            progress_state["launched"] += 1
+                            progress_state["active"] += 1
+                            _update_progress(total=max(1, summary["workers_total"]))
+                        try:
+                            thread.start()
+                        except Exception:
+                            with lock:
+                                summary["workers_total"] = max(summary["workers_total"] - 1, 0)
+                                progress_state["launched"] = max(progress_state["launched"] - 1, 0)
+                                progress_state["active"] = max(progress_state["active"] - 1, 0)
+                                _update_progress(total=max(1, summary["workers_total"]))
+                            raise
+                        started_threads.append(thread)
+                        next_launch_at = time.monotonic() + max(0.0, next_launch_delay_s())
 
                 while any(thread.is_alive() for thread in started_threads):
+                    started_threads = [thread for thread in started_threads if thread.is_alive()]
+                    if not started_threads:
+                        break
+                    if (
+                        replay_deadline_at is not None
+                        and not stop_event.is_set()
+                        and time.monotonic() >= replay_deadline_at
+                    ):
+                        summary["time_constraint_reached"] = True
+                        set_stop_reason("time_constraint")
                     for thread in started_threads:
                         thread.join(timeout=0.2)
             except KeyboardInterrupt:
-                stop_event.set()
+                set_stop_reason("keyboard_interrupt")
                 for thread in started_threads:
                     thread.join(timeout=2)
 
@@ -2181,6 +2744,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
                 "workers_completed": summary["workers_completed"],
                 "workers_failed": summary["workers_failed"],
                 "workers_timed_out": summary["workers_timed_out"],
+                "workers_time_bound_finished": summary["workers_time_bound_finished"],
                 "requests_sent": summary["requests_sent"],
                 "requests_failed": summary["requests_failed"],
             },
@@ -2203,8 +2767,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Compile a profiled job directory into replay-plan.json",
     )
     compile_parser.add_argument(
+        "--config",
+        default=None,
+        help=(
+            "Path to TOML config file. CLI options override config values. "
+            "Supports [compile] or [replayer.compile] sections."
+        ),
+    )
+    compile_parser.add_argument(
         "--job-dir",
-        required=True,
+        default=None,
         help="Path to profiled con-driver job directory.",
     )
     compile_parser.add_argument(
@@ -2213,40 +2785,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output path for replay plan. Default: <job-dir>/replay-plan.json",
     )
     compile_parser.add_argument(
-        "--backend",
-        default=None,
-        help="Override backend name detection from meta/config.toml.",
-    )
-    compile_parser.add_argument(
         "--port-profile-id",
         type=int,
         default=None,
         help=(
-            "Resolve replay target URLs from configs/port_profiles.toml. "
-            "Defaults to meta/config.toml [runtime].port_profile_id when present."
-        ),
-    )
-    compile_parser.add_argument(
-        "--tokenize-endpoint",
-        default=None,
-        help=(
-            "vLLM tokenize endpoint used to build forced_token_ids. "
-            "Defaults to the selected port profile's vLLM /tokenize when available."
+            "Port profile used to resolve compile-time tokenize endpoint from "
+            "configs/port_profiles.toml."
         ),
     )
     compile_parser.add_argument(
         "--request-timeout-s",
         type=float,
-        default=3600.0,
-        help="HTTP timeout seconds for tokenize/validation requests.",
-    )
-    compile_parser.add_argument(
-        "--agent-timeout-s",
-        type=float,
         default=None,
         help=(
-            "Optional agent runtime limit in seconds to encode into the replay plan. "
-            "When present, replay will terminate a worker when it exceeds this duration."
+            "Optional HTTP timeout seconds for compile-time tokenizer requests. "
+            f"Default: {DEFAULT_COMPILE_TOKENIZE_TIMEOUT_S:.0f}s."
         ),
     )
     compile_parser.set_defaults(func=cmd_compile)
@@ -2256,8 +2809,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run replay from a compiled replay-plan.json",
     )
     replay_parser.add_argument(
+        "--config",
+        default=None,
+        help=(
+            "Path to TOML config file. CLI options override config values. "
+            "Supports [replay] or [replayer.replay] sections."
+        ),
+    )
+    replay_parser.add_argument(
         "--plan",
-        required=True,
+        default=None,
         help="Path to compiled replay-plan.json.",
     )
     replay_parser.add_argument(
@@ -2266,21 +2827,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="Replay output directory. Default: <plan-dir>/<job>.replayed-<ts>",
     )
     replay_parser.add_argument(
-        "--port-profile-id",
+        "--num-tasks",
         type=int,
         default=None,
         help=(
-            "Resolve replay target URLs from configs/port_profiles.toml. "
-            "Defaults to replay_target.port_profile_id from the plan when present."
+            "Replay exactly this many tasks. If smaller than the plan worker count, "
+            "replay the first tasks in launch order. If larger, wrap and repeat from "
+            "the beginning of launch order."
         ),
     )
     replay_parser.add_argument(
-        "--gateway-lifecycle",
-        choices=["auto", "on", "off"],
-        default="auto",
+        "--randomize-seed",
+        type=int,
+        default=None,
         help=(
-            "Control /job/* and /agent/* lifecycle calls. "
-            "auto enables lifecycle when api_base looks like gateway_url + /v1."
+            "Optional worker-order randomization seed. "
+            "When set, replay does not follow plan launch order."
+        ),
+    )
+    replay_parser.add_argument(
+        "--time-constraint-s",
+        type=float,
+        default=None,
+        help=(
+            "Optional replay wall-time limit in seconds. "
+            "When set, replay launches unbounded tasks until this deadline."
+        ),
+    )
+    replay_parser.add_argument(
+        "--port-profile-id",
+        type=int,
+        required=True,
+        help=(
+            "Required. Resolve replay target URLs from configs/port_profiles.toml."
         ),
     )
     replay_parser.add_argument(
@@ -2293,25 +2872,39 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     replay_parser.add_argument(
-        "--vllm-log",
-        action=argparse.BooleanOptionalAction,
+        "--agent-timeout-s",
+        type=float,
         default=None,
         help=(
-            "Run the vLLM metrics monitor during replay. Defaults to on when "
-            "--port-profile-id is provided or replay_target.port_profile_id is set."
+            "Optional per-worker runtime limit in seconds. "
+            "When set, replay terminates a worker that exceeds this duration."
         ),
+    )
+    replay_parser.add_argument(
+        "--vllm-log",
+        dest="vllm_log_explicit_on",
+        action="store_true",
+        default=False,
+        help=argparse.SUPPRESS,
+    )
+    replay_parser.add_argument(
+        "--no-vllm-log",
+        dest="vllm_log_explicit_off",
+        action="store_true",
+        default=False,
+        help=argparse.SUPPRESS,
     )
     replay_parser.add_argument(
         "--vllm-log-interval-s",
         type=float,
-        default=DEFAULT_VLLM_LOG_INTERVAL_S,
-        help="Replay vLLM metrics sampling interval in seconds.",
+        default=None,
+        help="Optional replay vLLM metrics sampling interval in seconds.",
     )
     replay_parser.add_argument(
         "--vllm-log-timeout-s",
         type=float,
-        default=DEFAULT_VLLM_LOG_TIMEOUT_S,
-        help="Replay vLLM metrics scrape timeout in seconds.",
+        default=None,
+        help="Optional replay vLLM metrics scrape timeout in seconds.",
     )
     replay_parser.set_defaults(func=cmd_replay)
 

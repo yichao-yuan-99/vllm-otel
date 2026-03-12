@@ -146,10 +146,10 @@ def _build_ssh_command(
     ssh_options: list[str],
 ) -> list[str]:
     cmd: list[str] = ["ssh", "-N", "-T", *ssh_options]
-    cmd.extend(["-L", f"{local_server_port}:127.0.0.1:{remote_server_port}"])
-    cmd.extend(["-L", f"{local_vllm_port}:127.0.0.1:{remote_vllm_port}"])
-    cmd.extend(["-L", f"{local_jaeger_otlp_port}:127.0.0.1:{remote_jaeger_otlp_port}"])
-    cmd.extend(["-L", f"{local_jaeger_ui_port}:127.0.0.1:{remote_jaeger_ui_port}"])
+    cmd.extend(["-L", f"0.0.0.0:{local_server_port}:127.0.0.1:{remote_server_port}"])
+    cmd.extend(["-L", f"0.0.0.0:{local_vllm_port}:127.0.0.1:{remote_vllm_port}"])
+    cmd.extend(["-L", f"0.0.0.0:{local_jaeger_otlp_port}:127.0.0.1:{remote_jaeger_otlp_port}"])
+    cmd.extend(["-L", f"0.0.0.0:{local_jaeger_ui_port}:127.0.0.1:{remote_jaeger_ui_port}"])
     cmd.append(ssh_target)
     return cmd
 

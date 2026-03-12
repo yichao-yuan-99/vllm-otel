@@ -67,6 +67,7 @@ class LaunchProfileConfig:
     forwarded_args: list[str]
     launch_env: dict[str, str]
     gateway_base_url: str | None = None
+    vllm_log_endpoint: str | None = None
 
 
 @dataclass
@@ -88,6 +89,24 @@ class _VLLMMonitorProcess:
     stderr_handle: TextIO
     stdout_log: Path
     stderr_log: Path
+    endpoint: str
+    log_dir: Path
+    port_profile_id: int | None = None
+
+
+@dataclass(frozen=True)
+class _VLLMMonitorTarget:
+    endpoint: str
+    log_dir: Path
+    port_profile_id: int | None = None
+
+
+@dataclass(frozen=True)
+class _GatewayJobTarget:
+    base_url: str
+    output_location: str
+    output_location_relative_to_results_dir: str
+    port_profile_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -165,6 +184,13 @@ class ConcurrentDriver:
         self._run_id = self._make_run_id()
         self._target_dir = config.results_dir.resolve()
         self._datasets_dir = self._backend.dataset_cache_root().resolve()
+        self._resolved_agent_name: str | None = None
+        if isinstance(config.effective_config, dict):
+            raw_agent_name = config.effective_config.get("resolved_agent_name")
+            if isinstance(raw_agent_name, str):
+                normalized_agent_name = raw_agent_name.strip()
+                if normalized_agent_name:
+                    self._resolved_agent_name = normalized_agent_name
         self._launch_profiles = (
             sorted(config.launch_profiles, key=lambda profile: profile.port_profile_id)
             if config.launch_profiles is not None
@@ -203,6 +229,7 @@ class ConcurrentDriver:
         self._write_effective_config_toml()
         # Reset per-run artifacts if the output directory is reused.
         self._events_path.write_text("", encoding="utf-8")
+        resolved_vllm_endpoints = self._resolved_vllm_log_endpoints()
 
         manifest_payload: dict[str, object] = {
             "run_id": self._run_id,
@@ -224,6 +251,7 @@ class ConcurrentDriver:
                         "port_profile_id": profile.port_profile_id,
                         "max_concurrent": profile.max_concurrent,
                         "gateway_base_url": profile.gateway_base_url,
+                        "vllm_log_endpoint": profile.vllm_log_endpoint,
                     }
                     for profile in self._launch_profiles
                 ]
@@ -246,9 +274,12 @@ class ConcurrentDriver:
                 str(self._vllm_log_dir) if self._config.vllm_log is not None else None
             ),
             "vllm_log_endpoint": (
-                self._config.vllm_log.endpoint
-                if self._config.vllm_log is not None
+                resolved_vllm_endpoints[0]
+                if self._config.vllm_log is not None and resolved_vllm_endpoints
                 else None
+            ),
+            "vllm_log_endpoints": (
+                resolved_vllm_endpoints if self._config.vllm_log is not None else None
             ),
             "vllm_log_interval_s": (
                 self._config.vllm_log.interval_s
@@ -266,6 +297,11 @@ class ConcurrentDriver:
                 if self._config.gateway is not None
                 else None
             ),
+            "gateway_job_base_urls": (
+                self._gateway_job_base_urls()
+                if self._config.gateway is not None
+                else None
+            ),
             "gateway_job_output_subdir": (
                 self._config.gateway.job_output_root
                 if self._config.gateway is not None
@@ -278,8 +314,11 @@ class ConcurrentDriver:
             ),
             "gateway_output_location": None,
             "gateway_output_relative_to_results_dir": None,
+            "gateway_output_locations": None,
             "gateway_job_start_status": None,
+            "gateway_job_started_base_urls": None,
             "gateway_job_end_status": None,
+            "gateway_job_ended_base_urls": None,
         }
         self._write_manifest(manifest_payload)
 
@@ -316,57 +355,94 @@ class ConcurrentDriver:
                 flush=True,
             )
 
-        monitor: _VLLMMonitorProcess | None = None
-        monitor_exit_code: int | None = None
+        monitors: list[_VLLMMonitorProcess] = []
+        monitor_exit_codes: list[dict[str, object]] = []
         results: list[LaunchResult] = []
         run_exception: BaseException | None = None
-        gateway_job_started = False
+        gateway_job_started_targets: list[_GatewayJobTarget] = []
         gateway_job_status: str | None = None
-        gateway_output_location: str | None = None
         try:
             if self._config.gateway is not None and not self._config.dry_run:
                 gateway_output_location = self._build_gateway_output_location()
                 gateway_output_relative = str(
                     Path(gateway_output_location).resolve().relative_to(self._results_dir)
                 )
-                self._gateway_job_start(output_location=gateway_output_location)
-                gateway_job_started = True
+                gateway_targets = self._gateway_job_targets(
+                    base_output_location=gateway_output_location
+                )
+                for target in gateway_targets:
+                    gateway_start_response = self._gateway_job_start(
+                        base_url=target.base_url,
+                        output_location=target.output_location,
+                    )
+                    gateway_job_started_targets.append(target)
+                    self._append_event(
+                        {
+                            "event": "gateway_job_start",
+                            "port_profile_id": target.port_profile_id,
+                            "base_url": target.base_url,
+                            "output_location": target.output_location,
+                            "output_location_relative_to_results_dir": (
+                                target.output_location_relative_to_results_dir
+                            ),
+                            "status": "ok",
+                            "response": gateway_start_response,
+                        }
+                    )
+
                 manifest_payload["gateway_output_location"] = gateway_output_location
                 manifest_payload["gateway_output_relative_to_results_dir"] = (
                     gateway_output_relative
                 )
-                manifest_payload["gateway_job_start_status"] = "ok"
-                self._write_manifest(manifest_payload)
-                self._append_event(
+                manifest_payload["gateway_output_locations"] = [
                     {
-                        "event": "gateway_job_start",
-                        "base_url": self._config.gateway.base_url,
-                        "output_location": gateway_output_location,
-                        "output_location_relative_to_results_dir": gateway_output_relative,
-                        "status": "ok",
+                        "port_profile_id": target.port_profile_id,
+                        "base_url": target.base_url,
+                        "output_location": target.output_location,
+                        "output_location_relative_to_results_dir": (
+                            target.output_location_relative_to_results_dir
+                        ),
                     }
+                    for target in gateway_targets
+                ]
+                manifest_payload["gateway_job_start_status"] = "ok"
+                manifest_payload["gateway_job_started_base_urls"] = list(
+                    dict.fromkeys(target.base_url for target in gateway_job_started_targets)
                 )
+                self._write_manifest(manifest_payload)
 
             if self._config.vllm_log is not None and not self._config.dry_run:
-                monitor = await self._start_vllm_monitor()
-                manifest_payload.update(
+                monitor_targets = self._vllm_monitor_targets()
+                for target in monitor_targets:
+                    monitor = await self._start_vllm_monitor(target=target)
+                    monitors.append(monitor)
+                    self._append_event(
+                        {
+                            "event": "vllm_log_started",
+                            "port_profile_id": monitor.port_profile_id,
+                            "endpoint": monitor.endpoint,
+                            "interval_s": self._config.vllm_log.interval_s,
+                            "timeout_s": self._config.vllm_log.timeout_s,
+                            "log_dir": str(monitor.log_dir),
+                            "stdout_log": str(monitor.stdout_log),
+                            "stderr_log": str(monitor.stderr_log),
+                        }
+                    )
+
+                manifest_payload["vllm_log_monitors"] = [
                     {
-                        "vllm_log_stdout": str(monitor.stdout_log),
-                        "vllm_log_stderr": str(monitor.stderr_log),
-                    }
-                )
-                self._write_manifest(manifest_payload)
-                self._append_event(
-                    {
-                        "event": "vllm_log_started",
-                        "endpoint": self._config.vllm_log.endpoint,
-                        "interval_s": self._config.vllm_log.interval_s,
-                        "timeout_s": self._config.vllm_log.timeout_s,
-                        "log_dir": str(self._vllm_log_dir),
+                        "port_profile_id": monitor.port_profile_id,
+                        "endpoint": monitor.endpoint,
+                        "log_dir": str(monitor.log_dir),
                         "stdout_log": str(monitor.stdout_log),
                         "stderr_log": str(monitor.stderr_log),
                     }
-                )
+                    for monitor in monitors
+                ]
+                if len(monitors) == 1:
+                    manifest_payload["vllm_log_stdout"] = str(monitors[0].stdout_log)
+                    manifest_payload["vllm_log_stderr"] = str(monitors[0].stderr_log)
+                self._write_manifest(manifest_payload)
 
             with self._create_progress() as progress:
                 progress_task_id = progress.add_task(
@@ -395,42 +471,84 @@ class ConcurrentDriver:
                 gateway_job_status = "failed"
             raise
         finally:
-            if monitor is not None:
-                monitor_exit_code = await self._stop_vllm_monitor(monitor)
+            for monitor in monitors:
+                return_code = await self._stop_vllm_monitor(monitor)
+                monitor_exit_codes.append(
+                    {
+                        "port_profile_id": monitor.port_profile_id,
+                        "endpoint": monitor.endpoint,
+                        "return_code": return_code,
+                    }
+                )
                 self._append_event(
                     {
                         "event": "vllm_log_stopped",
-                        "return_code": monitor_exit_code,
+                        "port_profile_id": monitor.port_profile_id,
+                        "endpoint": monitor.endpoint,
+                        "return_code": return_code,
                     }
                 )
-            if gateway_job_started and self._config.gateway is not None and not self._config.dry_run:
+            if (
+                gateway_job_started_targets
+                and self._config.gateway is not None
+                and not self._config.dry_run
+            ):
                 final_status = gateway_job_status
                 if final_status is None:
                     failed_count = sum(
                         1 for result in results if result.status not in {"succeeded", "dry-run"}
                     )
                     final_status = "completed" if failed_count == 0 else "failed"
-                try:
-                    gateway_end_response = self._gateway_job_end(status=final_status)
+                gateway_end_failures: list[dict[str, str]] = []
+                for target in gateway_job_started_targets:
+                    try:
+                        gateway_end_response = self._gateway_job_end(
+                            base_url=target.base_url,
+                            status=final_status,
+                        )
+                        self._append_event(
+                            {
+                                "event": "gateway_job_end",
+                                "status": final_status,
+                                "port_profile_id": target.port_profile_id,
+                                "base_url": target.base_url,
+                                "response": gateway_end_response,
+                            }
+                        )
+                    except Exception as exc:
+                        gateway_end_failures.append(
+                            {"base_url": target.base_url, "error": str(exc)}
+                        )
+                        self._append_event(
+                            {
+                                "event": "gateway_job_end_failed",
+                                "status": final_status,
+                                "port_profile_id": target.port_profile_id,
+                                "base_url": target.base_url,
+                                "error": str(exc),
+                            }
+                        )
+
+                if not gateway_end_failures:
                     manifest_payload["gateway_job_end_status"] = final_status
+                    manifest_payload["gateway_job_ended_base_urls"] = list(
+                        dict.fromkeys(target.base_url for target in gateway_job_started_targets)
+                    )
                     self._write_manifest(manifest_payload)
-                    self._append_event(
-                        {
-                            "event": "gateway_job_end",
-                            "status": final_status,
-                            "response": gateway_end_response,
-                        }
+                elif run_exception is None:
+                    failed_base_urls = ", ".join(
+                        failure["base_url"] for failure in gateway_end_failures
                     )
-                except Exception as exc:
-                    self._append_event(
-                        {
-                            "event": "gateway_job_end_failed",
-                            "status": final_status,
-                            "error": str(exc),
-                        }
+                    raise RuntimeError(
+                        "Failed to call gateway /job/end for base URL(s): "
+                        f"{failed_base_urls}"
                     )
-                    if run_exception is None:
-                        raise
+
+        monitor_exit_code: int | None = None
+        if len(monitor_exit_codes) == 1:
+            raw_code = monitor_exit_codes[0].get("return_code")
+            if isinstance(raw_code, int):
+                monitor_exit_code = raw_code
 
         succeeded = sum(1 for result in results if result.status in {"succeeded", "dry-run"})
         failed = len(results) - succeeded
@@ -453,6 +571,7 @@ class ConcurrentDriver:
                 "failed": failed,
                 "reward_avg": reward_avg,
                 "vllm_log_monitor_return_code": monitor_exit_code,
+                "vllm_log_monitor_return_codes": monitor_exit_codes,
                 "results_json": str(self._results_path),
             }
         )
@@ -465,6 +584,7 @@ class ConcurrentDriver:
                 "failed": failed,
                 "reward_avg": reward_avg,
                 "vllm_log_monitor_return_code": monitor_exit_code,
+                "vllm_log_monitor_return_codes": monitor_exit_codes,
                 "results_json": str(self._results_path),
             }
         )
@@ -668,13 +788,13 @@ class ConcurrentDriver:
             launch_profile_id=launch_profile_id,
         )
 
-    async def _start_vllm_monitor(self) -> _VLLMMonitorProcess:
+    async def _start_vllm_monitor(self, *, target: _VLLMMonitorTarget) -> _VLLMMonitorProcess:
         if self._config.vllm_log is None:
             raise RuntimeError("vLLM monitor config is not enabled.")
 
-        self._vllm_log_dir.mkdir(parents=True, exist_ok=True)
-        stdout_log = self._vllm_log_dir / "monitor.stdout.log"
-        stderr_log = self._vllm_log_dir / "monitor.stderr.log"
+        target.log_dir.mkdir(parents=True, exist_ok=True)
+        stdout_log = target.log_dir / "monitor.stdout.log"
+        stderr_log = target.log_dir / "monitor.stderr.log"
         stdout_handle = stdout_log.open("w", encoding="utf-8")
         stderr_handle = stderr_log.open("w", encoding="utf-8")
 
@@ -683,9 +803,9 @@ class ConcurrentDriver:
             "-m",
             "con_driver.vllm_metrics_monitor",
             "--endpoint",
-            self._config.vllm_log.endpoint,
+            target.endpoint,
             "--output-dir",
-            str(self._vllm_log_dir),
+            str(target.log_dir),
             "--interval-s",
             str(self._config.vllm_log.interval_s),
             "--timeout-s",
@@ -712,6 +832,9 @@ class ConcurrentDriver:
             stderr_handle=stderr_handle,
             stdout_log=stdout_log,
             stderr_log=stderr_log,
+            endpoint=target.endpoint,
+            log_dir=target.log_dir,
+            port_profile_id=target.port_profile_id,
         )
 
     async def _stop_vllm_monitor(self, monitor: _VLLMMonitorProcess) -> int:
@@ -1022,6 +1145,7 @@ class ConcurrentDriver:
                     gateway_base_url=(
                         launch_profile.gateway_base_url if launch_profile is not None else None
                     ),
+                    resolved_agent_name=self._resolved_agent_name,
                 )
 
         return LaunchRequest(
@@ -1040,11 +1164,12 @@ class ConcurrentDriver:
         command: list[str],
         api_token: str,
         gateway_base_url: str | None = None,
+        resolved_agent_name: str | None = None,
     ) -> list[str]:
         if self._config.gateway is None:
             raise RuntimeError("Gateway wrapper requested but gateway config is disabled")
         base_url = gateway_base_url or self._config.gateway.base_url
-        return [
+        wrapped = [
             sys.executable,
             "-m",
             self._GATEWAY_AGENT_WRAPPER_MODULE,
@@ -1054,9 +1179,11 @@ class ConcurrentDriver:
             api_token,
             "--timeout-s",
             str(self._config.gateway.timeout_s),
-            "--",
-            *command,
         ]
+        if resolved_agent_name is not None:
+            wrapped.extend(["--agent-name", resolved_agent_name])
+        wrapped.extend(["--", *command])
+        return wrapped
 
     def _make_agent_api_token(self, *, launch_index: int, trial_id: str) -> str:
         return f"condrv_{self._run_id}_{launch_index:04d}_{trial_id}"
@@ -1153,6 +1280,69 @@ class ConcurrentDriver:
         self._events_path = self._meta_dir / "events.jsonl"
         self._results_path = self._meta_dir / "results.json"
 
+    def _resolved_vllm_log_endpoints(self) -> list[str]:
+        if self._config.vllm_log is None:
+            return []
+
+        endpoints: list[str] = []
+        seen: set[str] = set()
+        if self._launch_profiles is not None:
+            for profile in self._launch_profiles:
+                endpoint = (profile.vllm_log_endpoint or "").strip()
+                if not endpoint or endpoint in seen:
+                    continue
+                seen.add(endpoint)
+                endpoints.append(endpoint)
+
+        fallback_endpoint = self._config.vllm_log.endpoint.strip()
+        if fallback_endpoint and fallback_endpoint not in seen:
+            endpoints.append(fallback_endpoint)
+        return endpoints
+
+    def _vllm_monitor_targets(self) -> list[_VLLMMonitorTarget]:
+        if self._config.vllm_log is None:
+            return []
+
+        if self._launch_profiles is None:
+            endpoint = self._config.vllm_log.endpoint.strip()
+            if not endpoint:
+                raise ValueError("vllm_log is enabled but endpoint is empty")
+            return [
+                _VLLMMonitorTarget(
+                    endpoint=endpoint,
+                    log_dir=self._vllm_log_dir,
+                    port_profile_id=None,
+                )
+            ]
+
+        targets: list[_VLLMMonitorTarget] = []
+        for profile in self._launch_profiles:
+            endpoint = (profile.vllm_log_endpoint or "").strip()
+            if not endpoint:
+                continue
+            targets.append(
+                _VLLMMonitorTarget(
+                    endpoint=endpoint,
+                    log_dir=(self._vllm_log_dir / f"profile-{profile.port_profile_id}"),
+                    port_profile_id=profile.port_profile_id,
+                )
+            )
+        if targets:
+            return targets
+
+        fallback_endpoint = self._config.vllm_log.endpoint.strip()
+        if not fallback_endpoint:
+            raise ValueError(
+                "vllm_log is enabled but no per-profile endpoints were resolved in cluster mode."
+            )
+        return [
+            _VLLMMonitorTarget(
+                endpoint=fallback_endpoint,
+                log_dir=self._vllm_log_dir,
+                port_profile_id=None,
+            )
+        ]
+
     def _build_gateway_output_location(self) -> str:
         if self._config.gateway is None:
             raise RuntimeError("Gateway output location requested but gateway config is disabled")
@@ -1173,10 +1363,72 @@ class ConcurrentDriver:
             raise ValueError("gateway_job_output_root must be a subdirectory, not run root")
         return str(output_path)
 
-    def _gateway_job_start(self, *, output_location: str) -> dict[str, object]:
+    def _gateway_job_base_urls(self) -> list[str]:
+        if self._config.gateway is None:
+            raise RuntimeError("Gateway base URLs requested but gateway config is disabled")
+        if self._launch_profiles is None:
+            return [self._config.gateway.base_url.rstrip("/")]
+
+        unique_base_urls: list[str] = []
+        seen: set[str] = set()
+        for profile in self._launch_profiles:
+            base_url = (profile.gateway_base_url or self._config.gateway.base_url).rstrip("/")
+            if base_url in seen:
+                continue
+            seen.add(base_url)
+            unique_base_urls.append(base_url)
+
+        if not unique_base_urls:
+            return [self._config.gateway.base_url.rstrip("/")]
+        return unique_base_urls
+
+    def _gateway_job_targets(self, *, base_output_location: str) -> list[_GatewayJobTarget]:
+        if self._config.gateway is None:
+            raise RuntimeError("Gateway targets requested but gateway config is disabled")
+
+        base_output_path = Path(base_output_location).resolve()
+        try:
+            base_output_relative = str(base_output_path.relative_to(self._results_dir))
+        except ValueError as exc:
+            raise ValueError(
+                "gateway output location must stay within the con-driver run directory"
+            ) from exc
+
+        if self._launch_profiles is None:
+            return [
+                _GatewayJobTarget(
+                    base_url=self._config.gateway.base_url.rstrip("/"),
+                    output_location=str(base_output_path),
+                    output_location_relative_to_results_dir=base_output_relative,
+                    port_profile_id=None,
+                )
+            ]
+
+        targets: list[_GatewayJobTarget] = []
+        for profile in self._launch_profiles:
+            profile_output_path = (base_output_path / f"profile-{profile.port_profile_id}").resolve()
+            try:
+                profile_output_relative = str(profile_output_path.relative_to(self._results_dir))
+            except ValueError as exc:
+                raise ValueError(
+                    "gateway profile output location must stay within the con-driver run directory"
+                ) from exc
+            targets.append(
+                _GatewayJobTarget(
+                    base_url=(profile.gateway_base_url or self._config.gateway.base_url).rstrip(
+                        "/"
+                    ),
+                    output_location=str(profile_output_path),
+                    output_location_relative_to_results_dir=profile_output_relative,
+                    port_profile_id=profile.port_profile_id,
+                )
+            )
+        return targets
+
+    def _gateway_job_start(self, *, base_url: str, output_location: str) -> dict[str, object]:
         if self._config.gateway is None:
             raise RuntimeError("Gateway job/start requested but gateway config is disabled")
-        endpoint = f"{self._config.gateway.base_url.rstrip('/')}/job/start"
+        endpoint = f"{base_url.rstrip('/')}/job/start"
         try:
             response = requests.post(
                 endpoint,
@@ -1195,10 +1447,10 @@ class ConcurrentDriver:
             raise RuntimeError("Gateway /job/start response must be a JSON object")
         return payload
 
-    def _gateway_job_end(self, *, status: str) -> dict[str, object]:
+    def _gateway_job_end(self, *, base_url: str, status: str) -> dict[str, object]:
         if self._config.gateway is None:
             raise RuntimeError("Gateway job/end requested but gateway config is disabled")
-        endpoint = f"{self._config.gateway.base_url.rstrip('/')}/job/end"
+        endpoint = f"{base_url.rstrip('/')}/job/end"
         try:
             response = requests.post(
                 endpoint,
@@ -1261,6 +1513,16 @@ class ConcurrentDriver:
         vllm_log_endpoint = (
             vllm_log_endpoint_value if isinstance(vllm_log_endpoint_value, str) else ""
         )
+        vllm_log_endpoints_value = payload.get("vllm_log_endpoints", [])
+        vllm_log_endpoints: list[str] = []
+        if isinstance(vllm_log_endpoints_value, list):
+            for endpoint in vllm_log_endpoints_value:
+                if isinstance(endpoint, str):
+                    normalized = endpoint.strip()
+                    if normalized:
+                        vllm_log_endpoints.append(normalized)
+        if not vllm_log_endpoints and vllm_log_endpoint.strip():
+            vllm_log_endpoints = [vllm_log_endpoint.strip()]
         vllm_log_interval_s = float(
             payload.get(
                 "vllm_log_interval_s",
@@ -1398,6 +1660,7 @@ class ConcurrentDriver:
                 "[vllm_log]",
                 f"enabled = {'true' if vllm_log_enabled else 'false'}",
                 f"endpoint = {_toml_quote(vllm_log_endpoint)}",
+                f"endpoints = {_toml_list(vllm_log_endpoints)}",
                 f"interval_s = {vllm_log_interval_s}",
                 f"timeout_s = {vllm_log_timeout_s}",
             ]

@@ -14,12 +14,71 @@ Show commands:
 python -m replayer --help
 ```
 
+### All Options
+
+`python -m replayer compile` options:
+
+- `--config <path>`: TOML config path (`[compile]` or `[replayer.compile]`).
+- `--job-dir <path>`: profiled con-driver job directory.
+- `--plan-out <path>`: output replay plan path (default: `<job-dir>/replay-plan.json`).
+- `--port-profile-id <int>`: required; resolve compile-time tokenizer endpoint from `configs/port_profiles.toml`.
+- `--request-timeout-s <float>`: optional HTTP timeout for compile-time tokenizer requests (default: `3600`).
+
+`python -m replayer replay` options:
+
+- `--config <path>`: TOML config path (`[replay]` or `[replayer.replay]`).
+- `--plan <path>`: compiled replay plan path.
+- `--output-dir <path>`: replay output directory (default: `<plan-dir>/<job>.replayed-<ts>`).
+- `--num-tasks <int>`: replay exactly this many tasks (truncate or wrap launch order).
+- `--port-profile-id <int>`: required; resolve replay target endpoints from `configs/port_profiles.toml`.
+- `--launch-policy-override-json <json>`: launch policy overlay JSON.
+- `--agent-timeout-s <float>`: optional per-worker timeout enforced during replay runtime.
+- `--vllm-log-interval-s <float>`: optional metrics sampling interval.
+- `--vllm-log-timeout-s <float>`: optional metrics scrape timeout.
+
+`python -m replayer.validate` options:
+
+- `--source-job-dir <path>`: source con-driver profiled job directory.
+- `--replay-run-dir <path>`: replay run output directory.
+- `--report-out <path>`: optional validation report JSON output path.
+
+Both `compile` and `replay` support `--config <path>` (TOML). CLI flags take
+precedence over config values.
+Replay still requires `--port-profile-id` on the command line; it is not read
+from plan metadata or config.
+
+Supported layouts:
+
+- top-level command sections: `[compile]` and `[replay]`
+- nested under `[replayer]`: `[replayer.compile]` and `[replayer.replay]`
+
+Example:
+
+```toml
+[compile]
+job_dir = "tests/output/con-driver/job-20260225T035758Z"
+plan_out = "tests/output/tmp-replay-plan.json"
+port_profile_id = 1
+request_timeout_s = 3600.0
+
+[replay]
+plan = "tests/output/tmp-replay-plan.json"
+output_dir = "tests/output/tmp-replay-run"
+num_tasks = 120
+agent_timeout_s = 3000.0
+vllm_log_interval_s = 1.0
+vllm_log_timeout_s = 3600.0
+
+[replay.launch_policy_override]
+max_concurrent = 10
+```
+
 Compile:
 
 ```bash
 python -m replayer compile \
   --job-dir tests/output/con-driver/job-20260225T035758Z \
-  --agent-timeout-s 3000 \
+  --port-profile-id 1 \
   --plan-out tests/output/tmp-replay-plan-20260225T035758Z-v2.json
 ```
 
@@ -27,18 +86,15 @@ python -m replayer compile \
 deterministic request payloads. The bar advances by recorded request and also
 shows completed workers.
 
-`--agent-timeout-s` is optional. If you pass it, `compile` writes that value
-into the plan as `agent_timeout_s`, and `replay` enforces it as a per-worker
-runtime limit. If a replayed worker exceeds that duration, `replayer` cancels
-the in-flight request and marks the worker `timed_out`. If the field is absent,
-`replay` does not apply an agent-level deadline.
+Compile supports both gateway output layouts:
 
-If the source `meta/config.toml` was generated from a `port_profile_id`, `compile`
-will reuse that convention automatically and resolve:
+- single profile: `gateway-output/run_*/...`
+- cluster mode: `gateway-output/profile-*/run_*/...`
 
-- `replay_target.gateway_url` using the raw `gateway_port`
-- `replay_target.api_base` using the raw gateway listener
-- `replay_target.tokenize_endpoint`
+Compile resolves tokenizer endpoint from the selected `--port-profile-id` and
+uses it to build deterministic `forced_token_ids`.
+`--request-timeout-s` controls tokenizer HTTP timeout during this compile step.
+Compile backend is auto-detected from `meta/config.toml`; there is no override.
 
 If the source profile contains recorded `499 client_disconnected` inference
 requests, `compile` now keeps those requests in the plan instead of failing
@@ -50,22 +106,14 @@ after the request has already been running for at least `60s`, replay treats
 that as acceptable equivalent behavior for this mode instead of failing the
 worker.
 
-You can also override it explicitly:
-
-```bash
-python -m replayer compile \
-  --job-dir tests/output/con-driver/job-20260225T035758Z \
-  --port-profile-id 1 \
-  --agent-timeout-s 3000
-```
-
 Replay:
 
 ```bash
 python -m replayer replay \
   --plan tests/output/tmp-replay-plan-20260225T035758Z-v2.json \
-  --output-dir tests/output/tmp-replay-run-20260225T035758Z-v2 \
-  --gateway-lifecycle auto
+  --port-profile-id 1 \
+  --agent-timeout-s 3000 \
+  --output-dir tests/output/tmp-replay-run-20260225T035758Z-v2
 ```
 
 `replayer replay` now shows a live progress bar with total workers, launched
@@ -75,36 +123,26 @@ If a worker hits `agent_timeout_s`, replay marks that worker `timed_out` and
 tracks it separately from true replay failures. Timed-out workers do not cause
 `replayer replay` itself to return a non-zero exit code.
 
-Replay-side HTTP calls do not use a request timeout. That applies to:
+Replay always routes requests through gateway and always writes
+`<replay-output>/gateway-output/` artifacts.
 
-- replayed `POST /v1/chat/completions` requests
-- gateway lifecycle calls (`/job/start`, `/agent/start`, `/agent/end`, `/job/end`)
+Replay always resolves localhost endpoints from the selected port profile.
+Older plans may still carry legacy URL fields under `replay_target`; replay
+ignores them for routing.
 
-If the plan includes `agent_timeout_s`, replay enforces that wall-clock limit
-per worker. For example, a plan compiled with `--agent-timeout-s 3000` will
-terminate a worker at about `3000s` even though the underlying HTTP request has
-no request timeout.
+If you pass `--agent-timeout-s`, replay enforces that wall-clock limit per
+worker and marks timed-out workers as `timed_out`.
 
-The compile step still keeps its own tokenize timeout. The default is `3600.0s`.
-
-`replayer replay` can also run the same vLLM metrics monitor used by
+`replayer replay` always runs the same vLLM metrics monitor used by
 `con-driver`. The current replay defaults are:
 
 - sampling interval: `1.0s`
 - scrape timeout: `3600.0s`
 
-Replay uses the same defaults. When `port_profile_id` is available, vLLM logging
-defaults to enabled and resolves the metrics endpoint from the selected
-profile's `vllm_port`. There is no manual replay-side endpoint override.
-
-Example:
-
-```bash
-python -m replayer replay \
-  --plan tests/output/tmp-replay-plan-20260225T035758Z-v2.json \
-  --port-profile-id 1 \
-  --vllm-log
-```
+Replay uses the same defaults. Because `--port-profile-id` is required, replay
+resolves the metrics endpoint from the selected profile's `vllm_port` and vLLM
+logging defaults to enabled. There is no manual replay-side endpoint override.
+Replay always enables vLLM logging; disabling it is not supported.
 
 Replay vLLM metrics are written under:
 
@@ -125,6 +163,7 @@ the value stored in the plan:
 ```bash
 python -m replayer replay \
   --plan tests/output/tmp-replay-plan-20260225T035758Z-v2.json \
+  --port-profile-id 1 \
   --launch-policy-override-json '{"max_concurrent": 10}'
 ```
 
@@ -146,9 +185,24 @@ Example shape:
 }
 ```
 
-If the plan includes `replay_target.port_profile_id`, `replay` will resolve the
-current host URLs from `configs/port_profiles.toml` automatically. You can
-override the plan with:
+Replay can also control how many tasks to launch via `--num-tasks`:
+
+- if `--num-tasks` is smaller than the plan's worker count, replay runs the
+  first tasks in replay launch order
+- if `--num-tasks` is larger, replay wraps from the beginning of launch order
+  until it reaches the requested task count
+
+Example:
+
+```bash
+python -m replayer replay \
+  --plan tests/output/tmp-replay-plan-20260225T035758Z-v2.json \
+  --port-profile-id 1 \
+  --num-tasks 120
+```
+
+`replay` resolves gateway/vLLM endpoints from `configs/port_profiles.toml` and
+requires `--port-profile-id`:
 
 ```bash
 python -m replayer replay \

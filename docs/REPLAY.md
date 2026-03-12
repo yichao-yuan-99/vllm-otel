@@ -64,7 +64,8 @@ Expected profile contents:
 - `meta/config.toml`
 - `meta/run_manifest.json`
 - `meta/results.json`
-- `gateway-output/run_*/...`
+- `gateway-output/run_*/...` (single profile) or
+- `gateway-output/profile-*/run_*/...` (cluster mode)
 
 ## 3) Compile Profile -> Replay Plan
 
@@ -73,7 +74,7 @@ Compile from full profiled job directory:
 ```bash
 python3 -m replayer compile \
   --job-dir "$RUN_DIR" \
-  --agent-timeout-s 3000 \
+  --port-profile-id 0 \
   --plan-out "$RUN_DIR/replay-plan.json"
 ```
 
@@ -81,9 +82,11 @@ Important:
 
 - input is the full job directory, not only `gateway-output`
 - compiled plan includes required `launch_policy` (`config_ordered`) extracted from `meta/config.toml[run]`
-- compiled plan may include `agent_timeout_s`; replay enforces that per-worker limit when present
-- if `meta/config.toml[runtime].port_profile_id` is present, replay endpoints are
-  resolved from `configs/port_profiles.toml`
+- compile resolves tokenizer endpoint from the selected `--port-profile-id`
+- replay endpoints are always resolved from `configs/port_profiles.toml` and
+  require `--port-profile-id`
+- replay ignores legacy plan URL fields for routing and always uses
+  `127.0.0.1:<resolved-port>`
 - replay plans should target the raw gateway listener (`gateway_port`), not the
   parsed listener
 
@@ -96,8 +99,8 @@ REPLAY_DIR="$RUN_DIR/replay-run-$(date -u +%Y%m%dT%H%M%SZ)"
 
 python3 -m replayer replay \
   --plan "$RUN_DIR/replay-plan.json" \
-  --output-dir "$REPLAY_DIR" \
-  --gateway-lifecycle auto
+  --port-profile-id 0 \
+  --output-dir "$REPLAY_DIR"
 ```
 
 Replay launch semantics:
@@ -105,8 +108,8 @@ Replay launch semantics:
 - preserves original launch ordering (`launch_priority`)
 - launch timing is driven by recorded con-driver scheduling config (`max_concurrent`, `pattern`, `seed`)
 - does not replay exact original absolute launch offsets
-- when the plan includes `replay_target.port_profile_id`, replay resolves the
-  current host URLs from the shared port profile convention automatically
+- replay always resolves localhost endpoints from the selected port profile
+- `--agent-timeout-s` is optional and enforces a per-worker wall-clock limit
 - replay compares raw vLLM responses and does not apply reasoning-specific
   parsing during comparison
 

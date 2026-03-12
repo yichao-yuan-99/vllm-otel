@@ -1,94 +1,91 @@
 # Qwen3-Coder-30B Experiments
 
-This folder contains `con-driver` config(s) for running Harbor datasets against a
-live vLLM endpoint serving Qwen3-Coder-30B.
+This directory contains con-driver configs and helper scripts for running
+Qwen3-Coder-30B across:
+
+- `swebench-verified`
+- `terminal-bench@2.0`
+- `livecodebench`
+- `dabstep`
 
 ## Files
 
-- `configs/config.swebench-verified.toml`
+- `configs/config.swebench-verified.mswe.toml`: swebench-verified with mini-swe-agent.
+- `configs/config.swebench-verfied.terminus2.toml`: swebench-verified with terminus-2.
+- `configs/config.terminal-bench-2.0.mswe.toml`: terminal-bench@2.0 with mini-swe-agent.
+- `configs/config.terminal-bench-2.0.terminus2.toml`: terminal-bench@2.0 with terminus-2.
+- `configs/config.livecodebench.mswe.toml`: livecodebench with mini-swe-agent.
+- `configs/config.livecodebench.terminus2.toml`: livecodebench with terminus-2.
+- `configs/config.dabstep.mswe.toml`: dabstep with mini-swe-agent.
+- `configs/config.dabstep.terminus2.toml`: dabstep with terminus-2.
+- `start.py`: Python start script for one benchmark + one agent run.
+- `batch_benchmarks.sh`: very naive batch runner with hardcoded benchmarks.
 
-Current config values:
-
-- `driver_backend = "harbor"`
-- `pattern = "eager"`
-- `pool = "swebench-verified"`
-- `max_concurrent = 5`
-- `n_task = 500`
-- `sample_without_replacement = true`
-- `agent = "mini-swe-agent"`
-- `results_dir = "experiments/results/qwen3-coder-30b/swebench-verified"`
+Note: the terminus swebench config filename intentionally keeps `verfied`.
+`start.py` accepts both `terminal-bench@2.0` and `terminalbench@2.0`.
 
 ## Preconditions
 
-1. Start vLLM + gateway for a port profile that is serving Qwen3-Coder-30B.
-2. Ensure Harbor and `con-driver` are available in repo `.venv`.
+1. Profiles `0,1,2,3,4` are up and serving the same Qwen3-Coder-30B model.
+2. Gateway is up for the same profile set.
 3. Run commands from repo root.
 
-## Run
+## Run One Experiment (Single Benchmark + Single Agent)
+
+Use per-profile concurrency:
 
 ```bash
-bash con-driver/run_con_driver.sh \
-  --config experiments/qwen3-coder-30b/configs/config.swebench-verified.toml \
-  --port-profile-id 8
+python experiments/qwen3-coder-30b/start.py \
+  --benchmark swebench-verified \
+  --agent mini-swe-agent \
+  --per-profile-conc 5
 ```
 
-`port_profile_id` is intentionally passed via CLI (not set in this config), so you
-can target whichever running profile has the intended model.
-
-## Common Overrides
-
-Override concurrency:
+Or provide an explicit list:
 
 ```bash
-bash con-driver/run_con_driver.sh \
-  --config experiments/qwen3-coder-30b/configs/config.swebench-verified.toml \
-  --port-profile-id 8 \
-  --max-concurrent 8
+python experiments/qwen3-coder-30b/start.py \
+  --benchmark livecodebench \
+  --agent terminus-2 \
+  --port-profile-id-list 0,1,2,3,4 \
+  --max-concurrent-list 5,5,5,5,5
 ```
 
-Dry run command construction:
+Dry run:
 
 ```bash
-bash con-driver/run_con_driver.sh \
-  --config experiments/qwen3-coder-30b/configs/config.swebench-verified.toml \
-  --port-profile-id 8 \
+python experiments/qwen3-coder-30b/start.py \
+  --benchmark dabstep \
+  --agent mini-swe-agent \
+  --per-profile-conc 5 \
   --dry-run
 ```
 
-Override results location:
+## Run Batch (Hardcoded Benchmarks)
 
 ```bash
-bash con-driver/run_con_driver.sh \
-  --config experiments/qwen3-coder-30b/configs/config.swebench-verified.toml \
-  --port-profile-id 8 \
-  --results-dir experiments/results/record/qwen3-coder-30b-swebench
+# Hardcoded benchmarks: swebench-verified, terminal-bench@2.0, livecodebench, dabstep
+# For each benchmark: mini-swe-agent then terminus-2
+bash experiments/qwen3-coder-30b/batch_benchmarks.sh \
+  --per-profile-conc 5
 ```
 
-Shard a 500-task dataset into two non-overlapping jobs:
+## Output Layout
 
-```bash
-# Shard A: tasks [0, 250)
-bash con-driver/run_con_driver.sh \
-  --config experiments/qwen3-coder-30b/configs/config.swebench-verified.toml \
-  --port-profile-id 8 \
-  --n-task 250 \
-  --task-subset-start 0 \
-  --task-subset-end 250
+All configs use:
 
-# Shard B: tasks [250, 500)
-bash con-driver/run_con_driver.sh \
-  --config experiments/qwen3-coder-30b/configs/config.swebench-verified.toml \
-  --port-profile-id 8 \
-  --n-task 250 \
-  --task-subset-start 250 \
-  --task-subset-end 500
-```
+`experiments/results/qwen3-coder-30b/<benchmark>/<agent>/`
 
-## Output
+Default roots:
 
-By default, runs are written under:
+- `experiments/results/qwen3-coder-30b/swebench-verified/mini-swe-agent/`
+- `experiments/results/qwen3-coder-30b/swebench-verified/terminus-2/`
+- `experiments/results/qwen3-coder-30b/terminal-bench-2.0/mini-swe-agent/`
+- `experiments/results/qwen3-coder-30b/terminal-bench-2.0/terminus-2/`
+- `experiments/results/qwen3-coder-30b/livecodebench/mini-swe-agent/`
+- `experiments/results/qwen3-coder-30b/livecodebench/terminus-2/`
+- `experiments/results/qwen3-coder-30b/dabstep/mini-swe-agent/`
+- `experiments/results/qwen3-coder-30b/dabstep/terminus-2/`
 
-- `experiments/results/qwen3-coder-30b/swebench-verified/`
-
-Each invocation creates a timestamped run directory with metadata, trial logs, and
-gateway artifacts.
+Each invocation creates a timestamped run directory with `meta/`, `logs/`,
+`trials/`, `gateway-output/`, and optional `vllm-log/` artifacts.

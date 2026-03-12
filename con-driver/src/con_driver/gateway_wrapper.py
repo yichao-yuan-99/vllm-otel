@@ -32,11 +32,13 @@ def run_with_gateway(
     gateway_url: str,
     api_token: str,
     timeout_s: float,
+    agent_name: str | None = None,
     command: list[str],
 ) -> int:
     base = gateway_url.rstrip("/")
     start_endpoint = f"{base}/agent/start"
     end_endpoint = f"{base}/agent/end"
+    gateway_api_base = f"{base}/v1"
 
     started = False
     return_code = 1
@@ -56,6 +58,19 @@ def run_with_gateway(
         # Hosted vLLM adapter uses HOSTED_VLLM_API_KEY fallback when no explicit api_key
         # is passed through the Harbor Terminus 2 stack.
         wrapped_env["HOSTED_VLLM_API_KEY"] = api_token
+        is_mini_swe_agent = bool(agent_name and agent_name.strip() == "mini-swe-agent")
+        if is_mini_swe_agent:
+            # Keep hosted_vllm provider routed through the same gateway used for /agent/start.
+            # If the launch environment already resolved a container-reachable base URL
+            # (for example 192.168.5.1:<gateway_parse_port>/v1), preserve it.
+            if not wrapped_env.get("HOSTED_VLLM_API_BASE"):
+                wrapped_env["HOSTED_VLLM_API_BASE"] = gateway_api_base
+            # OPENAI_API_BASE is used by some OpenAI-compatible stacks; set fallback only.
+            if not wrapped_env.get("OPENAI_API_BASE"):
+                wrapped_env["OPENAI_API_BASE"] = gateway_api_base
+            # Harbor mini-swe-agent gives MSWEA_API_KEY higher priority and can omit
+            # provider-specific keys when building the in-container env.
+            wrapped_env.pop("MSWEA_API_KEY", None)
         completed = subprocess.run(command, check=False, env=wrapped_env)
         return_code = int(completed.returncode)
     except Exception as exc:
@@ -88,6 +103,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gateway-url", required=True)
     parser.add_argument("--api-token", required=True)
     parser.add_argument("--timeout-s", type=float, default=3600.0)
+    parser.add_argument("--agent-name", default=None)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     return parser
 
@@ -116,6 +132,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         gateway_url=parsed.gateway_url,
         api_token=parsed.api_token,
         timeout_s=float(parsed.timeout_s),
+        agent_name=(str(parsed.agent_name).strip() or None) if parsed.agent_name is not None else None,
         command=command,
     )
 
