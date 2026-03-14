@@ -109,11 +109,8 @@ def _is_rocm_base_image(base_image: str) -> bool:
     return "rocm" in base_image.lower()
 
 
-def _render_dockerfile(base_image: str, *, gfx: str | None) -> str:
+def _render_dockerfile(base_image: str) -> str:
     requirements = " \\\n  ".join(OTEL_REQUIREMENTS)
-    lmcache_env = ""
-    if gfx:
-        lmcache_env = f"\nENV VLLM_LMCACHE_GFX={gfx}\n"
 
     return (
         f"FROM {base_image}\n\n"
@@ -123,7 +120,6 @@ def _render_dockerfile(base_image: str, *, gfx: str | None) -> str:
         "COPY servers/docker/vllm_entrypoint.sh /opt/vllm-plugins/vllm_entrypoint.sh\n\n"
         "RUN chmod +x /opt/vllm-plugins/vllm_entrypoint.sh\n\n"
         "ENV PYTHONPATH=/opt/vllm-plugins\n"
-        f"{lmcache_env}"
     )
 
 
@@ -178,7 +174,7 @@ def _build_push(args: argparse.Namespace) -> int:
     _require_command("docker")
 
     spec = _resolve_spec(args)
-    dockerfile_content = _render_dockerfile(spec.base_image, gfx=spec.gfx)
+    dockerfile_content = _render_dockerfile(spec.base_image)
 
     if args.dockerfile_output:
         dockerfile_path = Path(args.dockerfile_output).expanduser().resolve()
@@ -191,7 +187,10 @@ def _build_push(args: argparse.Namespace) -> int:
 
     print(f"base image: {spec.base_image}")
     if spec.gfx:
-        print(f"lmcache gfx: {spec.gfx}")
+        print(
+            "warning: --gfx is deprecated in servers/docker/build_image.py and no longer "
+            "injects LMCache runtime bootstrap; use servers/sif tooling to bake LMCache into SIF."
+        )
     print(f"target image: {spec.target_image}")
     print(f"dockerfile: {dockerfile_path}")
 
@@ -219,7 +218,7 @@ def _build_push(args: argparse.Namespace) -> int:
 
 def _render(args: argparse.Namespace) -> int:
     spec = _resolve_spec(args)
-    dockerfile_content = _render_dockerfile(spec.base_image, gfx=spec.gfx)
+    dockerfile_content = _render_dockerfile(spec.base_image)
 
     if args.output:
         output_path = Path(args.output).expanduser().resolve()
@@ -284,8 +283,8 @@ def _build_parser() -> argparse.ArgumentParser:
         command_parser.add_argument(
             "--gfx",
             help=(
-                "ROCm gfx arch (for example gfx942). "
-                "When set, image entrypoint installs LMCache v0.4.1 on startup using this arch."
+                "Deprecated in docker image build flow. "
+                "Use servers/sif tooling to bake LMCache into the SIF."
             ),
         )
         command_parser.add_argument(

@@ -3,47 +3,6 @@ set -euo pipefail
 
 VLLM_MODEL_EXTRA_ARGS=()
 
-install_lmcache_rocm_if_requested() {
-  local gfx="${VLLM_LMCACHE_GFX:-}"
-  if [[ -z "${gfx}" ]]; then
-    return 0
-  fi
-
-  if ! command -v git >/dev/null 2>&1; then
-    echo "error: VLLM_LMCACHE_GFX is set but git is not available in the container" >&2
-    return 1
-  fi
-
-  local repo_url="${VLLM_LMCACHE_REPO_URL:-https://github.com/LMCache/LMCache.git}"
-  local repo_tag="${VLLM_LMCACHE_REPO_TAG:-v0.4.1}"
-  local src_dir="${VLLM_LMCACHE_SRC_DIR:-/tmp/lmcache-src}"
-  local stamp_dir="${VLLM_LMCACHE_STAMP_DIR:-/tmp}"
-  local stamp_file="${stamp_dir}/.lmcache-installed-${repo_tag}-${gfx}"
-
-  if [[ -f "${stamp_file}" ]]; then
-    echo "lmcache bootstrap: already installed tag=${repo_tag} gfx=${gfx}" >&2
-    return 0
-  fi
-
-  mkdir -p "${stamp_dir}"
-  rm -rf "${src_dir}"
-  echo "lmcache bootstrap: cloning ${repo_url} tag=${repo_tag} gfx=${gfx}" >&2
-  git clone "${repo_url}" "${src_dir}"
-
-  (
-    cd "${src_dir}"
-    git checkout "tags/${repo_tag}"
-    PYTORCH_ROCM_ARCH="${gfx}" \
-      TORCH_DONT_CHECK_COMPILER_ABI=1 \
-      CXX=hipcc \
-      BUILD_WITH_HIP=1 \
-      python3 -m pip install --no-build-isolation -e .
-  )
-
-  touch "${stamp_file}"
-  echo "lmcache bootstrap: installation completed tag=${repo_tag} gfx=${gfx}" >&2
-}
-
 load_model_extra_args() {
   local encoded="${VLLM_MODEL_EXTRA_ARGS_B64:-}"
   local tmp_file=""
@@ -146,7 +105,6 @@ detect_trust_remote_code() {
   printf 'false'
 }
 
-install_lmcache_rocm_if_requested
 load_model_extra_args
 ALL_ARGS=("$@" "${VLLM_MODEL_EXTRA_ARGS[@]}")
 

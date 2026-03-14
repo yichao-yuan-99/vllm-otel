@@ -1,0 +1,27 @@
+Bootstrap: localimage
+From: __BASE_SIF__
+
+%files
+    __LMCACHE_SRC_DIR__ /opt/lmcache-src
+
+%post
+    set -euo pipefail
+
+    # If the base image still has runtime LMCache bootstrap in entrypoint,
+    # remove the call so LMCache is build-time only.
+    if [ -f /opt/vllm-plugins/vllm_entrypoint.sh ]; then
+        sed -i '/^install_lmcache_rocm_if_requested$/d' /opt/vllm-plugins/vllm_entrypoint.sh
+    fi
+
+    cd /opt/lmcache-src
+    PYTORCH_ROCM_ARCH="__ROCM_ARCH__" \
+      TORCH_DONT_CHECK_COMPILER_ABI=1 \
+      CXX=hipcc \
+      BUILD_WITH_HIP=1 \
+      python3 -m pip install --no-build-isolation .
+    rm -rf /opt/lmcache-src
+
+%labels
+    lmcache.repo "__LMCACHE_REPO_URL__"
+    lmcache.tag "__LMCACHE_REPO_TAG__"
+    lmcache.rocm_arch "__ROCM_ARCH__"

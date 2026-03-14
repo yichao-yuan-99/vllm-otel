@@ -41,7 +41,7 @@ gpus_per_node = 1
 gpu_memory_gb = 192
 total_vram_gb = 192
 max_time = "04:00:00"
-sif_img = "vllm-vllm-openai-rocm:v0.17.1-otel-lp-rocm.sif "
+sif_img = "vllm-vllm-openai-rocm:v0.17.1-otel-lp-rocm-lmcache-gfx942.sif"
 
 [partition.mi3008x]
 gpus_per_node = 8
@@ -50,7 +50,7 @@ total_vram_gb = 1536
 max_time = "12:00:00"
 # Optional per-partition vLLM SIF override (otherwise fallback to [images].vllm_image-derived SIF):
 # sif_img = "/path/to/vllm-mi3008x.sif"
-sif_img = "vllm-vllm-openai-rocm:v0.17.1-otel-lp-rocm.sif "
+sif_img = "vllm-vllm-openai-rocm:v0.17.1-otel-lp-rocm-lmcache-gfx942.sif"
 
 [partition.mi3258x]
 gpus_per_node = 8

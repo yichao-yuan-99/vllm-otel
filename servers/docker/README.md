@@ -37,7 +37,7 @@ Build and push from the official ROCm vLLM image tag:
 python3 servers/docker/build_image.py build-push --base-image vllm/vllm-openai-rocm:v0.17.1
 ```
 
-Build and push with ROCm LMCache bootstrap enabled (example `gfx942`):
+Build and push with deprecated `--gfx` flag (no LMCache runtime bootstrap; kept for compatibility):
 
 ```bash
 python3 servers/docker/build_image.py build-push \
@@ -95,30 +95,20 @@ You can override the defaults with either `--target-repo` and `--target-tag`, or
 
 ## ROCm LMCache Bootstrap (`--gfx`)
 
-When `--gfx <arch>` is provided, the image sets `VLLM_LMCACHE_GFX=<arch>`.
-At container startup, `servers/docker/vllm_entrypoint.sh` performs an on-the-fly LMCache install before launching vLLM:
+`--gfx` in `servers/docker/build_image.py` is deprecated and no longer injects LMCache install logic into the image entrypoint.
 
-1. clone `https://github.com/LMCache/LMCache.git`
-2. checkout tag `v0.4.1`
-3. install with:
+LMCache install is now handled by SIF build-time tooling in `servers/sif`.
+
+Use:
 
 ```bash
-PYTORCH_ROCM_ARCH="<arch>" \
-TORCH_DONT_CHECK_COMPILER_ABI=1 \
-CXX=hipcc \
-BUILD_WITH_HIP=1 \
-python3 -m pip install --no-build-isolation -e .
+python3 servers/sif/build_lmcache_sif.py \
+  --base-image docker://yichaoyuan/vllm-vllm-openai-rocm:v0.17.1-otel-lp-rocm \
+  --output-sif "$APPTAINER_IMGS/vllm-vllm-openai-rocm:v0.17.1-otel-lp-rocm-lmcache-gfx942.sif" \
+  --gfx gfx942
 ```
 
-Notes:
-
-- this is intentionally runtime bootstrap in the entrypoint, so build hosts do not need ROCm
-- startup needs network access to clone LMCache unless you override source env vars
-- optional runtime overrides:
-  - `VLLM_LMCACHE_REPO_URL` (default `https://github.com/LMCache/LMCache.git`)
-  - `VLLM_LMCACHE_REPO_TAG` (default `v0.4.1`)
-  - `VLLM_LMCACHE_SRC_DIR` (default `/tmp/lmcache-src`)
-  - `VLLM_LMCACHE_STAMP_DIR` (default `/tmp`)
+See `servers/sif/README.md` for full options.
 
 ## Generated Dockerfile Contents
 
