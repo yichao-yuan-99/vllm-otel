@@ -1066,7 +1066,8 @@ class ControlPlane:
                     http_status=400,
                     details={"allowed_partitions": sorted(self._cfg.partitions.keys())},
                 )
-            effective_vllm_sif = self._ensure_partition_vllm_sif_file(partition_spec)
+            # Render-only mode should not require local SIF files to exist yet.
+            effective_vllm_sif = self._effective_vllm_sif_path(partition_spec)
 
             model_spec = self._cfg.models.get(model)
             if model_spec is None:
@@ -1204,7 +1205,8 @@ class ControlPlane:
                     http_status=400,
                     details={"allowed_partitions": sorted(self._cfg.partitions.keys())},
                 )
-            effective_vllm_sif = self._ensure_partition_vllm_sif_file(partition_spec)
+            # Render-only mode should not require local SIF files to exist yet.
+            effective_vllm_sif = self._effective_vllm_sif_path(partition_spec)
 
             model_spec = self._cfg.models.get(model)
             if model_spec is None:

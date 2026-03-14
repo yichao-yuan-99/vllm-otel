@@ -26,6 +26,7 @@ Optional flags:
 - `--lmcache <size>`: enables LMCache options in rendered vLLM startup.
 - `--env KEY=VALUE` (repeatable): inject extra environment variables into rendered vLLM process.
 - `--check-port-availability`: validates selected login-node ports are currently free (off by default).
+- Render mode resolves the effective vLLM SIF path but does not require the file to exist at render time.
 
 ## Local mode
 
