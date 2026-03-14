@@ -5,7 +5,7 @@ From: __BASE_SIF__
     __LMCACHE_SRC_DIR__ /opt/lmcache-src
 
 %post
-    set -euo pipefail
+    set -eu
 
     # If the base image still has runtime LMCache bootstrap in entrypoint,
     # remove the call so LMCache is build-time only.
