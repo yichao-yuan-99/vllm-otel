@@ -72,7 +72,16 @@ def test_main_generates_local_mode_bundle(tmp_path: Path) -> None:
         assert lmcache_max_local_cpu_size == "100"
         assert local_mode_script_path.exists()
         target = rendered_dir / f"{local_mode_script_path.parent.name}.sh"
-        target.write_text("#!/usr/bin/env bash\necho fake\n", encoding="utf-8")
+        target.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "#SBATCH --output=/tmp/original/slurm.%j.out\n"
+            "#SBATCH --error=/tmp/original/slurm.%j.err\n"
+            "JOB_LOG_DIR=/tmp/original\n"
+            "GATEWAY_CONFIG_DEFAULT=/tmp/original-gateway-config.toml\n"
+            "echo fake\n",
+            encoding="utf-8",
+        )
         return target
 
     module.build_control_plane = fake_build_control_plane
@@ -110,7 +119,32 @@ def test_main_generates_local_mode_bundle(tmp_path: Path) -> None:
     for exp_dir in (qps_01_dir, qps_02_dir):
         assert (exp_dir / "replay.toml").exists()
         assert (exp_dir / "run_local_replay.sh").exists()
+        assert (exp_dir / "gateway-config.toml").exists()
         assert (exp_dir / "sbatch.sh").exists()
+
+    sbatch_01 = (qps_01_dir / "sbatch.sh").read_text(encoding="utf-8")
+    assert f"GATEWAY_CONFIG_DEFAULT={(qps_01_dir / 'gateway-config.toml').resolve()}" in sbatch_01
+    expected_log_dir_01 = (
+        repo_root
+        / "results"
+        / "replay"
+        / batch_dir.name
+        / "model-a"
+        / "dataset-b"
+        / "agent-c"
+        / "sweep-qps-local"
+        / "single"
+        / "qps0_1"
+        / "sbatch-logs"
+    ).resolve()
+    assert f"#SBATCH --output={expected_log_dir_01}/slurm.%j.out" in sbatch_01
+    assert f"#SBATCH --error={expected_log_dir_01}/slurm.%j.err" in sbatch_01
+    assert f'JOB_LOG_DIR=\"{expected_log_dir_01}\"' in sbatch_01
+
+    gateway_01 = tomllib.loads((qps_01_dir / "gateway-config.toml").read_text(encoding="utf-8"))
+    assert gateway_01["schema_version"] == 1
+    assert gateway_01["run"]["port_profile_id"] == 0
+    assert gateway_01["run"]["output_root"] == str((qps_01_dir / "gateway-artifacts").resolve())
 
     submit_all_path = (batch_dir / "submit_all.sh").resolve()
     assert submit_all_path.exists()
@@ -140,3 +174,6 @@ def test_main_generates_local_mode_bundle(tmp_path: Path) -> None:
     assert manifest["submit_all_script"] == str(submit_all_path)
     assert manifest["submit_all_command"].startswith("bash ")
     assert len(manifest["generated_experiments"]) == 2
+    for experiment in manifest["generated_experiments"]:
+        assert experiment["gateway_config"].endswith("gateway-config.toml")
+        assert experiment["sbatch_log_dir"].endswith("/sbatch-logs")

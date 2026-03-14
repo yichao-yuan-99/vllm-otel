@@ -7,7 +7,20 @@ Each generated experiment (one per QPS) is isolated in its own subdirectory and 
 
 - `replay.toml`: replay config
 - `run_local_replay.sh`: local-mode script executed by sbatch
+- `gateway-config.toml`: per-experiment gateway config (port profile + output root)
 - `sbatch.sh`: rendered sbatch script (not submitted automatically)
+
+Rendered `sbatch.sh` files are patched so Slurm `--output/--error` and runtime logs
+(`JOB_LOG_DIR`) go to:
+
+- `<replay output dir>/sbatch-logs/`
+
+This includes:
+
+- `jaeger.<job_id>.log`
+- `vllm.<job_id>.log`
+- `gateway.<job_id>.log`
+- `local-mode-script.<job_id>.log`
 
 Each generated batch root also includes:
 
