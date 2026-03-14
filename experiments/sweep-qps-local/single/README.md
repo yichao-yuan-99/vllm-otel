@@ -18,6 +18,7 @@ python3 experiments/sweep-qps-local/single/generate_replay_configs.py \
   --randomize-seed 11 \
   --qps-list 0.05,0.1,0.2,0.4 \
   --time-constraint-s 1800 \
+  --lmcache 100 \
   -p mi3001x \
   -m qwen3_coder_30b
 ```
@@ -49,5 +50,6 @@ sbatch experiments/sweep-qps-local/single/generated/<utc-timestamp>/qps0_1/sbatc
 
 - This is single-profile local mode (default `--port-profile 0`).
 - You can override profile with `-P/--port-profile`.
+- You can pass `--lmcache <size>` to forward LMCache settings into rendered sbatch via `render-sbatch.py start --lmcache`.
 - Baseline sweep-qps options are supported (including replay JSON overlays),
   plus render-sbatch model/partition options (`-m`, `-p`).

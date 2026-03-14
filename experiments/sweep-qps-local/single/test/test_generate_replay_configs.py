@@ -63,11 +63,13 @@ def test_main_generates_local_mode_bundle(tmp_path: Path) -> None:
         model: str,
         local_mode_script_path: Path,
         check_port_availability: bool,
+        lmcache_max_local_cpu_size: str | None,
     ) -> Path:
         del control_plane, check_port_availability
         assert port_profile_id == 0
         assert partition == "mi3001x"
         assert model == "qwen3_coder_30b"
+        assert lmcache_max_local_cpu_size == "100"
         assert local_mode_script_path.exists()
         target = rendered_dir / f"{local_mode_script_path.parent.name}.sh"
         target.write_text("#!/usr/bin/env bash\necho fake\n", encoding="utf-8")
@@ -92,6 +94,8 @@ def test_main_generates_local_mode_bundle(tmp_path: Path) -> None:
             "mi3001x",
             "--model",
             "qwen3_coder_30b",
+            "--lmcache",
+            "100",
             "--server-config",
             str(server_config_path),
             "--output-config-dir",
@@ -125,5 +129,6 @@ def test_main_generates_local_mode_bundle(tmp_path: Path) -> None:
     assert manifest["status"] == "ok"
     assert manifest["partition"] == "mi3001x"
     assert manifest["model"] == "qwen3_coder_30b"
+    assert manifest["lmcache"] == 100
     assert manifest["port_profile"] == 0
     assert len(manifest["generated_experiments"]) == 2

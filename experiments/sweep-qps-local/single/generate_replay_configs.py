@@ -292,13 +292,14 @@ def render_local_mode_sbatch(
     model: str,
     local_mode_script_path: Path,
     check_port_availability: bool,
+    lmcache_max_local_cpu_size: str | None,
 ) -> Path:
     result = control_plane.render_start_sbatch(
         port_profile_id=port_profile_id,
         partition=partition,
         model=model,
         extra_env={},
-        lmcache_max_local_cpu_size=None,
+        lmcache_max_local_cpu_size=lmcache_max_local_cpu_size,
         local_mode_script=str(local_mode_script_path.resolve()),
         check_port_availability=check_port_availability,
     )
@@ -359,6 +360,15 @@ def build_parser() -> argparse.ArgumentParser:
         "-m",
         required=True,
         help="render-sbatch model key, e.g. qwen3_coder_30b",
+    )
+    parser.add_argument(
+        "--lmcache",
+        type=int,
+        default=None,
+        help=(
+            "Optional LMCache max local CPU size. If provided, this value is forwarded "
+            "to render-sbatch/start --lmcache for generated sbatch scripts."
+        ),
     )
     parser.add_argument(
         "--port-profile",
@@ -469,6 +479,8 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("--vllm-log-interval-s must be > 0")
         if args.vllm_log_timeout_s is not None and args.vllm_log_timeout_s <= 0:
             raise ValueError("--vllm-log-timeout-s must be > 0")
+        if args.lmcache is not None and args.lmcache <= 0:
+            raise ValueError("--lmcache must be a positive integer")
 
         launch_policy_override_json = parse_optional_object_json(
             args.launch_policy_override_json,
@@ -528,6 +540,9 @@ def main(argv: list[str] | None = None) -> int:
                 model=args.model,
                 local_mode_script_path=local_mode_script_path,
                 check_port_availability=bool(args.check_port_availability),
+                lmcache_max_local_cpu_size=(
+                    str(args.lmcache) if args.lmcache is not None else None
+                ),
             )
             bundled_sbatch_path = (experiment_dir / "sbatch.sh").resolve()
             shutil.copy2(rendered_sbatch_path, bundled_sbatch_path)
@@ -555,6 +570,7 @@ def main(argv: list[str] | None = None) -> int:
             "server_config": str(server_config_path),
             "partition": args.partition,
             "model": args.model,
+            "lmcache": args.lmcache,
             "port_profile": args.port_profile,
             "check_port_availability": bool(args.check_port_availability),
             "output_config_root_dir": str(output_config_root_dir),
