@@ -3649,6 +3649,7 @@ class ControlPlane:
               while (( SECONDS < deadline )); do
                 if ! kill -0 "${{GATEWAY_PID}}" >/dev/null 2>&1; then
                   echo "Gateway exited before readiness check completed." >&2
+                  dump_gateway_diagnostics "gateway process exited before readiness"
                   return 1
                 fi
                 if [[ "${{GATEWAY_PORT}}" -eq "${{GATEWAY_PARSE_PORT}}" ]]; then
@@ -3662,7 +3663,36 @@ class ControlPlane:
                 fi
                 sleep 1
               done
+              dump_gateway_diagnostics "gateway readiness timeout"
               return 1
+            }}
+
+            dump_gateway_diagnostics() {{
+              local reason="${{1:-gateway failure}}"
+              echo "Gateway diagnostics: ${{reason}}" >&2
+              if [[ -n "${{GATEWAY_PID:-}}" ]]; then
+                if kill -0 "${{GATEWAY_PID}}" >/dev/null 2>&1; then
+                  echo "Gateway PID ${{GATEWAY_PID}} is still running." >&2
+                else
+                  local gateway_exit_code=0
+                  if wait "${{GATEWAY_PID}}" >/dev/null 2>&1; then
+                    gateway_exit_code=0
+                  else
+                    gateway_exit_code=$?
+                  fi
+                  echo "Gateway PID ${{GATEWAY_PID}} exited with code ${{gateway_exit_code}}." >&2
+                fi
+              else
+                echo "Gateway PID is not set." >&2
+              fi
+              echo "Gateway log path: ${{GATEWAY_LOG}}" >&2
+              if [[ -f "${{GATEWAY_LOG}}" ]]; then
+                echo "----- gateway log tail (last 200 lines) -----" >&2
+                tail -n 200 "${{GATEWAY_LOG}}" >&2 || true
+                echo "----- end gateway log tail -----" >&2
+              else
+                echo "Gateway log file not found." >&2
+              fi
             }}
 
             terminate_process() {{
@@ -3777,6 +3807,7 @@ class ControlPlane:
               GATEWAY_CMD+=(--skip-install)
             fi
 
+            echo "Starting gateway command: ${{GATEWAY_CMD[*]}}"
             "${{GATEWAY_CMD[@]}}" >"${{GATEWAY_LOG}}" 2>&1 &
             GATEWAY_PID=$!
 
