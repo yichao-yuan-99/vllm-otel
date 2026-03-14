@@ -86,6 +86,104 @@ def _effective_vllm_extra_args(*, extra_args: list[str], gpus_per_node: int) -> 
     return normalized_args
 
 
+def _compute_even_group_gpu_split(
+    *,
+    gpus_per_node: int,
+    gpu_memory_gb: float,
+    group_size: int,
+) -> tuple[int, float, list[str]]:
+    if gpus_per_node <= 0:
+        raise ValueError(f"gpus_per_node must be > 0 (got {gpus_per_node})")
+    if group_size <= 0:
+        raise ValueError(f"group_size must be > 0 (got {group_size})")
+    if group_size > gpus_per_node:
+        raise ValueError(
+            f"group_size={group_size} exceeds gpus_per_node={gpus_per_node}; "
+            "single-node grouped launch requires group_size <= gpus_per_node"
+        )
+    if gpus_per_node % group_size != 0:
+        raise ValueError(
+            f"group_size={group_size} does not evenly divide gpus_per_node={gpus_per_node}; "
+            "choose a profile count that evenly divides node GPUs"
+        )
+
+    gpus_per_profile = gpus_per_node // group_size
+    total_vram_per_profile_gb = gpu_memory_gb * gpus_per_profile
+    visible_devices_by_profile = []
+    for worker_index in range(group_size):
+        start_gpu = worker_index * gpus_per_profile
+        gpu_ids = [str(start_gpu + offset) for offset in range(gpus_per_profile)]
+        visible_devices_by_profile.append(",".join(gpu_ids))
+
+    return gpus_per_profile, total_vram_per_profile_gb, visible_devices_by_profile
+
+
+def _normalize_service_extra_env(extra_env: dict[str, str] | None) -> dict[str, str]:
+    if not extra_env:
+        return {}
+
+    normalized: dict[str, str] = {}
+    for raw_key, raw_value in extra_env.items():
+        key = str(raw_key).strip()
+        if not key:
+            raise ValueError("environment variable key cannot be empty")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            raise ValueError(
+                f"invalid environment variable key '{key}'; "
+                "must match [A-Za-z_][A-Za-z0-9_]*"
+            )
+        value = str(raw_value)
+        if "\x00" in value:
+            raise ValueError(f"environment variable '{key}' contains NUL byte")
+        normalized[key] = value
+
+    return dict(sorted(normalized.items()))
+
+
+def _render_apptainer_extra_env_flags(*, extra_env: dict[str, str], indent: str) -> str:
+    if not extra_env:
+        return ""
+    lines = [
+        f"{indent}--env {shlex.quote(f'{key}={value}')} \\"
+        for key, value in extra_env.items()
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _apply_lmcache_option(
+    *,
+    extra_env: dict[str, str],
+    lmcache_max_local_cpu_size: str | None,
+) -> tuple[dict[str, str], bool]:
+    normalized = dict(extra_env)
+    if lmcache_max_local_cpu_size is None:
+        return dict(sorted(normalized.items())), False
+
+    size_value = str(lmcache_max_local_cpu_size).strip()
+    if not size_value:
+        raise ValueError("lmcache size must be non-empty")
+
+    existing = normalized.get("LMCACHE_MAX_LOCAL_CPU_SIZE")
+    if existing is not None and existing != size_value:
+        raise ValueError(
+            "LMCACHE_MAX_LOCAL_CPU_SIZE is already set in extra_env with a different value"
+        )
+
+    normalized["LMCACHE_MAX_LOCAL_CPU_SIZE"] = size_value
+    return dict(sorted(normalized.items())), True
+
+
+def _normalize_local_mode_script(local_mode_script: str | None) -> str | None:
+    if local_mode_script is None:
+        return None
+    normalized = str(local_mode_script).strip()
+    if not normalized:
+        raise ValueError("local_mode_script must be non-empty")
+    if "\x00" in normalized:
+        raise ValueError("local_mode_script cannot contain NUL byte")
+    return normalized
+
+
 class ControlPlaneError(RuntimeError):
     """Typed error raised by control-plane actions."""
 
@@ -177,6 +275,7 @@ class ActiveJob:
     slurm_err_log: str
     jaeger_log: str
     vllm_log: str
+    extra_env: dict[str, str] = field(default_factory=dict)
     group_name: str | None = None
     group_profiles: list[int] = field(default_factory=list)
 
@@ -197,6 +296,15 @@ class ActiveJob:
             slurm_err_log=str(payload["slurm_err_log"]),
             jaeger_log=str(payload["jaeger_log"]),
             vllm_log=str(payload["vllm_log"]),
+            extra_env=(
+                {
+                    str(key): str(value)
+                    for key, value in payload.get("extra_env", {}).items()
+                    if isinstance(key, str)
+                }
+                if isinstance(payload.get("extra_env"), dict)
+                else {}
+            ),
             group_name=(
                 str(payload.get("group_name"))
                 if isinstance(payload.get("group_name"), str) and str(payload.get("group_name")).strip()
@@ -229,6 +337,7 @@ class ActiveJob:
             "slurm_err_log": self.slurm_err_log,
             "jaeger_log": self.jaeger_log,
             "vllm_log": self.vllm_log,
+            "extra_env": dict(self.extra_env),
             "group_name": self.group_name,
             "group_profiles": list(self.group_profiles),
         }
@@ -237,7 +346,7 @@ class ActiveJob:
 class ControlPlane:
     """Main API used by the HTTP server and CLI."""
 
-    def __init__(self, config_path: Path) -> None:
+    def __init__(self, config_path: Path, *, archive_previous_artifacts: bool = True) -> None:
         self._config_path = config_path.resolve()
         self._cfg = load_runtime_config(self._config_path)
         self._lock = threading.Lock()
@@ -248,7 +357,8 @@ class ControlPlane:
         self._cfg.run_dir.mkdir(parents=True, exist_ok=True)
         self._cfg.log_dir.mkdir(parents=True, exist_ok=True)
         self._cfg.state_file.parent.mkdir(parents=True, exist_ok=True)
-        self._archive_previous_artifacts()
+        if archive_previous_artifacts:
+            self._archive_previous_artifacts()
 
     @property
     def config(self) -> RuntimeConfig:
@@ -258,8 +368,29 @@ class ControlPlane:
         with self._lock:
             return self._prepare_sif_files()
 
-    def start(self, *, port_profile_id: int, partition: str, model: str, block: bool = False) -> CommandResult:
+    def start(
+        self,
+        *,
+        port_profile_id: int,
+        partition: str,
+        model: str,
+        block: bool = False,
+        extra_env: dict[str, str] | None = None,
+        lmcache_max_local_cpu_size: str | None = None,
+    ) -> CommandResult:
         port_profile = self._require_port_profile(port_profile_id)
+        try:
+            normalized_extra_env = _normalize_service_extra_env(extra_env)
+            normalized_extra_env, lmcache_enabled = _apply_lmcache_option(
+                extra_env=normalized_extra_env,
+                lmcache_max_local_cpu_size=lmcache_max_local_cpu_size,
+            )
+        except ValueError as exc:
+            raise ControlPlaneError(
+                message=f"invalid start.extra_env/lmcache: {exc}",
+                code=122,
+                http_status=400,
+            ) from exc
         start_started_at = _utc_now_iso()
         self._set_start_progress(
             port_profile_id=port_profile.profile_id,
@@ -355,6 +486,8 @@ class ControlPlane:
                     partition_spec=partition_spec,
                     model_spec=model_spec,
                     port_profile=port_profile,
+                    extra_env=normalized_extra_env,
+                    lmcache_enabled=lmcache_enabled,
                 )
                 sbatch_result = self._run_checked(["sbatch", str(script_path)], timeout_seconds=120)
                 job_id = _extract_sbatch_job_id(f"{sbatch_result.stdout}\n{sbatch_result.stderr}")
@@ -389,6 +522,7 @@ class ControlPlane:
                     slurm_err_log=slurm_err_log,
                     jaeger_log=jaeger_log,
                     vllm_log=vllm_log,
+                    extra_env=normalized_extra_env,
                 )
                 self._set_active_job(state, port_profile_id=port_profile.profile_id, active_job=new_active.to_dict())
                 self._save_state(state)
@@ -404,6 +538,7 @@ class ControlPlane:
                     "jaeger_otlp_port": port_profile.jaeger_otlp_port,
                     "jaeger_ui_port": port_profile.jaeger_api_port,
                     "sbatch_script": str(script_path),
+                    "extra_env": dict(normalized_extra_env),
                     "blocked": block,
                 }
 
@@ -515,7 +650,21 @@ class ControlPlane:
         partition: str,
         model: str,
         block: bool = True,
+        extra_env: dict[str, str] | None = None,
+        lmcache_max_local_cpu_size: str | None = None,
     ) -> CommandResult:
+        try:
+            normalized_extra_env = _normalize_service_extra_env(extra_env)
+            normalized_extra_env, lmcache_enabled = _apply_lmcache_option(
+                extra_env=normalized_extra_env,
+                lmcache_max_local_cpu_size=lmcache_max_local_cpu_size,
+            )
+        except ValueError as exc:
+            raise ControlPlaneError(
+                message=f"invalid group/start.extra_env/lmcache: {exc}",
+                code=123,
+                http_status=400,
+            ) from exc
         normalized_group_name = group_name.strip()
         if not normalized_group_name:
             raise ControlPlaneError(
@@ -628,18 +777,47 @@ class ControlPlane:
                         details={"allowed_models": sorted(self._cfg.models.keys())},
                     )
 
-                max_weight = partition_spec.total_vram_gb * 0.75
+                try:
+                    (
+                        gpus_per_profile,
+                        total_vram_per_profile_gb,
+                        visible_devices_by_profile,
+                    ) = _compute_even_group_gpu_split(
+                        gpus_per_node=partition_spec.gpus_per_node,
+                        gpu_memory_gb=partition_spec.gpu_memory_gb,
+                        group_size=len(port_profiles),
+                    )
+                except ValueError as exc:
+                    raise ControlPlaneError(
+                        message=f"invalid grouped GPU split for partition '{partition}': {exc}",
+                        code=120,
+                        http_status=422,
+                        details={
+                            "partition": partition,
+                            "gpus_per_node": partition_spec.gpus_per_node,
+                            "gpu_memory_gb": partition_spec.gpu_memory_gb,
+                            "group_size": len(port_profiles),
+                            "profile_list": list(normalized_profile_ids),
+                        },
+                    ) from exc
+
+                max_weight = total_vram_per_profile_gb * 0.75
                 if model_spec.weight_vram_gb > max_weight:
                     raise ControlPlaneError(
                         message=(
                             f"model '{model}' requires {model_spec.weight_vram_gb:.1f} GB which exceeds "
-                            f"75% of partition '{partition}' VRAM ({max_weight:.1f} GB)"
+                            "75% of per-profile VRAM for grouped launch "
+                            f"({max_weight:.1f} GB; group_size={len(port_profiles)}, "
+                            f"gpus_per_profile={gpus_per_profile})"
                         ),
                         code=14,
                         http_status=422,
                         details={
                             "model_weight_vram_gb": model_spec.weight_vram_gb,
                             "partition_total_vram_gb": partition_spec.total_vram_gb,
+                            "group_total_vram_per_profile_gb": total_vram_per_profile_gb,
+                            "group_size": len(port_profiles),
+                            "gpus_per_profile": gpus_per_profile,
                             "max_allowed_weight_vram_gb": max_weight,
                         },
                     )
@@ -652,6 +830,10 @@ class ControlPlane:
                     model_spec=model_spec,
                     port_profiles=port_profiles,
                     group_name=normalized_group_name,
+                    gpus_per_profile=gpus_per_profile,
+                    visible_devices_by_profile=visible_devices_by_profile,
+                    extra_env=normalized_extra_env,
+                    lmcache_enabled=lmcache_enabled,
                 )
                 sbatch_result = self._run_checked(["sbatch", str(script_path)], timeout_seconds=120)
                 job_id = _extract_sbatch_job_id(f"{sbatch_result.stdout}\n{sbatch_result.stderr}")
@@ -667,7 +849,7 @@ class ControlPlane:
                         partition=partition_spec.name,
                         model=model_spec.name,
                         submitted_at=_utc_now_iso(),
-                        tensor_parallel_size=partition_spec.gpus_per_node,
+                        tensor_parallel_size=gpus_per_profile,
                         service_port=profile.vllm_port,
                         jaeger_otlp_port=profile.jaeger_otlp_port,
                         jaeger_ui_port=profile.jaeger_api_port,
@@ -676,6 +858,7 @@ class ControlPlane:
                         slurm_err_log=slurm_err_log,
                         jaeger_log=jaeger_log,
                         vllm_log=vllm_log,
+                        extra_env=normalized_extra_env,
                         group_name=normalized_group_name,
                         group_profiles=list(normalized_profile_ids),
                     )
@@ -693,7 +876,10 @@ class ControlPlane:
                     "partition": partition_spec.name,
                     "model": model_spec.name,
                     "time_limit": partition_spec.max_time,
-                    "tensor_parallel_size": partition_spec.gpus_per_node,
+                    "tensor_parallel_size": gpus_per_profile,
+                    "gpus_per_profile": gpus_per_profile,
+                    "total_vram_per_profile_gb": total_vram_per_profile_gb,
+                    "extra_env": dict(normalized_extra_env),
                     "blocked": bool(block),
                     "sbatch_script": str(script_path),
                 }
@@ -829,6 +1015,277 @@ class ControlPlane:
                     finished_at=_utc_now_iso(),
                 )
             raise
+
+    def render_start_sbatch(
+        self,
+        *,
+        port_profile_id: int,
+        partition: str,
+        model: str,
+        extra_env: dict[str, str] | None = None,
+        lmcache_max_local_cpu_size: str | None = None,
+        local_mode_script: str | None = None,
+        check_port_availability: bool = False,
+    ) -> CommandResult:
+        port_profile = self._require_port_profile(port_profile_id)
+        try:
+            normalized_extra_env = _normalize_service_extra_env(extra_env)
+            normalized_extra_env, lmcache_enabled = _apply_lmcache_option(
+                extra_env=normalized_extra_env,
+                lmcache_max_local_cpu_size=lmcache_max_local_cpu_size,
+            )
+            normalized_local_mode_script = _normalize_local_mode_script(local_mode_script)
+        except ValueError as exc:
+            raise ControlPlaneError(
+                message=f"invalid render/start.extra_env/lmcache/local_mode: {exc}",
+                code=122,
+                http_status=400,
+            ) from exc
+
+        with self._lock:
+            partition_spec = self._cfg.partitions.get(partition)
+            if partition_spec is None:
+                raise ControlPlaneError(
+                    message=f"unknown partition '{partition}'",
+                    code=12,
+                    http_status=400,
+                    details={"allowed_partitions": sorted(self._cfg.partitions.keys())},
+                )
+
+            model_spec = self._cfg.models.get(model)
+            if model_spec is None:
+                raise ControlPlaneError(
+                    message=f"unknown model '{model}'",
+                    code=13,
+                    http_status=400,
+                    details={"allowed_models": sorted(self._cfg.models.keys())},
+                )
+
+            max_weight = partition_spec.total_vram_gb * 0.75
+            if model_spec.weight_vram_gb > max_weight:
+                raise ControlPlaneError(
+                    message=(
+                        f"model '{model}' requires {model_spec.weight_vram_gb:.1f} GB which exceeds "
+                        f"75% of partition '{partition}' VRAM ({max_weight:.1f} GB)"
+                    ),
+                    code=14,
+                    http_status=422,
+                    details={
+                        "model_weight_vram_gb": model_spec.weight_vram_gb,
+                        "partition_total_vram_gb": partition_spec.total_vram_gb,
+                        "max_allowed_weight_vram_gb": max_weight,
+                    },
+                )
+
+            if check_port_availability:
+                self._ensure_profile_ports_available_on_login(port_profile)
+
+            if normalized_local_mode_script is not None:
+                gateway_port, gateway_parse_port = self._gateway_ports_for_profile(
+                    port_profile_id=port_profile.profile_id
+                )
+                script_path = self._write_local_mode_sbatch_script(
+                    partition_spec=partition_spec,
+                    model_spec=model_spec,
+                    port_profile=port_profile,
+                    gateway_port=gateway_port,
+                    gateway_parse_port=gateway_parse_port,
+                    local_mode_script=normalized_local_mode_script,
+                    extra_env=normalized_extra_env,
+                    lmcache_enabled=lmcache_enabled,
+                )
+            else:
+                script_path = self._write_sbatch_script(
+                    partition_spec=partition_spec,
+                    model_spec=model_spec,
+                    port_profile=port_profile,
+                    extra_env=normalized_extra_env,
+                    lmcache_enabled=lmcache_enabled,
+                )
+
+        return CommandResult(
+            code=0,
+            message=f"rendered sbatch script for port profile {port_profile.profile_id}",
+            data={
+                "port_profile": port_profile.profile_id,
+                "partition": partition_spec.name,
+                "model": model_spec.name,
+                "time_limit": partition_spec.max_time,
+                "tensor_parallel_size": partition_spec.gpus_per_node,
+                "service_port": port_profile.vllm_port,
+                "jaeger_otlp_port": port_profile.jaeger_otlp_port,
+                "jaeger_ui_port": port_profile.jaeger_api_port,
+                "lmcache_port": port_profile.lmcache_port,
+                "sbatch_script": str(script_path),
+                "extra_env": dict(normalized_extra_env),
+                "lmcache_enabled": lmcache_enabled,
+                "local_mode_enabled": normalized_local_mode_script is not None,
+                "local_mode_script": normalized_local_mode_script,
+                "validated_ports_available_on_login": bool(check_port_availability),
+            },
+        )
+
+    def render_start_group_sbatch(
+        self,
+        *,
+        group_name: str,
+        port_profile_ids: list[int],
+        partition: str,
+        model: str,
+        extra_env: dict[str, str] | None = None,
+        lmcache_max_local_cpu_size: str | None = None,
+        check_port_availability: bool = False,
+    ) -> CommandResult:
+        try:
+            normalized_extra_env = _normalize_service_extra_env(extra_env)
+            normalized_extra_env, lmcache_enabled = _apply_lmcache_option(
+                extra_env=normalized_extra_env,
+                lmcache_max_local_cpu_size=lmcache_max_local_cpu_size,
+            )
+        except ValueError as exc:
+            raise ControlPlaneError(
+                message=f"invalid render/group-start.extra_env/lmcache: {exc}",
+                code=123,
+                http_status=400,
+            ) from exc
+
+        normalized_group_name = group_name.strip()
+        if not normalized_group_name:
+            raise ControlPlaneError(
+                message="group_name must be non-empty",
+                code=71,
+                http_status=400,
+            )
+        if not port_profile_ids:
+            raise ControlPlaneError(
+                message="profile_list must contain at least one profile id",
+                code=72,
+                http_status=400,
+            )
+        if any(isinstance(value, bool) for value in port_profile_ids):
+            raise ControlPlaneError(
+                message="profile_list values must be integers",
+                code=73,
+                http_status=400,
+            )
+
+        normalized_profile_ids = [int(value) for value in port_profile_ids]
+        if len(set(normalized_profile_ids)) != len(normalized_profile_ids):
+            raise ControlPlaneError(
+                message="profile_list cannot contain duplicate profile ids",
+                code=74,
+                http_status=400,
+            )
+
+        port_profiles = [self._require_port_profile(profile_id) for profile_id in normalized_profile_ids]
+        with self._lock:
+            partition_spec = self._cfg.partitions.get(partition)
+            if partition_spec is None:
+                raise ControlPlaneError(
+                    message=f"unknown partition '{partition}'",
+                    code=12,
+                    http_status=400,
+                    details={"allowed_partitions": sorted(self._cfg.partitions.keys())},
+                )
+
+            model_spec = self._cfg.models.get(model)
+            if model_spec is None:
+                raise ControlPlaneError(
+                    message=f"unknown model '{model}'",
+                    code=13,
+                    http_status=400,
+                    details={"allowed_models": sorted(self._cfg.models.keys())},
+                )
+
+            try:
+                (
+                    gpus_per_profile,
+                    total_vram_per_profile_gb,
+                    visible_devices_by_profile,
+                ) = _compute_even_group_gpu_split(
+                    gpus_per_node=partition_spec.gpus_per_node,
+                    gpu_memory_gb=partition_spec.gpu_memory_gb,
+                    group_size=len(port_profiles),
+                )
+            except ValueError as exc:
+                raise ControlPlaneError(
+                    message=f"invalid grouped GPU split for partition '{partition}': {exc}",
+                    code=120,
+                    http_status=422,
+                    details={
+                        "partition": partition,
+                        "gpus_per_node": partition_spec.gpus_per_node,
+                        "gpu_memory_gb": partition_spec.gpu_memory_gb,
+                        "group_size": len(port_profiles),
+                        "profile_list": list(normalized_profile_ids),
+                    },
+                ) from exc
+
+            max_weight = total_vram_per_profile_gb * 0.75
+            if model_spec.weight_vram_gb > max_weight:
+                raise ControlPlaneError(
+                    message=(
+                        f"model '{model}' requires {model_spec.weight_vram_gb:.1f} GB which exceeds "
+                        "75% of per-profile VRAM for grouped launch "
+                        f"({max_weight:.1f} GB; group_size={len(port_profiles)}, "
+                        f"gpus_per_profile={gpus_per_profile})"
+                    ),
+                    code=14,
+                    http_status=422,
+                    details={
+                        "model_weight_vram_gb": model_spec.weight_vram_gb,
+                        "partition_total_vram_gb": partition_spec.total_vram_gb,
+                        "group_total_vram_per_profile_gb": total_vram_per_profile_gb,
+                        "group_size": len(port_profiles),
+                        "gpus_per_profile": gpus_per_profile,
+                        "max_allowed_weight_vram_gb": max_weight,
+                    },
+                )
+
+            if check_port_availability:
+                for profile in port_profiles:
+                    self._ensure_profile_ports_available_on_login(profile)
+
+            script_path = self._write_group_sbatch_script(
+                partition_spec=partition_spec,
+                model_spec=model_spec,
+                port_profiles=port_profiles,
+                group_name=normalized_group_name,
+                gpus_per_profile=gpus_per_profile,
+                visible_devices_by_profile=visible_devices_by_profile,
+                extra_env=normalized_extra_env,
+                lmcache_enabled=lmcache_enabled,
+            )
+
+        return CommandResult(
+            code=0,
+            message=f"rendered grouped sbatch script for group '{normalized_group_name}'",
+            data={
+                "group_name": normalized_group_name,
+                "profile_list": list(normalized_profile_ids),
+                "partition": partition_spec.name,
+                "model": model_spec.name,
+                "time_limit": partition_spec.max_time,
+                "tensor_parallel_size": gpus_per_profile,
+                "gpus_per_profile": gpus_per_profile,
+                "total_vram_per_profile_gb": total_vram_per_profile_gb,
+                "visible_devices_by_profile": list(visible_devices_by_profile),
+                "sbatch_script": str(script_path),
+                "extra_env": dict(normalized_extra_env),
+                "lmcache_enabled": lmcache_enabled,
+                "validated_ports_available_on_login": bool(check_port_availability),
+                "profiles": [
+                    {
+                        "port_profile": profile.profile_id,
+                        "service_port": profile.vllm_port,
+                        "jaeger_otlp_port": profile.jaeger_otlp_port,
+                        "jaeger_ui_port": profile.jaeger_api_port,
+                        "lmcache_port": profile.lmcache_port,
+                    }
+                    for profile in port_profiles
+                ],
+            },
+        )
 
     def stop_group(
         self,
@@ -2041,6 +2498,76 @@ class ControlPlane:
         self._ensure_port_available_on_login(port_profile.jaeger_otlp_port, label="jaeger_otlp_port")
         self._ensure_port_available_on_login(port_profile.jaeger_api_port, label="jaeger_ui_port")
 
+    def _gateway_ports_for_profile(self, *, port_profile_id: int) -> tuple[int, int]:
+        config_path = (self._cfg.repo_root / "configs" / "port_profiles.toml").resolve()
+        try:
+            payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            raise ControlPlaneError(
+                message=f"port profiles config not found: {config_path}",
+                code=124,
+                http_status=500,
+            ) from exc
+        except tomllib.TOMLDecodeError as exc:
+            raise ControlPlaneError(
+                message=f"failed to parse port profiles config: {config_path}",
+                code=124,
+                http_status=500,
+                details={"error": str(exc)},
+            ) from exc
+
+        profiles = payload.get("profiles")
+        if not isinstance(profiles, dict):
+            raise ControlPlaneError(
+                message=f"port profiles config is missing [profiles]: {config_path}",
+                code=124,
+                http_status=500,
+            )
+
+        raw_profile = profiles.get(str(port_profile_id))
+        if not isinstance(raw_profile, dict):
+            raise ControlPlaneError(
+                message=f"missing port profile {port_profile_id} in {config_path}",
+                code=124,
+                http_status=500,
+            )
+
+        gateway_port_raw = raw_profile.get("gateway_port")
+        gateway_parse_port_raw = raw_profile.get("gateway_parse_port")
+        if isinstance(gateway_port_raw, bool) or not isinstance(gateway_port_raw, int):
+            raise ControlPlaneError(
+                message=f"profiles.{port_profile_id}.gateway_port must be an integer in {config_path}",
+                code=124,
+                http_status=500,
+            )
+        if isinstance(gateway_parse_port_raw, bool) or not isinstance(gateway_parse_port_raw, int):
+            raise ControlPlaneError(
+                message=(
+                    f"profiles.{port_profile_id}.gateway_parse_port must be an integer in "
+                    f"{config_path}"
+                ),
+                code=124,
+                http_status=500,
+            )
+
+        gateway_port = int(gateway_port_raw)
+        gateway_parse_port = int(gateway_parse_port_raw)
+        for key, value in (
+            ("gateway_port", gateway_port),
+            ("gateway_parse_port", gateway_parse_port),
+        ):
+            if value < 1 or value > 65535:
+                raise ControlPlaneError(
+                    message=(
+                        f"profiles.{port_profile_id}.{key} must be in range 1..65535 in "
+                        f"{config_path}"
+                    ),
+                    code=124,
+                    http_status=500,
+                )
+
+        return gateway_port, gateway_parse_port
+
     def _collect_readiness_snapshot(self, *, port_profile_id: int) -> dict[str, Any]:
         port_profile = self._require_port_profile(port_profile_id)
         state = self._load_state()
@@ -2372,6 +2899,10 @@ class ControlPlane:
         model_spec: ModelSpec,
         port_profiles: list[AMDHPCPortProfile],
         group_name: str,
+        gpus_per_profile: int,
+        visible_devices_by_profile: list[str],
+        extra_env: dict[str, str],
+        lmcache_enabled: bool,
     ) -> Path:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         safe_partition = _safe_token(partition_spec.name)
@@ -2386,9 +2917,18 @@ class ControlPlane:
         vllm_ports_csv = ",".join(str(profile.vllm_port) for profile in port_profiles)
         jaeger_otlp_ports_csv = ",".join(str(profile.jaeger_otlp_port) for profile in port_profiles)
         jaeger_ui_ports_csv = ",".join(str(profile.jaeger_api_port) for profile in port_profiles)
+        lmcache_ports_csv = ",".join(str(profile.lmcache_port) for profile in port_profiles)
         group_size = len(port_profiles)
-
-        visible_devices = ",".join(str(idx) for idx in range(partition_spec.gpus_per_node))
+        if len(visible_devices_by_profile) != group_size:
+            raise ControlPlaneError(
+                message=(
+                    "visible_devices_by_profile must match group size "
+                    f"(expected {group_size}, got {len(visible_devices_by_profile)})"
+                ),
+                code=121,
+                http_status=500,
+            )
+        group_visible_devices_semicolon = ";".join(visible_devices_by_profile)
         slurm_out = self._cfg.log_dir / "slurm.%j.out"
         slurm_err = self._cfg.log_dir / "slurm.%j.err"
 
@@ -2402,12 +2942,22 @@ class ControlPlane:
         ssh_options = " ".join(shlex.quote(opt) for opt in self._cfg.ssh_options)
         effective_extra_args = _effective_vllm_extra_args(
             extra_args=model_spec.extra_args,
-            gpus_per_node=partition_spec.gpus_per_node,
+            gpus_per_node=gpus_per_profile,
         )
         encoded_extra_args = _encode_model_extra_args(effective_extra_args)
         force_seq_trust_remote_code = self._cfg.env.get("VLLM_FORCE_SEQ_TRUST_REMOTE_CODE")
         if force_seq_trust_remote_code is None:
             force_seq_trust_remote_code = "true"
+        extra_apptainer_env_flags = _render_apptainer_extra_env_flags(
+            extra_env=extra_env,
+            indent="                ",
+        )
+        lmcache_kv_transfer_args = ""
+        if lmcache_enabled:
+            lmcache_kv_transfer_args = (
+                "                --kv-transfer-config\n"
+                "                '{\"kv_connector\":\"LMCacheConnectorV1\", \"kv_role\":\"kv_both\"}'\n"
+            )
 
         script = textwrap.dedent(
             f"""\
@@ -2415,9 +2965,9 @@ class ControlPlane:
             #SBATCH --job-name={_safe_token(f'{self._cfg.job_name_prefix}g_{safe_group_name}')}
             #SBATCH --output={slurm_out}
             #SBATCH --error={slurm_err}
-            #SBATCH --nodes={group_size}
+            #SBATCH --nodes=1
             #SBATCH --ntasks={group_size}
-            #SBATCH --ntasks-per-node=1
+            #SBATCH --ntasks-per-node={group_size}
             #SBATCH --time={partition_spec.max_time}
             #SBATCH --partition={partition_spec.name}
 
@@ -2433,6 +2983,9 @@ class ControlPlane:
             GROUP_VLLM_PORTS_CSV={shlex.quote(vllm_ports_csv)}
             GROUP_JAEGER_OTLP_LOGIN_PORTS_CSV={shlex.quote(jaeger_otlp_ports_csv)}
             GROUP_JAEGER_UI_LOGIN_PORTS_CSV={shlex.quote(jaeger_ui_ports_csv)}
+            GROUP_LMCACHE_INTERNAL_API_SERVER_PORT_START_CSV={shlex.quote(lmcache_ports_csv)}
+            GROUP_VLLM_VISIBLE_DEVICES_SEMICOLON={shlex.quote(group_visible_devices_semicolon)}
+            GROUP_VLLM_TENSOR_PARALLEL_SIZE={gpus_per_profile}
             JAEGER_OTLP_LOCAL_PORT={DEFAULT_JAEGER_OTLP_GRPC_PORT}
             JAEGER_UI_LOCAL_PORT={DEFAULT_JAEGER_QUERY_PORT}
 
@@ -2441,8 +2994,6 @@ class ControlPlane:
 
             VLLM_MODEL_NAME={shlex.quote(model_spec.vllm_model_name)}
             VLLM_SERVED_MODEL_NAME={shlex.quote(model_spec.served_model_name)}
-            VLLM_TENSOR_PARALLEL_SIZE={partition_spec.gpus_per_node}
-            VLLM_VISIBLE_DEVICES={shlex.quote(visible_devices)}
 
             VLLM_APPTAINER_HOME={shlex.quote(self._cfg.env.get('VLLM_APPTAINER_HOME', ''))}
             HF_HOME={shlex.quote(self._cfg.env.get('HF_HOME', ''))}
@@ -2478,16 +3029,25 @@ class ControlPlane:
               IFS=',' read -r -a VLLM_PORTS <<<"${{GROUP_VLLM_PORTS_CSV}}"
               IFS=',' read -r -a JAEGER_OTLP_PORTS <<<"${{GROUP_JAEGER_OTLP_LOGIN_PORTS_CSV}}"
               IFS=',' read -r -a JAEGER_UI_PORTS <<<"${{GROUP_JAEGER_UI_LOGIN_PORTS_CSV}}"
+              IFS=',' read -r -a LMCACHE_PORT_STARTS <<<"${{GROUP_LMCACHE_INTERNAL_API_SERVER_PORT_START_CSV}}"
+              IFS=';' read -r -a VLLM_VISIBLE_DEVICES_BY_PROFILE <<<"${{GROUP_VLLM_VISIBLE_DEVICES_SEMICOLON}}"
 
               if [[ "${{index}}" -lt 0 || "${{index}}" -ge "${{#PROFILE_IDS[@]}}" ]]; then
                 echo "SLURM_PROCID out of range for grouped profile mapping: index=${{index}}" >&2
                 exit 93
+              fi
+              if [[ "${{index}}" -ge "${{#VLLM_VISIBLE_DEVICES_BY_PROFILE[@]}}" ]]; then
+                echo "SLURM_PROCID out of range for grouped visible-devices mapping: index=${{index}}" >&2
+                exit 94
               fi
 
               local PROFILE_ID="${{PROFILE_IDS[${{index}}]}}"
               local VLLM_SERVICE_PORT="${{VLLM_PORTS[${{index}}]}}"
               local JAEGER_OTLP_LOGIN_PORT="${{JAEGER_OTLP_PORTS[${{index}}]}}"
               local JAEGER_UI_LOGIN_PORT="${{JAEGER_UI_PORTS[${{index}}]}}"
+              local LMCACHE_INTERNAL_API_SERVER_PORT_START="${{LMCACHE_PORT_STARTS[${{index}}]}}"
+              local VLLM_VISIBLE_DEVICES="${{VLLM_VISIBLE_DEVICES_BY_PROFILE[${{index}}]}}"
+              local VLLM_TENSOR_PARALLEL_SIZE="${{GROUP_VLLM_TENSOR_PARALLEL_SIZE}}"
 
               local JAEGER_LOG="${{JOB_LOG_DIR}}/jaeger.${{SLURM_JOB_ID}}.p${{PROFILE_ID}}.log"
               local VLLM_LOG="${{JOB_LOG_DIR}}/vllm.${{SLURM_JOB_ID}}.p${{PROFILE_ID}}.log"
@@ -2568,7 +3128,7 @@ class ControlPlane:
                 --collect-detailed-traces "${{VLLM_COLLECT_DETAILED_TRACES}}"
                 --enable-prompt-tokens-details
                 --logits-processors "${{VLLM_LOGITS_PROCESSORS}}"
-              )
+{lmcache_kv_transfer_args}              )
 
               apptainer exec \
                 --rocm \
@@ -2590,6 +3150,9 @@ class ControlPlane:
                 --env VLLM_MODEL_NAME="${{VLLM_MODEL_NAME}}" \
                 --env VLLM_MODEL_EXTRA_ARGS_B64="${{VLLM_MODEL_EXTRA_ARGS_B64}}" \
                 --env VLLM_FORCE_SEQ_TRUST_REMOTE_CODE="${{VLLM_FORCE_SEQ_TRUST_REMOTE_CODE}}" \
+{extra_apptainer_env_flags}                --env LMCACHE_INTERNAL_API_SERVER_ENABLED=1 \
+                --env PYTHONHASHSEED=0 \
+                --env LMCACHE_INTERNAL_API_SERVER_PORT_START="${{LMCACHE_INTERNAL_API_SERVER_PORT_START}}" \
                 "${{VLLM_SIF}}" \
                 "${{VLLM_CMD[@]}}" \
                 >"${{VLLM_LOG}}" 2>&1 &
@@ -2605,8 +3168,10 @@ class ControlPlane:
             export LOGIN_HOST GROUP_NAME GROUP_SIZE
             export GROUP_PROFILE_IDS_CSV GROUP_VLLM_PORTS_CSV
             export GROUP_JAEGER_OTLP_LOGIN_PORTS_CSV GROUP_JAEGER_UI_LOGIN_PORTS_CSV
+            export GROUP_LMCACHE_INTERNAL_API_SERVER_PORT_START_CSV
+            export GROUP_VLLM_VISIBLE_DEVICES_SEMICOLON GROUP_VLLM_TENSOR_PARALLEL_SIZE
             export JAEGER_OTLP_LOCAL_PORT JAEGER_UI_LOCAL_PORT JAEGER_SIF VLLM_SIF
-            export VLLM_MODEL_NAME VLLM_SERVED_MODEL_NAME VLLM_TENSOR_PARALLEL_SIZE VLLM_VISIBLE_DEVICES
+            export VLLM_MODEL_NAME VLLM_SERVED_MODEL_NAME
             export VLLM_APPTAINER_HOME HF_HOME HF_HUB_CACHE HF_TOKEN
             export AITER_JIT_DIR XDG_CACHE_HOME VLLM_CACHE_ROOT
             export OTEL_SERVICE_NAME OTEL_EXPORTER_OTLP_TRACES_INSECURE OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
@@ -2615,9 +3180,9 @@ class ControlPlane:
             export JOB_LOG_DIR
             export -f run_group_worker
             srun \
-              --nodes="${{GROUP_SIZE}}" \
+              --nodes=1 \
               --ntasks="${{GROUP_SIZE}}" \
-              --ntasks-per-node=1 \
+              --ntasks-per-node="${{GROUP_SIZE}}" \
               --kill-on-bad-exit=1 \
               bash -lc 'run_group_worker'
             """
@@ -2633,6 +3198,8 @@ class ControlPlane:
         partition_spec: PartitionSpec,
         model_spec: ModelSpec,
         port_profile: AMDHPCPortProfile,
+        extra_env: dict[str, str],
+        lmcache_enabled: bool,
     ) -> Path:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         safe_partition = _safe_token(partition_spec.name)
@@ -2662,6 +3229,16 @@ class ControlPlane:
         force_seq_trust_remote_code = self._cfg.env.get("VLLM_FORCE_SEQ_TRUST_REMOTE_CODE")
         if force_seq_trust_remote_code is None:
             force_seq_trust_remote_code = "true"
+        extra_apptainer_env_flags = _render_apptainer_extra_env_flags(
+            extra_env=extra_env,
+            indent="              ",
+        )
+        lmcache_kv_transfer_args = ""
+        if lmcache_enabled:
+            lmcache_kv_transfer_args = (
+                "              --kv-transfer-config\n"
+                "              '{\"kv_connector\":\"LMCacheConnectorV1\", \"kv_role\":\"kv_both\"}'\n"
+            )
 
         script = textwrap.dedent(
             f"""\
@@ -2681,6 +3258,7 @@ class ControlPlane:
             VLLM_SERVICE_PORT={port_profile.vllm_port}
             JAEGER_OTLP_LOGIN_PORT={port_profile.jaeger_otlp_port}
             JAEGER_UI_LOGIN_PORT={port_profile.jaeger_api_port}
+            LMCACHE_INTERNAL_API_SERVER_PORT_START={port_profile.lmcache_port}
             JAEGER_OTLP_LOCAL_PORT={DEFAULT_JAEGER_OTLP_GRPC_PORT}
             JAEGER_UI_LOCAL_PORT={DEFAULT_JAEGER_QUERY_PORT}
 
@@ -2788,7 +3366,7 @@ class ControlPlane:
               --collect-detailed-traces "${{VLLM_COLLECT_DETAILED_TRACES}}"
               --enable-prompt-tokens-details
               --logits-processors "${{VLLM_LOGITS_PROCESSORS}}"
-            )
+{lmcache_kv_transfer_args}            )
 
             apptainer exec \
               --rocm \
@@ -2810,6 +3388,9 @@ class ControlPlane:
               --env VLLM_MODEL_NAME="${{VLLM_MODEL_NAME}}" \
               --env VLLM_MODEL_EXTRA_ARGS_B64="${{VLLM_MODEL_EXTRA_ARGS_B64}}" \
               --env VLLM_FORCE_SEQ_TRUST_REMOTE_CODE="${{VLLM_FORCE_SEQ_TRUST_REMOTE_CODE}}" \
+{extra_apptainer_env_flags}              --env LMCACHE_INTERNAL_API_SERVER_ENABLED=1 \
+              --env PYTHONHASHSEED=0 \
+              --env LMCACHE_INTERNAL_API_SERVER_PORT_START="${{LMCACHE_INTERNAL_API_SERVER_PORT_START}}" \
               "${{VLLM_SIF}}" \
               "${{VLLM_CMD[@]}}" \
               >"${{VLLM_LOG}}" 2>&1 &
@@ -2820,6 +3401,338 @@ class ControlPlane:
             EXIT_CODE=$?
             echo "One service/tunnel process exited with code ${{EXIT_CODE}} at $(date)."
             exit "${{EXIT_CODE}}"
+            """
+        )
+
+        script_path.write_text(script, encoding="utf-8")
+        script_path.chmod(0o750)
+        return script_path
+
+    def _write_local_mode_sbatch_script(
+        self,
+        *,
+        partition_spec: PartitionSpec,
+        model_spec: ModelSpec,
+        port_profile: AMDHPCPortProfile,
+        gateway_port: int,
+        gateway_parse_port: int,
+        local_mode_script: str,
+        extra_env: dict[str, str],
+        lmcache_enabled: bool,
+    ) -> Path:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        safe_partition = _safe_token(partition_spec.name)
+        safe_model = _safe_token(model_spec.name)
+        script_path = (
+            self._cfg.run_dir
+            / f"sbatch-{timestamp}-p{port_profile.profile_id}-{safe_partition}-{safe_model}-local.sh"
+        )
+
+        visible_devices = ",".join(str(idx) for idx in range(partition_spec.gpus_per_node))
+        slurm_out = self._cfg.log_dir / "slurm.%j.out"
+        slurm_err = self._cfg.log_dir / "slurm.%j.err"
+
+        tmp_root = os.environ.get("TMPDIR", "/tmp")
+        user_name = os.environ.get("USER", "user")
+        aiter_jit_dir = self._cfg.env.get("AITER_JIT_DIR", f"{tmp_root}/vllm-aiter-jit-{user_name}")
+        runtime_root = self._cfg.env.get("VLLM_RUNTIME_ROOT", f"{tmp_root}/vllm-runtime-{user_name}")
+        xdg_cache_home = self._cfg.env.get("XDG_CACHE_HOME", f"{runtime_root}/xdg-cache")
+        vllm_cache_root = self._cfg.env.get("VLLM_CACHE_ROOT", f"{xdg_cache_home}/vllm")
+
+        effective_extra_args = _effective_vllm_extra_args(
+            extra_args=model_spec.extra_args,
+            gpus_per_node=partition_spec.gpus_per_node,
+        )
+        encoded_extra_args = _encode_model_extra_args(effective_extra_args)
+        force_seq_trust_remote_code = self._cfg.env.get("VLLM_FORCE_SEQ_TRUST_REMOTE_CODE")
+        if force_seq_trust_remote_code is None:
+            force_seq_trust_remote_code = "true"
+        extra_apptainer_env_flags = _render_apptainer_extra_env_flags(
+            extra_env=extra_env,
+            indent="              ",
+        )
+        lmcache_kv_transfer_args = ""
+        if lmcache_enabled:
+            lmcache_kv_transfer_args = (
+                "              --kv-transfer-config\n"
+                "              '{\"kv_connector\":\"LMCacheConnectorV1\", \"kv_role\":\"kv_both\"}'\n"
+            )
+
+        gateway_config_default = self._cfg.repo_root / "gateway" / "config.toml"
+        gateway_config_fallback = self._cfg.repo_root / "gateway" / "config.example.toml"
+        gateway_venv_dir_default = self._cfg.repo_root / ".venv"
+        service_ready_timeout_seconds = int(max(1, self._cfg.startup_timeout))
+        service_ready_poll_interval_seconds = float(max(0.2, self._cfg.wait_up_poll_interval_seconds))
+
+        script = textwrap.dedent(
+            f"""\
+            #!/usr/bin/env bash
+            #SBATCH --job-name={_safe_token(f'{self._cfg.job_name_prefix}{port_profile.profile_id}_local')}
+            #SBATCH --output={slurm_out}
+            #SBATCH --error={slurm_err}
+            #SBATCH --nodes={self._cfg.job_nodes}
+            #SBATCH --time={partition_spec.max_time}
+            #SBATCH --partition={partition_spec.name}
+
+            set -euo pipefail
+
+            echo "Local-mode job ${{SLURM_JOB_ID}} starting on $(hostname) at $(date)"
+
+            REPO_ROOT={shlex.quote(str(self._cfg.repo_root))}
+            cd "${{REPO_ROOT}}"
+
+            PORT_PROFILE_ID={port_profile.profile_id}
+            VLLM_SERVICE_PORT={port_profile.vllm_port}
+            GATEWAY_PORT={gateway_port}
+            GATEWAY_PARSE_PORT={gateway_parse_port}
+            LMCACHE_INTERNAL_API_SERVER_PORT_START={port_profile.lmcache_port}
+            JAEGER_OTLP_LOCAL_PORT={DEFAULT_JAEGER_OTLP_GRPC_PORT}
+            JAEGER_UI_LOCAL_PORT={DEFAULT_JAEGER_QUERY_PORT}
+            SERVICE_READY_TIMEOUT_SECONDS={service_ready_timeout_seconds}
+            SERVICE_READY_POLL_INTERVAL_SECONDS={service_ready_poll_interval_seconds}
+            LOCAL_MODE_SCRIPT={shlex.quote(local_mode_script)}
+
+            JAEGER_SIF={shlex.quote(str(self._cfg.jaeger_sif))}
+            VLLM_SIF={shlex.quote(str(self._cfg.vllm_sif))}
+
+            VLLM_MODEL_NAME={shlex.quote(model_spec.vllm_model_name)}
+            VLLM_SERVED_MODEL_NAME={shlex.quote(model_spec.served_model_name)}
+            VLLM_TENSOR_PARALLEL_SIZE={partition_spec.gpus_per_node}
+            VLLM_VISIBLE_DEVICES={shlex.quote(visible_devices)}
+
+            VLLM_APPTAINER_HOME={shlex.quote(self._cfg.env.get('VLLM_APPTAINER_HOME', ''))}
+            HF_HOME={shlex.quote(self._cfg.env.get('HF_HOME', ''))}
+            HF_HUB_CACHE={shlex.quote(self._cfg.env.get('HF_HUB_CACHE', ''))}
+            HF_TOKEN="${{HF_TOKEN:-}}"
+
+            AITER_JIT_DIR={shlex.quote(aiter_jit_dir)}
+            XDG_CACHE_HOME={shlex.quote(xdg_cache_home)}
+            VLLM_CACHE_ROOT={shlex.quote(vllm_cache_root)}
+
+            OTEL_SERVICE_NAME={shlex.quote(self._cfg.env.get('OTEL_SERVICE_NAME', 'vllm-server'))}
+            OTEL_EXPORTER_OTLP_TRACES_INSECURE={shlex.quote(self._cfg.env.get('OTEL_EXPORTER_OTLP_TRACES_INSECURE', 'true'))}
+            OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="grpc://127.0.0.1:${{JAEGER_OTLP_LOCAL_PORT}}"
+            VLLM_COLLECT_DETAILED_TRACES={shlex.quote(self._cfg.env.get('VLLM_COLLECT_DETAILED_TRACES', 'all'))}
+            VLLM_LOGITS_PROCESSORS={shlex.quote(self._cfg.env.get('VLLM_LOGITS_PROCESSORS', 'forceSeq.force_sequence_logits_processor:ForceSequenceAdapter'))}
+            VLLM_MODEL_EXTRA_ARGS_B64={shlex.quote(encoded_extra_args)}
+            VLLM_FORCE_SEQ_TRUST_REMOTE_CODE={shlex.quote(force_seq_trust_remote_code)}
+
+            GATEWAY_CONFIG_DEFAULT={shlex.quote(str(gateway_config_default))}
+            GATEWAY_CONFIG_FALLBACK={shlex.quote(str(gateway_config_fallback))}
+            GATEWAY_VENV_DIR="${{GATEWAY_VENV_DIR:-{shlex.quote(str(gateway_venv_dir_default))}}}"
+            GATEWAY_HOST="${{GATEWAY_HOST:-127.0.0.1}}"
+            GATEWAY_SKIP_INSTALL="${{GATEWAY_SKIP_INSTALL:-1}}"
+
+            JOB_LOG_DIR={shlex.quote(str(self._cfg.log_dir))}
+            mkdir -p "${{JOB_LOG_DIR}}" "${{AITER_JIT_DIR}}" "${{XDG_CACHE_HOME}}" "${{VLLM_CACHE_ROOT}}"
+
+            JAEGER_LOG="${{JOB_LOG_DIR}}/jaeger.${{SLURM_JOB_ID}}.log"
+            VLLM_LOG="${{JOB_LOG_DIR}}/vllm.${{SLURM_JOB_ID}}.log"
+            GATEWAY_LOG="${{JOB_LOG_DIR}}/gateway.${{SLURM_JOB_ID}}.log"
+            LOCAL_MODE_SCRIPT_LOG="${{JOB_LOG_DIR}}/local-mode-script.${{SLURM_JOB_ID}}.log"
+
+            VLLM_READY_URL="http://127.0.0.1:${{VLLM_SERVICE_PORT}}/v1/models"
+            JAEGER_READY_URL="http://127.0.0.1:${{JAEGER_UI_LOCAL_PORT}}"
+
+            APPTAINER_HOME_ARGS=()
+            if [[ -n "${{VLLM_APPTAINER_HOME}}" ]]; then
+              mkdir -p "${{VLLM_APPTAINER_HOME}}"
+              APPTAINER_HOME_ARGS=(-H "${{VLLM_APPTAINER_HOME}}")
+            fi
+
+            BIND_ARGS=()
+            if [[ -n "${{HF_HOME}}" ]]; then
+              BIND_ARGS+=(--bind "${{HF_HOME}}:${{HF_HOME}}")
+            fi
+            if [[ -n "${{HF_HUB_CACHE}}" ]]; then
+              BIND_ARGS+=(--bind "${{HF_HUB_CACHE}}:${{HF_HUB_CACHE}}")
+            fi
+
+            probe_http_url() {{
+              local url="$1"
+              python3 -c "import sys, urllib.request; req = urllib.request.Request(sys.argv[1], method='GET'); resp = urllib.request.urlopen(req, timeout=3); sys.exit(0 if int(resp.status) == 200 else 1)" "$url" >/dev/null 2>&1
+            }}
+
+            probe_tcp_port() {{
+              local host="$1"
+              local port="$2"
+              python3 -c "import socket, sys; sock = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=2); sock.close()" "$host" "$port" >/dev/null 2>&1
+            }}
+
+            wait_for_service_stack() {{
+              local deadline=$((SECONDS + SERVICE_READY_TIMEOUT_SECONDS))
+              while (( SECONDS < deadline )); do
+                if ! kill -0 "${{JAEGER_PID}}" >/dev/null 2>&1; then
+                  echo "Jaeger exited before readiness check completed." >&2
+                  return 1
+                fi
+                if ! kill -0 "${{VLLM_PID}}" >/dev/null 2>&1; then
+                  echo "vLLM exited before readiness check completed." >&2
+                  return 1
+                fi
+                if probe_http_url "${{VLLM_READY_URL}}" && probe_http_url "${{JAEGER_READY_URL}}"; then
+                  return 0
+                fi
+                sleep "${{SERVICE_READY_POLL_INTERVAL_SECONDS}}"
+              done
+              return 1
+            }}
+
+            wait_for_gateway_ready() {{
+              local deadline=$((SECONDS + SERVICE_READY_TIMEOUT_SECONDS))
+              while (( SECONDS < deadline )); do
+                if ! kill -0 "${{GATEWAY_PID}}" >/dev/null 2>&1; then
+                  echo "Gateway exited before readiness check completed." >&2
+                  return 1
+                fi
+                if [[ "${{GATEWAY_PORT}}" -eq "${{GATEWAY_PARSE_PORT}}" ]]; then
+                  if probe_tcp_port "127.0.0.1" "${{GATEWAY_PORT}}"; then
+                    return 0
+                  fi
+                else
+                  if probe_tcp_port "127.0.0.1" "${{GATEWAY_PORT}}" && probe_tcp_port "127.0.0.1" "${{GATEWAY_PARSE_PORT}}"; then
+                    return 0
+                  fi
+                fi
+                sleep 1
+              done
+              return 1
+            }}
+
+            terminate_process() {{
+              local name="$1"
+              local pid="$2"
+              if [[ -z "${{pid}}" ]]; then
+                return 0
+              fi
+              if ! kill -0 "${{pid}}" >/dev/null 2>&1; then
+                return 0
+              fi
+              echo "Stopping ${{name}} (pid=${{pid}})"
+              kill "${{pid}}" >/dev/null 2>&1 || true
+              local grace_deadline=$((SECONDS + 20))
+              while kill -0 "${{pid}}" >/dev/null 2>&1; do
+                if (( SECONDS >= grace_deadline )); then
+                  echo "${{name}} (pid=${{pid}}) did not exit after SIGTERM; sending SIGKILL."
+                  kill -9 "${{pid}}" >/dev/null 2>&1 || true
+                  break
+                fi
+                sleep 1
+              done
+              wait "${{pid}}" >/dev/null 2>&1 || true
+            }}
+
+            cleanup() {{
+              set +e
+              terminate_process "local script" "${{WORKLOAD_PID:-}}"
+              terminate_process "gateway" "${{GATEWAY_PID:-}}"
+              terminate_process "vllm" "${{VLLM_PID:-}}"
+              terminate_process "jaeger" "${{JAEGER_PID:-}}"
+            }}
+            trap cleanup EXIT INT TERM
+
+            apptainer run \
+              --cleanenv \
+              "${{APPTAINER_HOME_ARGS[@]}}" \
+              --env COLLECTOR_ZIPKIN_HOST_PORT=:9411 \
+              "${{JAEGER_SIF}}" \
+              >"${{JAEGER_LOG}}" 2>&1 &
+            JAEGER_PID=$!
+
+            VLLM_CMD=(
+              /opt/vllm-plugins/vllm_entrypoint.sh
+              --model "${{VLLM_MODEL_NAME}}"
+              --served-model-name "${{VLLM_SERVED_MODEL_NAME}}"
+              --port "${{VLLM_SERVICE_PORT}}"
+              --tensor-parallel-size "${{VLLM_TENSOR_PARALLEL_SIZE}}"
+              --otlp-traces-endpoint "${{OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}}"
+              --collect-detailed-traces "${{VLLM_COLLECT_DETAILED_TRACES}}"
+              --enable-prompt-tokens-details
+              --logits-processors "${{VLLM_LOGITS_PROCESSORS}}"
+{lmcache_kv_transfer_args}            )
+
+            apptainer exec \
+              --rocm \
+              --cleanenv \
+              "${{APPTAINER_HOME_ARGS[@]}}" \
+              "${{BIND_ARGS[@]}}" \
+              --env PYTHONNOUSERSITE=1 \
+              --env AITER_JIT_DIR="${{AITER_JIT_DIR}}" \
+              --env XDG_CACHE_HOME="${{XDG_CACHE_HOME}}" \
+              --env VLLM_CACHE_ROOT="${{VLLM_CACHE_ROOT}}" \
+              --env HF_HOME="${{HF_HOME}}" \
+              --env HF_HUB_CACHE="${{HF_HUB_CACHE}}" \
+              --env HF_TOKEN="${{HF_TOKEN}}" \
+              --env OTEL_SERVICE_NAME="${{OTEL_SERVICE_NAME}}" \
+              --env OTEL_EXPORTER_OTLP_TRACES_INSECURE="${{OTEL_EXPORTER_OTLP_TRACES_INSECURE}}" \
+              --env OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="${{OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}}" \
+              --env HIP_VISIBLE_DEVICES="${{VLLM_VISIBLE_DEVICES}}" \
+              --env ROCR_VISIBLE_DEVICES="${{VLLM_VISIBLE_DEVICES}}" \
+              --env VLLM_MODEL_NAME="${{VLLM_MODEL_NAME}}" \
+              --env VLLM_MODEL_EXTRA_ARGS_B64="${{VLLM_MODEL_EXTRA_ARGS_B64}}" \
+              --env VLLM_FORCE_SEQ_TRUST_REMOTE_CODE="${{VLLM_FORCE_SEQ_TRUST_REMOTE_CODE}}" \
+{extra_apptainer_env_flags}              --env LMCACHE_INTERNAL_API_SERVER_ENABLED=1 \
+              --env PYTHONHASHSEED=0 \
+              --env LMCACHE_INTERNAL_API_SERVER_PORT_START="${{LMCACHE_INTERNAL_API_SERVER_PORT_START}}" \
+              "${{VLLM_SIF}}" \
+              "${{VLLM_CMD[@]}}" \
+              >"${{VLLM_LOG}}" 2>&1 &
+            VLLM_PID=$!
+
+            echo "Waiting for Jaeger + vLLM readiness..."
+            if ! wait_for_service_stack; then
+              echo "Timed out waiting for Jaeger/vLLM readiness." >&2
+              exit 73
+            fi
+
+            if [[ -n "${{GATEWAY_CONFIG:-}}" ]]; then
+              GATEWAY_CONFIG_PATH="${{GATEWAY_CONFIG}}"
+            elif [[ -f "${{GATEWAY_CONFIG_DEFAULT}}" ]]; then
+              GATEWAY_CONFIG_PATH="${{GATEWAY_CONFIG_DEFAULT}}"
+            else
+              GATEWAY_CONFIG_PATH="${{GATEWAY_CONFIG_FALLBACK}}"
+            fi
+
+            GATEWAY_PYTHON="python3"
+            if [[ -x "${{GATEWAY_VENV_DIR}}/bin/python" ]]; then
+              GATEWAY_PYTHON="${{GATEWAY_VENV_DIR}}/bin/python"
+            fi
+
+            GATEWAY_CMD=(
+              "${{GATEWAY_PYTHON}}"
+              -m gateway
+              start
+              --config "${{GATEWAY_CONFIG_PATH}}"
+              --host "${{GATEWAY_HOST}}"
+              --venv-dir "${{GATEWAY_VENV_DIR}}"
+              --port-profile-id "${{PORT_PROFILE_ID}}"
+            )
+            if [[ "${{GATEWAY_SKIP_INSTALL}}" == "1" ]]; then
+              GATEWAY_CMD+=(--skip-install)
+            fi
+
+            "${{GATEWAY_CMD[@]}}" >"${{GATEWAY_LOG}}" 2>&1 &
+            GATEWAY_PID=$!
+
+            echo "Waiting for gateway readiness..."
+            if ! wait_for_gateway_ready; then
+              echo "Timed out waiting for gateway readiness." >&2
+              exit 74
+            fi
+
+            export VLLM_BASE_URL="http://127.0.0.1:${{VLLM_SERVICE_PORT}}"
+            export GATEWAY_BASE_URL="http://127.0.0.1:${{GATEWAY_PORT}}"
+            export GATEWAY_PARSE_BASE_URL="http://127.0.0.1:${{GATEWAY_PARSE_PORT}}"
+            export JAEGER_BASE_URL="http://127.0.0.1:${{JAEGER_UI_LOCAL_PORT}}"
+            export PORT_PROFILE_ID
+
+            echo "Executing local-mode script: ${{LOCAL_MODE_SCRIPT}}"
+            set +e
+            bash -lc "${{LOCAL_MODE_SCRIPT}}" >"${{LOCAL_MODE_SCRIPT_LOG}}" 2>&1
+            WORKLOAD_EXIT_CODE=$?
+            set -e
+            echo "Local-mode script finished with exit code ${{WORKLOAD_EXIT_CODE}} at $(date)"
+            exit "${{WORKLOAD_EXIT_CODE}}"
             """
         )
 

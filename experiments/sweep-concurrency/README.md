@@ -62,6 +62,7 @@ The generator also writes:
 python -m orchestrator \
   --job-type replay \
   --jobs-dir experiments/sweep-concurrency/generated/livecodebench-mswe \
+  --output-dir results/replay/<utc-timestamp> \
   --port-profile-id-list 0,1,2,3,4
 ```
 
@@ -81,7 +82,7 @@ This script runs three phases end-to-end:
    `experiments/sweep-concurrency/generated/qwen3-coder-30b/big-batch-<utc-timestamp>`.
 3. Runs one orchestrator invocation against that combined directory, with logs
    and summary under:
-   `results/replay/<utc-timestamp>/orchestrator-replay-<utc-timestamp>/`.
+   `results/replay/<batch-utc-timestamp>/orchestrator-replay-<run-utc-timestamp>/`.
 
 Replay now always goes through gateway and writes `gateway-output/` artifacts
 (matching con-driver style outputs).

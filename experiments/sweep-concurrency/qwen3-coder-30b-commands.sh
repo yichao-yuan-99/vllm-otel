@@ -20,7 +20,7 @@ COMPILE_PORT_PROFILE_ID="${PORT_PROFILE_ID_LIST%%,*}"
 SWEEP_TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 COMBINED_CONFIG_DIR="experiments/sweep-concurrency/generated/qwen3-coder-30b/big-batch-${SWEEP_TIMESTAMP}"
 REPLAY_BATCH_ROOT="results/replay/${SWEEP_TIMESTAMP}"
-ORCHESTRATOR_OUTPUT_DIR="${REPLAY_BATCH_ROOT}/orchestrator-replay-${SWEEP_TIMESTAMP}"
+ORCHESTRATOR_OUTPUT_ROOT="${REPLAY_BATCH_ROOT}"
 
 if [[ -z "$COMPILE_PORT_PROFILE_ID" ]]; then
   echo "PORT_PROFILE_ID_LIST must contain at least one profile id" >&2
@@ -71,5 +71,5 @@ done
 python -m orchestrator \
   --job-type replay \
   --jobs-dir "$COMBINED_CONFIG_DIR" \
-  --output-dir "$ORCHESTRATOR_OUTPUT_DIR" \
+  --output-dir "$ORCHESTRATOR_OUTPUT_ROOT" \
   --port-profile-id-list "$PORT_PROFILE_ID_LIST"

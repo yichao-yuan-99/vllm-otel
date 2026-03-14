@@ -9,6 +9,7 @@ jaeger_api_port = 16686
 jaeger_otlp_port = 4317
 gateway_port = 11457
 gateway_parse_port = 18171
+lmcache_port = 29411
 
 [profiles."1"]
 label = "random-1"
@@ -17,6 +18,7 @@ jaeger_api_port = 27544
 jaeger_otlp_port = 24831
 gateway_port = 24157
 gateway_parse_port = 28171
+lmcache_port = 29437
 
 [profiles."2"]
 label = "random-2"
@@ -25,6 +27,7 @@ jaeger_api_port = 35264
 jaeger_otlp_port = 32719
 gateway_port = 31955
 gateway_parse_port = 38171
+lmcache_port = 29459
 
 [profiles."3"]
 label = "random-3"
@@ -33,6 +36,7 @@ jaeger_api_port = 44612
 jaeger_otlp_port = 41735
 gateway_port = 40857
 gateway_parse_port = 48171
+lmcache_port = 29483
 
 [profiles."4"]
 label = "random-4"
@@ -41,6 +45,7 @@ jaeger_api_port = 56198
 jaeger_otlp_port = 53477
 gateway_port = 52357
 gateway_parse_port = 58171
+lmcache_port = 29507
 
 [profiles."5"]
 label = "random-5"
@@ -49,6 +54,7 @@ jaeger_api_port = 61784
 jaeger_otlp_port = 60319
 gateway_port = 59257
 gateway_parse_port = 59171
+lmcache_port = 29531
 
 [profiles."6"]
 label = "random-6"
@@ -57,6 +63,7 @@ jaeger_api_port = 62784
 jaeger_otlp_port = 61319
 gateway_port = 60257
 gateway_parse_port = 60171
+lmcache_port = 29557
 
 [profiles."7"]
 label = "random-7"
@@ -65,6 +72,7 @@ jaeger_api_port = 63784
 jaeger_otlp_port = 62319
 gateway_port = 61257
 gateway_parse_port = 61171
+lmcache_port = 29579
 
 [profiles."8"]
 label = "random-8"
@@ -73,6 +81,7 @@ jaeger_api_port = 64784
 jaeger_otlp_port = 63319
 gateway_port = 62257
 gateway_parse_port = 62171
+lmcache_port = 29603
 
 [profiles."9"]
 label = "random-9"
@@ -81,6 +90,7 @@ jaeger_api_port = 65284
 jaeger_otlp_port = 64319
 gateway_port = 63257
 gateway_parse_port = 63171
+lmcache_port = 29629
 
 [profiles."10"]
 label = "random-10"
@@ -89,6 +99,7 @@ jaeger_api_port = 15784
 jaeger_otlp_port = 14319
 gateway_port = 13257
 gateway_parse_port = 13173
+lmcache_port = 29651
 
 [profiles."11"]
 label = "random-11"
@@ -97,6 +108,7 @@ jaeger_api_port = 16784
 jaeger_otlp_port = 15319
 gateway_port = 14257
 gateway_parse_port = 14173
+lmcache_port = 29671
 
 [profiles."12"]
 label = "random-12"
@@ -105,6 +117,7 @@ jaeger_api_port = 17784
 jaeger_otlp_port = 16319
 gateway_port = 15257
 gateway_parse_port = 15173
+lmcache_port = 29699
 
 [profiles."13"]
 label = "random-13"
@@ -113,6 +126,7 @@ jaeger_api_port = 18784
 jaeger_otlp_port = 17319
 gateway_port = 16257
 gateway_parse_port = 16173
+lmcache_port = 29717
 
 [profiles."14"]
 label = "random-14"
@@ -121,6 +135,7 @@ jaeger_api_port = 19784
 jaeger_otlp_port = 18319
 gateway_port = 17257
 gateway_parse_port = 17173
+lmcache_port = 29741
 
 [profiles."15"]
 label = "random-15"
@@ -129,6 +144,7 @@ jaeger_api_port = 20784
 jaeger_otlp_port = 19319
 gateway_port = 18257
 gateway_parse_port = 18173
+lmcache_port = 29761
 
 [profiles."16"]
 label = "random-16"
@@ -137,6 +153,7 @@ jaeger_api_port = 21784
 jaeger_otlp_port = 20319
 gateway_port = 19257
 gateway_parse_port = 19173
+lmcache_port = 29789
 
 [profiles."17"]
 label = "random-17"
@@ -145,6 +162,7 @@ jaeger_api_port = 22784
 jaeger_otlp_port = 21319
 gateway_port = 20257
 gateway_parse_port = 20173
+lmcache_port = 29809
 
 [profiles."18"]
 label = "random-18"
@@ -153,6 +171,7 @@ jaeger_api_port = 23784
 jaeger_otlp_port = 22319
 gateway_port = 21257
 gateway_parse_port = 21173
+lmcache_port = 29833
 
 [profiles."19"]
 label = "random-19"
@@ -161,3 +180,4 @@ jaeger_api_port = 24784
 jaeger_otlp_port = 23319
 gateway_port = 22257
 gateway_parse_port = 22173
+lmcache_port = 29863

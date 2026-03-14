@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
+import tomllib
 from collections import deque
 from contextlib import suppress
 from dataclasses import asdict, dataclass
@@ -165,6 +167,156 @@ def discover_job_configs(*, jobs_dir: Path, config_glob: str) -> list[Path]:
             f"No job configs found in {jobs_dir} with glob pattern {config_glob!r}"
         )
     return discovered
+
+
+def parse_optional_path_config_value(value: Any, *, field_name: str) -> Path | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        return Path(stripped)
+    raise ValueError(f"{field_name} must be a path string")
+
+
+def _load_job_toml_payload(config_path: Path) -> dict[str, Any]:
+    try:
+        payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"Failed to parse TOML job config {config_path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"Job config root must be a TOML table: {config_path}")
+    return payload
+
+
+def _extract_declared_job_output_path(
+    *,
+    job_type: JobType,
+    payload: dict[str, Any],
+    config_path: Path,
+) -> Path | None:
+    if job_type == JobType.REPLAY:
+        root_payload: Any = payload
+        if "replayer" in payload:
+            root_payload = payload["replayer"]
+            if not isinstance(root_payload, dict):
+                raise ValueError(f"Config key 'replayer' must be a table: {config_path}")
+        elif not isinstance(root_payload, dict):
+            raise ValueError(f"Config root must be a table: {config_path}")
+
+        candidate = root_payload.get("output_dir")
+        replay_payload = root_payload.get("replay")
+        if replay_payload is not None:
+            if not isinstance(replay_payload, dict):
+                raise ValueError(f"Config key 'replay' must be a table: {config_path}")
+            if "output_dir" in replay_payload:
+                candidate = replay_payload.get("output_dir")
+        return parse_optional_path_config_value(
+            candidate,
+            field_name=f"{config_path}: replay.output_dir",
+        )
+
+    if job_type == JobType.CON_DRIVER:
+        root_payload: Any = payload
+        if "driver" in payload:
+            root_payload = payload["driver"]
+            if not isinstance(root_payload, dict):
+                raise ValueError(f"Config key 'driver' must be a table: {config_path}")
+        elif not isinstance(root_payload, dict):
+            raise ValueError(f"Config root must be a table: {config_path}")
+
+        return parse_optional_path_config_value(
+            root_payload.get("results_dir"),
+            field_name=f"{config_path}: driver.results_dir",
+        )
+
+    raise ValueError(f"Unsupported job type: {job_type!r}")
+
+
+def resolve_declared_job_output_dir(
+    *,
+    job_type: JobType,
+    config_path: Path,
+    repo_root: Path,
+) -> Path | None:
+    payload = _load_job_toml_payload(config_path)
+    configured = _extract_declared_job_output_path(
+        job_type=job_type,
+        payload=payload,
+        config_path=config_path,
+    )
+    if configured is None:
+        return None
+    expanded = configured.expanduser()
+    if expanded.is_absolute():
+        return expanded.resolve()
+    return (repo_root / expanded).resolve()
+
+
+def derive_default_output_dir(
+    *,
+    job_type: JobType,
+    jobs_dir: Path,
+    config_glob: str,
+    repo_root: Path,
+) -> Path:
+    discovered = discover_job_configs(jobs_dir=jobs_dir, config_glob=config_glob)
+    declared_output_dirs: list[Path] = []
+    for config_path in discovered:
+        declared = resolve_declared_job_output_dir(
+            job_type=job_type,
+            config_path=config_path,
+            repo_root=repo_root,
+        )
+        if declared is not None:
+            declared_output_dirs.append(declared)
+
+    if declared_output_dirs:
+        try:
+            common_root = Path(os.path.commonpath([str(path) for path in declared_output_dirs]))
+            return common_root.resolve()
+        except ValueError:
+            pass
+
+    return jobs_dir.expanduser().resolve()
+
+
+def derive_timestamped_output_dir(*, job_type: JobType, output_dir_root: Path) -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return (
+        output_dir_root.expanduser().resolve() / f"orchestrator-{job_type.value}-{timestamp}"
+    ).resolve()
+
+
+def _is_relative_to(path: Path, other: Path) -> bool:
+    try:
+        path.relative_to(other)
+        return True
+    except ValueError:
+        return False
+
+
+def move_jobs_dir_to_output_dir(*, jobs_dir: Path, output_dir: Path) -> Path:
+    source = jobs_dir.expanduser().resolve()
+    target_root = output_dir.expanduser().resolve()
+
+    if source == target_root:
+        raise ValueError("Cannot move --jobs-dir into itself.")
+    if _is_relative_to(target_root, source):
+        raise ValueError(
+            "Cannot move --jobs-dir into --output-dir when --output-dir is inside --jobs-dir."
+        )
+
+    destination = target_root / source.name
+    if destination.exists():
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        destination = target_root / f"{source.name}.moved-{timestamp}"
+        if destination.exists():
+            raise ValueError(f"Destination already exists: {destination}")
+
+    moved_to = Path(shutil.move(str(source), str(destination)))
+    return moved_to.resolve()
 
 
 def gateway_health_url(profile_id: int) -> str:
@@ -432,7 +584,11 @@ def run(
     output_dir: Path | None = typer.Option(
         None,
         "--output-dir",
-        help="Directory for orchestrator logs and summary JSON.",
+        help=(
+            "Optional root directory under which orchestrator creates a timestamped "
+            "run directory for logs and summary JSON. If omitted, infer the root "
+            "from discovered job configs."
+        ),
     ),
     poll_interval_s: float = typer.Option(
         1.0,
@@ -449,18 +605,30 @@ def run(
         "--fail-fast/--no-fail-fast",
         help="Stop launching new jobs after the first job failure.",
     ),
+    move_jobs_dir: bool = typer.Option(
+        False,
+        "--move-jobs-dir/--no-move-jobs-dir",
+        help="Move --jobs-dir into the timestamped orchestrator output directory.",
+    ),
 ) -> None:
     """Schedule config-driven jobs over idle port profiles."""
     try:
+        repo_root = Path(__file__).resolve().parents[1]
         resolved_jobs_dir = jobs_dir.expanduser().resolve()
         profile_ids = parse_port_profile_id_list(port_profile_id_list)
         if output_dir is not None:
-            resolved_output_dir = output_dir.expanduser().resolve()
+            resolved_output_dir_root = output_dir.expanduser().resolve()
         else:
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            resolved_output_dir = (
-                resolved_jobs_dir / f"orchestrator-{job_type.value}-{timestamp}"
-            ).resolve()
+            resolved_output_dir_root = derive_default_output_dir(
+                job_type=job_type,
+                jobs_dir=resolved_jobs_dir,
+                config_glob=config_glob,
+                repo_root=repo_root,
+            )
+        resolved_output_dir = derive_timestamped_output_dir(
+            job_type=job_type,
+            output_dir_root=resolved_output_dir_root,
+        )
 
         summary = run_orchestrator(
             job_type=job_type,
@@ -472,10 +640,17 @@ def run(
             health_timeout_s=health_timeout_s,
             fail_fast=fail_fast,
         )
+        if move_jobs_dir:
+            moved_to = move_jobs_dir_to_output_dir(
+                jobs_dir=resolved_jobs_dir,
+                output_dir=resolved_output_dir,
+            )
+            summary["jobs_dir_moved_to"] = str(moved_to)
     except Exception as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
+    summary["output_dir_root"] = str(resolved_output_dir_root)
     summary_path = resolved_output_dir / "summary.json"
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary["summary_path"] = str(summary_path)

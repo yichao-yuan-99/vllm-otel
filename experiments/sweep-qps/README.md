@@ -34,7 +34,7 @@ Required inputs:
 Optional forwarding:
 
 - `--plan-path` (default: `<source-run-dir>/replay-plan.json`)
-- `--replay-root-dir` (default under `results/replay/.../sweep-qps`)
+- `--replay-root-dir` (default under `results/replay/<utc-timestamp>/.../sweep-qps`)
 - `--port-profile-id`
 - `--vllm-log-interval-s`
 - `--vllm-log-timeout-s`
@@ -46,19 +46,26 @@ time-bounded by `time_constraint_s`.
 
 For each target `qps`, the generator creates:
 
-- config file: `<output-config-dir>/replay.qps<token>.toml`
+- config file: `<output-config-dir>/<utc-timestamp>/replay.qps<token>.toml`
 - replay output dir in config:
-  `results/replay/<source-lineage-without-run-dir>/sweep-qps/qps<token>`
+  `results/replay/<utc-timestamp>/<source-lineage-without-run-dir>/sweep-qps/qps<token>`
+
+Each generator invocation uses one UTC timestamp batch directory shared across
+all generated QPS configs in that run.
 
 The generator also writes:
 
-- `<output-config-dir>/manifest.json`
+- `<output-config-dir>/<utc-timestamp>/manifest.json`
 
 ## Run With Orchestrator
 
 ```bash
 python -m orchestrator \
   --job-type replay \
-  --jobs-dir experiments/sweep-qps/generated/dabstep-mswe \
+  --jobs-dir experiments/sweep-qps/generated/dabstep-mswe/<utc-timestamp> \
+  --output-dir results/replay/<utc-timestamp> \
   --port-profile-id-list 0,1,2,3,4
 ```
+
+This writes orchestrator logs and `summary.json` under:
+`results/replay/<utc-timestamp>/orchestrator-replay-<run-utc-timestamp>/`.

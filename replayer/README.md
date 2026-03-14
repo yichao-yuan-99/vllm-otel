@@ -96,6 +96,18 @@ uses it to build deterministic `forced_token_ids`.
 `--request-timeout-s` controls tokenizer HTTP timeout during this compile step.
 Compile backend is auto-detected from `meta/config.toml`; there is no override.
 
+### Compile Versioning
+
+Replay plans now include `compile_version`. During `replayer compile`, if the
+target plan file already exists and its `compile_version` matches the current
+code version, compile reuses that plan and skips recompilation.
+
+For backward compatibility, missing or empty `compile_version` is treated as
+`v1`.
+
+Maintainer note: if you change compile-time plan semantics in
+`replayer/cli.py`, you must increment `REPLAY_PLAN_COMPILE_VERSION`.
+
 If the source profile contains recorded `499 client_disconnected` inference
 requests, `compile` now keeps those requests in the plan instead of failing
 deterministic tokenization. Those entries are compiled as synthetic
@@ -157,6 +169,10 @@ Replay can also override the compiled `launch_policy` while preserving the
 compiled worker/request structure. Pass a JSON object with the fields you want
 to overlay onto the plan's `launch_policy`.
 
+If the override switches the launch pattern to `poisson` and does not also set
+`max_concurrent`, replay treats the launch stream as unbounded instead of
+inheriting the plan's recorded concurrency cap.
+
 For example, to replay the same workers with `max_concurrent = 10` instead of
 the value stored in the plan:
 
@@ -214,6 +230,7 @@ Launch behavior:
 
 - replay preserves original worker launch ordering (`launch_priority`)
 - worker launch timing is driven by recorded con-driver scheduling config (`max_concurrent`, `pattern`, `pattern_args`, `seed`)
+- a replay-side Poisson override does not inherit the plan's `max_concurrent` unless the override explicitly sets its own `max_concurrent`
 - replay does not require exact original absolute launch offsets
 - replay requires plans that include `launch_policy` (`config_ordered`)
 - replay targets the raw gateway listener, not `gateway_parse_port`

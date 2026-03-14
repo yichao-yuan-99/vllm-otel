@@ -34,11 +34,13 @@ def test_main_run_dir_invokes_scripts_in_order(monkeypatch, tmp_path: Path) -> N
     assert [_script_tail(command) for command in commands] == [
         "global/extract_run.py",
         "global-progress/extract_run.py",
+        "job-throughput/extract_run.py",
         "gateway/llm-requests/extract_run.py",
         "gateway/usage/extract_run.py",
         "split/duration/extract_run.py",
         "vllm-metrics/extract_run.py",
         "vllm-metrics/summarize_timeseries.py",
+        "visualization/job-throughput/generate_all_figures.py",
         "visualization/vllm-metrics/generate_all_figures.py",
     ]
     for command in commands:
@@ -66,11 +68,13 @@ def test_main_root_dir_invokes_scripts_in_order_and_aggregate(
     assert [_script_tail(command) for command in commands] == [
         "global/extract_run.py",
         "global-progress/extract_run.py",
+        "job-throughput/extract_run.py",
         "gateway/llm-requests/extract_run.py",
         "gateway/usage/extract_run.py",
         "split/duration/extract_run.py",
         "vllm-metrics/extract_run.py",
         "vllm-metrics/summarize_timeseries.py",
+        "visualization/job-throughput/generate_all_figures.py",
         "visualization/vllm-metrics/generate_all_figures.py",
         "global/aggregate_runs_csv.py",
     ]
@@ -105,11 +109,13 @@ def test_main_root_dir_dry_run_skips_aggregate(monkeypatch, tmp_path: Path) -> N
     assert [_script_tail(command) for command in commands] == [
         "global/extract_run.py",
         "global-progress/extract_run.py",
+        "job-throughput/extract_run.py",
         "gateway/llm-requests/extract_run.py",
         "gateway/usage/extract_run.py",
         "split/duration/extract_run.py",
         "vllm-metrics/extract_run.py",
         "vllm-metrics/summarize_timeseries.py",
+        "visualization/job-throughput/generate_all_figures.py",
         "visualization/vllm-metrics/generate_all_figures.py",
     ]
     for command in commands:
@@ -136,6 +142,7 @@ def test_main_stops_when_a_step_fails(monkeypatch, tmp_path: Path) -> None:
     assert [_script_tail(command) for command in commands] == [
         "global/extract_run.py",
         "global-progress/extract_run.py",
+        "job-throughput/extract_run.py",
         "gateway/llm-requests/extract_run.py",
         "gateway/usage/extract_run.py",
     ]
@@ -176,11 +183,13 @@ def test_main_run_dir_with_nested_runs_falls_back_to_root_pipeline(
     assert [_script_tail(command) for command in commands] == [
         "global/extract_run.py",
         "global-progress/extract_run.py",
+        "job-throughput/extract_run.py",
         "gateway/llm-requests/extract_run.py",
         "gateway/usage/extract_run.py",
         "split/duration/extract_run.py",
         "vllm-metrics/extract_run.py",
         "vllm-metrics/summarize_timeseries.py",
+        "visualization/job-throughput/generate_all_figures.py",
         "visualization/vllm-metrics/generate_all_figures.py",
         "global/aggregate_runs_csv.py",
     ]

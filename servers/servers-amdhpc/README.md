@@ -39,6 +39,7 @@ Image refs now live in `[images]` inside `server_config.toml`. SIF filenames are
 - `extra_args`
 
 Start is blocked when `weight_vram_gb > 0.75 * partition.total_vram_gb`.
+Grouped start (`start-group`) is blocked when `weight_vram_gb > 0.75 * per_profile_vram`, where `per_profile_vram` is computed from the even GPU split on one node.
 `cluster.startup_timeout_after_running = true` means startup timeout is counted only after Slurm state is `RUNNING`.
 
 ## 2) Start server (login node)
@@ -56,8 +57,10 @@ Server startup now ensures the required SIF files exist and pulls them automatic
 python3 servers/servers-amdhpc/client.py status -P 0
 python3 servers/servers-amdhpc/client.py start -P 0 -p mi3008x -m kimi_k2_5
 python3 servers/servers-amdhpc/client.py start -P 0 -p mi3008x -m kimi_k2_5 -b
+python3 servers/servers-amdhpc/client.py start -P 0 -p mi3008x -m kimi_k2_5 --lmcache 100
 python3 servers/servers-amdhpc/client.py start-group -g bench_a -L 0,1,2,3 -p mi3008x -m kimi_k2_5
-python3 servers/servers-amdhpc/client.py start-group -g bench_a -L 0,1,2,3,4 -p mi2104x -m qwen3_coder_30b
+python3 servers/servers-amdhpc/client.py start-group -g bench_a -L 0,1,2,3 -p mi3008x -m kimi_k2_5 --lmcache 100
+python3 servers/servers-amdhpc/client.py start-group -g bench_b -L 0,1,2,3,4,5,6,7 -p mi3008x -m qwen3_coder_30b
 python3 servers/servers-amdhpc/client.py group-status -g bench_a
 python3 servers/servers-amdhpc/client.py up -P 0
 python3 servers/servers-amdhpc/client.py wait-up -P 0 --timeout-seconds 900
@@ -71,6 +74,60 @@ python3 servers/servers-amdhpc/client.py stop-group -g bench_a
 `-P` is the short alias for `--port-profile`.
 Client default server URL is derived from the selected local tunnel record. By default the local control port is `23971 + <port_profile>` (for example: profile `0` -> `23971`, profile `1` -> `23972`).
 Client `start` now also launches a per-profile local gateway daemon in the background after services are up, and `stop` tears it down first.
+
+## Render sbatch only (no submit)
+
+Use `render-sbatch.py` when you want the same `start` / `start-group` interface but only write the sbatch script once, without starting client-d/gateway or submitting to Slurm.
+Detailed usage (including `--local-mode`) is in `servers/servers-amdhpc/README.render-sbatch.md`.
+
+```bash
+# Single-profile render
+python3 servers/servers-amdhpc/render-sbatch.py start -P 0 -p mi3008x -m qwen3_coder_30b
+
+# Grouped render (4 profiles on one node -> tp=2)
+python3 servers/servers-amdhpc/render-sbatch.py start-group -g mi300_tp2 -L 0,1,2,3 -p mi3008x -m qwen3_coder_30b
+```
+
+Optional:
+- add `--lmcache <size>` to inject LMCache settings into the rendered vLLM command/env
+- add `--check-port-availability` to fail render if selected login-node ports are currently in use
+
+## Grouped Single-Node GPU Split
+
+`start-group` runs all grouped workers on one node and divides that node's GPUs evenly across profiles.
+
+How allocation works:
+
+- `group_size = len(profile_list)`
+- `gpus_per_profile = partition.gpus_per_node / group_size` (must divide evenly)
+- each profile gets a fixed contiguous GPU slice on that node
+- `tensor_parallel_size` for each profile is set to `gpus_per_profile`
+
+Model-fit rule for grouped launch:
+
+- per-profile VRAM = `partition.gpu_memory_gb * gpus_per_profile`
+- grouped start is rejected when `weight_vram_gb > 0.75 * per_profile_vram`
+
+Examples on `mi3008x` (`8 x 192GB` GPUs):
+
+- `--profile-list 0,1,2,3` -> `group_size=4`, `gpus_per_profile=2`, `tp=2`, per-profile VRAM=`384GB`
+- `--profile-list 0,1,2,3,4,5,6,7` -> `group_size=8`, `gpus_per_profile=1`, `tp=1`, per-profile VRAM=`192GB`
+
+Example commands:
+
+```bash
+# 4 profiles on one MI3008x node -> 2 GPUs/profile (tp=2)
+python3 servers/servers-amdhpc/client.py start-group -g mi300_tp2 -L 0,1,2,3 -p mi3008x -m qwen3_coder_30b
+
+# 8 profiles on one MI3008x node -> 1 GPU/profile (tp=1)
+python3 servers/servers-amdhpc/client.py start-group -g mi300_tp1 -L 0,1,2,3,4,5,6,7 -p mi3008x -m qwen3_coder_30b
+```
+
+Validation and failure cases:
+
+- rejected when `group_size > partition.gpus_per_node`
+- rejected when `partition.gpus_per_node % group_size != 0`
+- rejection details include partition GPU info, group size, and selected profile list
 
 ## 4) Run live integration test
 
@@ -122,9 +179,17 @@ Optional overrides:
 - `start`: single-profile control-plane commands use `--port-profile`/`-P`; grouped commands use `--group-name` + `--profile-list`.
 - `start`: after services are up, it auto-starts a local gateway daemon in the background for the selected port profile.
 - `start`: if `--block/-b` is not set, client still waits for `/wait-up` readiness before launching gateway.
+- `start`: supports repeatable `--env KEY=VALUE` to inject extra environment variables into the vLLM apptainer process.
+- `start`/`start-group`: optional `--lmcache <size>` injects `LMCACHE_MAX_LOCAL_CPU_SIZE=<size>` and appends `--kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'` to vLLM startup args.
+- `start`/`start-group`: always inject `LMCACHE_INTERNAL_API_SERVER_ENABLED=1` and `PYTHONHASHSEED=0` into vLLM apptainer env.
+- `start`: always inject `LMCACHE_INTERNAL_API_SERVER_PORT_START=<profile.lmcache_port>` from the selected `port_profile`.
+- `start-group`: always inject per-worker `LMCACHE_INTERNAL_API_SERVER_PORT_START` from each selected profile's `lmcache_port`.
 - `start-group`: launches client-d for each profile in `--profile-list`, then calls grouped control-plane start, then launches one local gateway daemon per profile.
 - `start-group`: grouped start is blocking; it waits until all grouped profiles report vLLM + Jaeger ready.
-- `start-group`: submits one multi-node Slurm job with one worker task per profile; node/task index maps to profile-specific ports from `--profile-list`.
+- `start-group`: supports repeatable `--env KEY=VALUE` and applies those variables to every grouped vLLM worker.
+- `start-group`: submits one single-node Slurm job with one worker task per profile; node/task index maps to profile-specific ports from `--profile-list`.
+- `start-group`: GPUs on that node are divided evenly across profiles; each profile gets `tp = gpus_per_profile`.
+- `start-group`: group size must evenly divide `partition.gpus_per_node` (for example `4` profiles on `mi3008x` => `2` GPUs/profile, `8` profiles => `1` GPU/profile).
 - `start-group`: streams per-profile progress lines while waiting on grouped startup (`/start/status` for each profile).
 - `group-status`: reports grouped run status (group name, profiles, job IDs, per-profile status).
 - `group-status`: prints lightweight query progress lines before returning JSON payload.
@@ -158,9 +223,9 @@ Optional overrides:
 
 All commands accept POST JSON:
 
-- `POST /start` with `{"port_profile": 0, "partition": "...", "model": "...", "block": false}`
+- `POST /start` with `{"port_profile": 0, "partition": "...", "model": "...", "block": false, "lmcache": 100}`
 - `POST /stop` with `{"port_profile": 0, "block": false}`
-- `POST /group/start` with `{"group_name": "bench_a", "profile_list": [0,1,2,3], "partition": "...", "model": "...", "block": true}`
+- `POST /group/start` with `{"group_name": "bench_a", "profile_list": [0,1,2,3], "partition": "...", "model": "...", "block": true, "lmcache": 100}`
 - `POST /group/stop` with `{"group_name": "bench_a", "block": true}`
 - `POST /group/status` with `{"group_name": "bench_a"}`
 - `POST /stop/poll` with `{"port_profile": 0}`

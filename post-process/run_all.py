@@ -122,6 +122,7 @@ def _build_step_commands_for_run_dir(
     steps = [
         "global/extract_run.py",
         "global-progress/extract_run.py",
+        "job-throughput/extract_run.py",
         "gateway/llm-requests/extract_run.py",
         "gateway/usage/extract_run.py",
         "split/duration/extract_run.py",
@@ -129,7 +130,12 @@ def _build_step_commands_for_run_dir(
         "vllm-metrics/summarize_timeseries.py",
     ]
     if not skip_visualization:
-        steps.append("visualization/vllm-metrics/generate_all_figures.py")
+        steps.extend(
+            [
+                "visualization/job-throughput/generate_all_figures.py",
+                "visualization/vllm-metrics/generate_all_figures.py",
+            ]
+        )
 
     commands: list[list[str]] = []
     for script_rel_path in steps:
@@ -156,6 +162,7 @@ def _build_step_commands_for_root_dir(
     steps = [
         "global/extract_run.py",
         "global-progress/extract_run.py",
+        "job-throughput/extract_run.py",
         "gateway/llm-requests/extract_run.py",
         "gateway/usage/extract_run.py",
         "split/duration/extract_run.py",
@@ -163,7 +170,12 @@ def _build_step_commands_for_root_dir(
         "vllm-metrics/summarize_timeseries.py",
     ]
     if not skip_visualization:
-        steps.append("visualization/vllm-metrics/generate_all_figures.py")
+        steps.extend(
+            [
+                "visualization/job-throughput/generate_all_figures.py",
+                "visualization/vllm-metrics/generate_all_figures.py",
+            ]
+        )
 
     commands: list[list[str]] = []
     for script_rel_path in steps:

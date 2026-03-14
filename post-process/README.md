@@ -7,6 +7,7 @@ outputs.
 
 - `global`: run-level timing extraction and cross-run CSV aggregation
 - `global-progress`: run-level replay completion milestone timing
+- `job-throughput`: moving replay/job throughput over time for each run
 - `split/duration`: context-usage percentile split tables for per-job duration/turn/token metrics
 - `vllm-metrics`: parse/extract/summarize vLLM Prometheus metrics
 - `gateway/llm-requests`: flatten and summarize gateway LLM request traces
@@ -16,6 +17,8 @@ outputs.
 
 - `post-process/global/README.md`
 - `post-process/global-progress/README.md`
+- `post-process/job-throughput/README.md`
+- `post-process/visualization/job-throughput/README.md`
 - `post-process/split/duration/README.md`
 - `post-process/vllm-metrics/README.md`
 - `post-process/gateway/llm-requests/README.md`
@@ -44,13 +47,15 @@ Pipeline order:
 
 1. `global/extract_run.py`
 2. `global-progress/extract_run.py`
-3. `gateway/llm-requests/extract_run.py`
-4. `gateway/usage/extract_run.py`
-5. `split/duration/extract_run.py`
-6. `vllm-metrics/extract_run.py`
-7. `vllm-metrics/summarize_timeseries.py`
-8. `visualization/vllm-metrics/generate_all_figures.py`
-9. `global/aggregate_runs_csv.py` (root-dir mode only, skipped in dry-run)
+3. `job-throughput/extract_run.py`
+4. `gateway/llm-requests/extract_run.py`
+5. `gateway/usage/extract_run.py`
+6. `split/duration/extract_run.py`
+7. `vllm-metrics/extract_run.py`
+8. `vllm-metrics/summarize_timeseries.py`
+9. `visualization/job-throughput/generate_all_figures.py`
+10. `visualization/vllm-metrics/generate_all_figures.py`
+11. `global/aggregate_runs_csv.py` (root-dir mode only, skipped in dry-run)
 
 ### `global-progress`
 
@@ -75,6 +80,34 @@ Pipeline order:
 - optional output path: `--output <csv-path>`
 - default output:
 - `<root-dir>/replay-progress-summary.csv`
+
+### `job-throughput`
+
+- `post-process/job-throughput/extract_run.py`
+- purpose: compute moving job/replay throughput over the run timeline
+- supports:
+- single run: `--run-dir <run-dir>`
+- batch discovery: `--root-dir <root-dir>`
+- parallel workers: `--max-procs`
+- dry-run: `--dry-run`
+- optional controls:
+- `--timepoint-freq-hz`
+- `--window-size-s`
+- default output:
+- `<run-dir>/post-processed/job-throughput/job-throughput-timeseries.json`
+
+- `post-process/visualization/job-throughput/generate_all_figures.py`
+- purpose: render one throughput line chart per run from extracted job-throughput timeseries
+- supports:
+- single run: `--run-dir <run-dir>`
+- batch discovery: `--root-dir <root-dir>`
+- parallel workers: `--max-procs`
+- dry-run: `--dry-run`
+- rendering controls:
+- `--format`
+- `--dpi`
+- default output:
+- `<run-dir>/post-processed/visualization/job-throughput/`
 
 ### `split/duration`
 

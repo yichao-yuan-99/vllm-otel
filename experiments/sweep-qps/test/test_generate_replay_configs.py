@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -21,6 +22,14 @@ def load_generator_module() -> object:
     sys.modules["generate_replay_qps_configs"] = module
     spec.loader.exec_module(module)
     return module
+
+
+def resolve_single_output_batch_dir(output_config_root: Path) -> Path:
+    candidates = sorted(path for path in output_config_root.iterdir() if path.is_dir())
+    assert len(candidates) == 1
+    batch_dir = candidates[0]
+    assert re.fullmatch(r"\d{8}T\d{6}Z", batch_dir.name) is not None
+    return batch_dir
 
 
 def test_main_generates_configs_and_manifest(tmp_path: Path) -> None:
@@ -55,11 +64,12 @@ def test_main_generates_configs_and_manifest(tmp_path: Path) -> None:
     )
     assert exit_code == 0
 
+    output_config_batch_dir = resolve_single_output_batch_dir(output_config_dir)
     config_12 = tomllib.loads(
-        (output_config_dir / "replay.qps1_2.toml").read_text(encoding="utf-8")
+        (output_config_batch_dir / "replay.qps1_2.toml").read_text(encoding="utf-8")
     )
     config_15 = tomllib.loads(
-        (output_config_dir / "replay.qps1_5.toml").read_text(encoding="utf-8")
+        (output_config_batch_dir / "replay.qps1_5.toml").read_text(encoding="utf-8")
     )
 
     replay_12 = config_12["replay"]
@@ -71,13 +81,23 @@ def test_main_generates_configs_and_manifest(tmp_path: Path) -> None:
     assert replay_12["launch_policy_override"]["pattern"]["name"] == "poisson"
     assert replay_12["launch_policy_override"]["pattern_args"]["rate"] == 1.2
     assert replay_15["launch_policy_override"]["pattern_args"]["rate"] == 1.5
-    assert (
-        replay_12["output_dir"]
-        == "results/replay/qwen3-coder-30b/dabstep/mini-swe-agent/sweep-qps/qps1_2"
-    )
 
-    manifest = json.loads((output_config_dir / "manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads((output_config_batch_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["status"] == "ok"
+    assert manifest["output_config_root_dir"] == str(output_config_dir.resolve())
+    assert manifest["output_config_dir"] == str(output_config_batch_dir.resolve())
+    assert re.fullmatch(r"\d{8}T\d{6}Z", manifest["batch_timestamp"]) is not None
+    replay_prefix = f"results/replay/{manifest['batch_timestamp']}/"
+    assert replay_12["output_dir"].startswith(replay_prefix)
+    assert replay_15["output_dir"].startswith(replay_prefix)
+    batch_dir_12 = replay_12["output_dir"].removesuffix("/qps1_2")
+    batch_dir_15 = replay_15["output_dir"].removesuffix("/qps1_5")
+    assert batch_dir_12 == batch_dir_15
+    assert batch_dir_12 == (
+        f"results/replay/{manifest['batch_timestamp']}/"
+        "qwen3-coder-30b/dabstep/mini-swe-agent/sweep-qps"
+    )
+    assert manifest["replay_output_batch_dir"] == batch_dir_12
     assert manifest["poisson_seed"] == 7
     assert manifest["randomize_seed"] == 11
     assert manifest["time_constraint_s"] == 600.0
@@ -125,8 +145,9 @@ def test_main_forwards_optional_settings_and_merges_overrides(tmp_path: Path) ->
     )
     assert exit_code == 0
 
+    output_config_batch_dir = resolve_single_output_batch_dir(output_config_dir)
     config = tomllib.loads(
-        (output_config_dir / "replay.qps2.toml").read_text(encoding="utf-8")
+        (output_config_batch_dir / "replay.qps2.toml").read_text(encoding="utf-8")
     )
     replay = config["replay"]
     assert replay["port_profile_id"] == 3

@@ -235,11 +235,108 @@ class RequestHandler(BaseHTTPRequestHandler):
             )
         return parsed
 
+    def _optional_extra_env(self, payload: dict[str, Any], *, command_name: str) -> dict[str, str]:
+        raw_extra_env = payload.get("extra_env")
+        if raw_extra_env is None:
+            return {}
+
+        parsed: dict[str, str] = {}
+        if isinstance(raw_extra_env, dict):
+            items = raw_extra_env.items()
+        elif isinstance(raw_extra_env, list):
+            items = []
+            for item in raw_extra_env:
+                if not isinstance(item, str):
+                    raise ControlPlaneError(
+                        message=f"{command_name}.extra_env list values must be strings in KEY=VALUE form",
+                        code=226,
+                        http_status=400,
+                    )
+                if "=" not in item:
+                    raise ControlPlaneError(
+                        message=f"{command_name}.extra_env value '{item}' must be KEY=VALUE",
+                        code=227,
+                        http_status=400,
+                    )
+                key, value = item.split("=", 1)
+                items.append((key, value))
+        else:
+            raise ControlPlaneError(
+                message=f"{command_name}.extra_env must be an object or list of KEY=VALUE strings",
+                code=228,
+                http_status=400,
+            )
+
+        for raw_key, raw_value in items:
+            if not isinstance(raw_key, str) or not raw_key.strip():
+                raise ControlPlaneError(
+                    message=f"{command_name}.extra_env keys must be non-empty strings",
+                    code=229,
+                    http_status=400,
+                )
+            key = raw_key.strip()
+            if key in parsed:
+                raise ControlPlaneError(
+                    message=f"{command_name}.extra_env key '{key}' is duplicated",
+                    code=230,
+                    http_status=400,
+                )
+            parsed[key] = str(raw_value)
+        return parsed
+
+    def _optional_lmcache_size(self, payload: dict[str, Any], *, command_name: str) -> str | None:
+        raw_size = payload.get("lmcache")
+        if raw_size is None:
+            return None
+
+        if isinstance(raw_size, bool):
+            raise ControlPlaneError(
+                message=f"{command_name}.lmcache must be a positive integer",
+                code=231,
+                http_status=400,
+            )
+
+        if isinstance(raw_size, int):
+            size_value = raw_size
+        elif isinstance(raw_size, str):
+            text = raw_size.strip()
+            if not text:
+                raise ControlPlaneError(
+                    message=f"{command_name}.lmcache must be a positive integer",
+                    code=232,
+                    http_status=400,
+                )
+            try:
+                size_value = int(text)
+            except ValueError as exc:
+                raise ControlPlaneError(
+                    message=f"{command_name}.lmcache must be a positive integer",
+                    code=233,
+                    http_status=400,
+                ) from exc
+        else:
+            raise ControlPlaneError(
+                message=f"{command_name}.lmcache must be a positive integer",
+                code=234,
+                http_status=400,
+            )
+
+        if size_value <= 0:
+            raise ControlPlaneError(
+                message=f"{command_name}.lmcache must be a positive integer",
+                code=235,
+                http_status=400,
+            )
+
+        return str(size_value)
+
     def _start_command(self, payload: dict[str, Any]) -> CommandResult:
         port_profile = self._require_port_profile(payload, command_name="start")
         partition = payload.get("partition")
         model = payload.get("model")
         block = payload.get("block", False)
+        extra_env = self._optional_extra_env(payload, command_name="start")
+        lmcache_size = self._optional_lmcache_size(payload, command_name="start")
         if not isinstance(partition, str) or not partition:
             raise ControlPlaneError(
                 message="start requires 'partition'",
@@ -263,6 +360,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             partition=partition,
             model=model,
             block=block,
+            extra_env=extra_env,
+            lmcache_max_local_cpu_size=lmcache_size,
         )
 
     def _stop_command(self, payload: dict[str, Any]) -> CommandResult:
@@ -282,6 +381,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         partition = payload.get("partition")
         model = payload.get("model")
         block = payload.get("block", True)
+        extra_env = self._optional_extra_env(payload, command_name="group/start")
+        lmcache_size = self._optional_lmcache_size(payload, command_name="group/start")
         if not isinstance(partition, str) or not partition:
             raise ControlPlaneError(
                 message="group/start requires 'partition'",
@@ -306,6 +407,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             partition=partition,
             model=model,
             block=block,
+            extra_env=extra_env,
+            lmcache_max_local_cpu_size=lmcache_size,
         )
 
     def _group_stop_command(self, payload: dict[str, Any]) -> CommandResult:

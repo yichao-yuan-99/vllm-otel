@@ -31,6 +31,8 @@ servers/servers-docker/logs
 tests/output/
 experiments/results/
 results/
+experiments/sweep-qps-local/single/generated/
+experiments/sweep-qps/generated/
 con-driver/.cache/
 con-driver-test*/
 gateway-output/

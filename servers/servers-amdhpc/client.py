@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import signal
 import subprocess
@@ -461,6 +462,28 @@ def _parse_profile_list(value: str) -> list[int]:
         parsed.append(profile_id)
     if len(set(parsed)) != len(parsed):
         raise ValueError("profile list cannot contain duplicate ids")
+    return parsed
+
+
+def _parse_extra_env_list(values: list[str]) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for raw_item in values:
+        item = raw_item.strip()
+        if not item:
+            raise ValueError("env value cannot be empty; use KEY=VALUE")
+        if "=" not in item:
+            raise ValueError(f"env value '{item}' must be in KEY=VALUE format")
+        key_raw, value = item.split("=", 1)
+        key = key_raw.strip()
+        if not key:
+            raise ValueError(f"env value '{item}' has an empty key")
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) is None:
+            raise ValueError(
+                f"env key '{key}' is invalid; expected [A-Za-z_][A-Za-z0-9_]*"
+            )
+        if key in parsed:
+            raise ValueError(f"duplicate env key '{key}'")
+        parsed[key] = value
     return parsed
 
 
@@ -1495,8 +1518,42 @@ def start(
         "--ssh-option",
         help="Additional raw ssh option token. Repeat to pass multiple tokens.",
     ),
+    env: list[str] = typer.Option(
+        [],
+        "--env",
+        help="Additional vLLM environment variable in KEY=VALUE form. Repeat to pass multiple values.",
+    ),
+    lmcache: int | None = typer.Option(
+        None,
+        "--lmcache",
+        help=(
+            "Enable LMCache with a maximum local CPU size. "
+            "Sets LMCACHE_MAX_LOCAL_CPU_SIZE and enables kv-transfer-config."
+        ),
+    ),
 ) -> None:
     """Start client-d and submit an sbatch job for a configured partition + model."""
+    try:
+        extra_env = _parse_extra_env_list(env)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--env") from exc
+    if lmcache is not None and lmcache <= 0:
+        raise typer.BadParameter("--lmcache must be a positive integer", param_hint="--lmcache")
+    if lmcache is not None and "LMCACHE_MAX_LOCAL_CPU_SIZE" in extra_env:
+        raise typer.BadParameter(
+            "cannot combine --lmcache with --env LMCACHE_MAX_LOCAL_CPU_SIZE=...",
+            param_hint="--lmcache",
+        )
+
+    start_payload: dict[str, Any] = {
+        "port_profile": port_profile,
+        "partition": partition,
+        "model": model,
+        "extra_env": extra_env,
+    }
+    if lmcache is not None:
+        start_payload["lmcache"] = lmcache
+
     clientd_payload = start_client_d(
         ssh_target=ssh_target,
         port_profile_id=port_profile,
@@ -1512,7 +1569,7 @@ def start(
             server_payload = _run_blocking_with_progress(
                 ctx,
                 endpoint="/start",
-                payload={"port_profile": port_profile, "partition": partition, "model": model, "block": True},
+                payload={**start_payload, "block": True},
                 progress_endpoint="/start/status",
                 progress_payload={"port_profile": port_profile},
                 progress_tag="start",
@@ -1525,7 +1582,7 @@ def start(
         server_payload = _run_command_with_timeout(
             ctx,
             "/start",
-            payload={"port_profile": port_profile, "partition": partition, "model": model, "block": False},
+            payload={**start_payload, "block": False},
             timeout_seconds=None,
         )
     if not _is_ok(server_payload):
@@ -1674,6 +1731,19 @@ def start_group(
         "--ssh-option",
         help="Additional raw ssh option token. Repeat to pass multiple tokens.",
     ),
+    env: list[str] = typer.Option(
+        [],
+        "--env",
+        help="Additional vLLM environment variable in KEY=VALUE form. Repeat to pass multiple values.",
+    ),
+    lmcache: int | None = typer.Option(
+        None,
+        "--lmcache",
+        help=(
+            "Enable LMCache with a maximum local CPU size. "
+            "Sets LMCACHE_MAX_LOCAL_CPU_SIZE and enables kv-transfer-config."
+        ),
+    ),
     clientd_timeout_seconds: float = typer.Option(
         10.0,
         "--clientd-timeout-seconds",
@@ -1685,6 +1755,28 @@ def start_group(
         profile_ids = _parse_profile_list(profile_list)
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--profile-list") from exc
+    try:
+        extra_env = _parse_extra_env_list(env)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--env") from exc
+    if lmcache is not None and lmcache <= 0:
+        raise typer.BadParameter("--lmcache must be a positive integer", param_hint="--lmcache")
+    if lmcache is not None and "LMCACHE_MAX_LOCAL_CPU_SIZE" in extra_env:
+        raise typer.BadParameter(
+            "cannot combine --lmcache with --env LMCACHE_MAX_LOCAL_CPU_SIZE=...",
+            param_hint="--lmcache",
+        )
+
+    group_start_payload: dict[str, Any] = {
+        "group_name": group_name,
+        "profile_list": profile_ids,
+        "partition": partition,
+        "model": model,
+        "block": True,
+        "extra_env": extra_env,
+    }
+    if lmcache is not None:
+        group_start_payload["lmcache"] = lmcache
 
     clientd_payloads: dict[str, dict[str, Any]] = {}
     started_profiles: list[int] = []
@@ -1732,13 +1824,7 @@ def start_group(
         server_payload = _run_group_blocking_with_progress(
             ctx,
             endpoint="/group/start",
-            payload={
-                "group_name": group_name,
-                "profile_list": profile_ids,
-                "partition": partition,
-                "model": model,
-                "block": True,
-            },
+            payload=group_start_payload,
             progress_endpoint="/start/status",
             progress_profiles=profile_ids,
             progress_tag="start-group",

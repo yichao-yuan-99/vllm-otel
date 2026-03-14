@@ -4,7 +4,7 @@
 This script creates a directory of replayer TOML config files. Each generated
 config is intended to be consumed by:
 
-    python -m orchestrator --job-type replay --jobs-dir <generated_dir> ...
+    python -m orchestrator --job-type replay --jobs-dir <generated_dir> --output-dir <output_root> ...
 """
 
 from __future__ import annotations

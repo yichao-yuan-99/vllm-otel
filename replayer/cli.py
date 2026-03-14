@@ -80,6 +80,16 @@ def write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
 
 
+REPLAY_PLAN_SCHEMA_VERSION = "replay-plan.v1"
+# NOTE FOR MAINTAINERS:
+# `cmd_compile` reuses an existing replay plan when its `compile_version` matches
+# this value. Missing/empty `compile_version` is interpreted as v1 for backward
+# compatibility.
+# If compile-time semantics change in a way that requires rebuilding plans,
+# increment this version.
+REPLAY_PLAN_COMPILE_VERSION = "1"
+REPLAY_PLAN_COMPILE_VERSION_V1 = "1"
+
 DEFAULT_VLLM_LOG_INTERVAL_S = 1.0
 DEFAULT_VLLM_LOG_TIMEOUT_S = 3600.0
 DEFAULT_COMPILE_TOKENIZE_TIMEOUT_S = 3600.0
@@ -352,6 +362,33 @@ def parse_optional_float(value: Any, *, field_name: str) -> float | None:
         except ValueError as exc:
             raise ValueError(f"{field_name} must be a number") from exc
     raise ValueError(f"{field_name} must be a number")
+
+
+def is_replay_plan_compile_version_current(plan_payload: dict[str, Any]) -> bool:
+    raw_version = plan_payload.get("compile_version")
+    if raw_version is None:
+        return REPLAY_PLAN_COMPILE_VERSION_V1 == REPLAY_PLAN_COMPILE_VERSION
+    if isinstance(raw_version, str):
+        stripped_version = raw_version.strip()
+        if not stripped_version:
+            return REPLAY_PLAN_COMPILE_VERSION_V1 == REPLAY_PLAN_COMPILE_VERSION
+        return stripped_version == REPLAY_PLAN_COMPILE_VERSION
+    return False
+
+
+def count_plan_workers_and_requests(plan_payload: dict[str, Any]) -> tuple[int, int]:
+    workers_payload = plan_payload.get("workers")
+    if not isinstance(workers_payload, list):
+        return 0, 0
+
+    request_count = 0
+    for worker_payload in workers_payload:
+        if not isinstance(worker_payload, dict):
+            continue
+        requests_payload = worker_payload.get("requests")
+        if isinstance(requests_payload, list):
+            request_count += len(requests_payload)
+    return len(workers_payload), request_count
 
 
 def resolve_required_option(value: Any, *, option_name: str, config_key: str) -> Any:
@@ -1181,6 +1218,44 @@ def cmd_compile(args: argparse.Namespace) -> int:
         ),
         field_name="plan_out",
     )
+    if plan_out_override is not None:
+        plan_path = plan_out_override.expanduser().resolve()
+    else:
+        plan_path = (job_dir / "replay-plan.json").resolve()
+
+    existing_plan_payload: dict[str, Any] | None = None
+    if plan_path.exists():
+        if not plan_path.is_file():
+            raise ValueError(f"Invalid replay plan path (not a file): {plan_path}")
+        with suppress(Exception):
+            loaded_payload = read_json(plan_path)
+            if isinstance(loaded_payload, dict):
+                existing_plan_payload = loaded_payload
+    if existing_plan_payload is not None and is_replay_plan_compile_version_current(
+        existing_plan_payload
+    ):
+        launch_policy_payload = existing_plan_payload.get("launch_policy")
+        launch_strategy = (
+            launch_policy_payload.get("strategy")
+            if isinstance(launch_policy_payload, dict)
+            else None
+        )
+        worker_count, request_count = count_plan_workers_and_requests(existing_plan_payload)
+        summary = {
+            "status": "ok",
+            "backend": existing_plan_payload.get("backend"),
+            "plan_path": str(plan_path),
+            "launch_strategy": launch_strategy,
+            "worker_count": worker_count,
+            "request_count": request_count,
+            "port_profile_id": compile_port_profile_id,
+            "compile_version": REPLAY_PLAN_COMPILE_VERSION,
+            "reused_existing_plan": True,
+        }
+        if config_file_path is not None:
+            summary["source_config"] = str(config_file_path.expanduser().resolve())
+        print(json.dumps(summary, indent=2, ensure_ascii=True))
+        return 0
 
     config_path = job_dir / "meta" / "config.toml"
     run_manifest_path = job_dir / "meta" / "run_manifest.json"
@@ -1398,13 +1473,9 @@ def cmd_compile(args: argparse.Namespace) -> int:
     for launch_priority, worker in enumerate(worker_plans):
         worker["launch_priority"] = launch_priority
 
-    if plan_out_override is not None:
-        plan_path = plan_out_override.expanduser().resolve()
-    else:
-        plan_path = (job_dir / "replay-plan.json").resolve()
-
     plan_payload = {
-        "schema_version": "replay-plan.v1",
+        "schema_version": REPLAY_PLAN_SCHEMA_VERSION,
+        "compile_version": REPLAY_PLAN_COMPILE_VERSION,
         "compiled_at": now_iso8601_utc(),
         "source_job_dir": str(job_dir),
         "backend": backend_name,
@@ -1427,6 +1498,8 @@ def cmd_compile(args: argparse.Namespace) -> int:
         "worker_count": len(worker_plans),
         "request_count": sum(len(worker["requests"]) for worker in worker_plans),
         "port_profile_id": compile_port_profile_id,
+        "compile_version": REPLAY_PLAN_COMPILE_VERSION,
+        "reused_existing_plan": False,
     }
     if config_file_path is not None:
         summary["source_config"] = str(config_file_path.expanduser().resolve())
@@ -1634,6 +1707,28 @@ def _normalize_launch_pattern_name(value: Any) -> str:
     return "eager"
 
 
+def _launch_policy_override_selects_poisson(
+    launch_policy_override: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(launch_policy_override, dict):
+        return False
+    pattern_payload = launch_policy_override.get("pattern")
+    if not isinstance(pattern_payload, dict):
+        return False
+    return _normalize_launch_pattern_name(pattern_payload.get("name")) in {
+        "poisson",
+        "possion",
+    }
+
+
+def _launch_capacity_available(
+    *,
+    active_count: int,
+    launch_max_concurrent: int | None,
+) -> bool:
+    return launch_max_concurrent is None or active_count < launch_max_concurrent
+
+
 def _coerce_pattern_arg_float(value: Any) -> float | None:
     if value is None or isinstance(value, bool):
         return None
@@ -1727,7 +1822,16 @@ def resolve_replay_launch_policy(
     *,
     launch_policy_payload: dict[str, Any],
     launch_policy_override: dict[str, Any] | None,
-) -> tuple[str, int, int | None, str, float | None, Callable[[], float], dict[str, Any], dict[str, Any] | None]:
+) -> tuple[
+    str,
+    int | None,
+    int | None,
+    str,
+    float | None,
+    Callable[[], float],
+    dict[str, Any] | None,
+    dict[str, Any],
+]:
     effective_launch_policy = (
         merge_dict_overlay(launch_policy_payload, launch_policy_override)
         if launch_policy_override is not None
@@ -1741,12 +1845,6 @@ def resolve_replay_launch_policy(
         raise ValueError(
             f"Unsupported launch strategy {launch_strategy!r}; only config_ordered is supported"
         )
-
-    max_concurrent_raw = effective_launch_policy.get("max_concurrent")
-    max_concurrent = _to_int_or_default(max_concurrent_raw, default=1)
-    if max_concurrent <= 0:
-        raise ValueError("Replay launch max_concurrent must be > 0")
-    launch_max_concurrent = max_concurrent
 
     seed_raw = effective_launch_policy.get("seed")
     launch_seed: int | None = None
@@ -1763,6 +1861,23 @@ def resolve_replay_launch_policy(
         )
     pattern_name = _normalize_launch_pattern_name(pattern_payload.get("name"))
     launch_pattern_name = pattern_name
+
+    override_selects_poisson = _launch_policy_override_selects_poisson(
+        launch_policy_override,
+    )
+    override_declares_max_concurrent = (
+        isinstance(launch_policy_override, dict)
+        and "max_concurrent" in launch_policy_override
+    )
+    if override_selects_poisson and not override_declares_max_concurrent:
+        launch_max_concurrent: int | None = None
+        effective_launch_policy.pop("max_concurrent", None)
+    else:
+        max_concurrent_raw = effective_launch_policy.get("max_concurrent")
+        max_concurrent = _to_int_or_default(max_concurrent_raw, default=1)
+        if max_concurrent <= 0:
+            raise ValueError("Replay launch max_concurrent must be > 0")
+        launch_max_concurrent = max_concurrent
 
     launch_pattern_rate_per_second: float | None = None
     if pattern_name == "eager":
@@ -2557,7 +2672,10 @@ def cmd_replay(args: argparse.Namespace) -> int:
                             active_threads = [item for item in started_threads if item.is_alive()]
                             if len(active_threads) != len(started_threads):
                                 started_threads = active_threads
-                            if len(active_threads) < launch_max_concurrent:
+                            if _launch_capacity_available(
+                                active_count=len(active_threads),
+                                launch_max_concurrent=launch_max_concurrent,
+                            ):
                                 break
                             if stop_event.is_set():
                                 break
@@ -2648,7 +2766,10 @@ def cmd_replay(args: argparse.Namespace) -> int:
                             active_threads = [item for item in started_threads if item.is_alive()]
                             if len(active_threads) != len(started_threads):
                                 started_threads = active_threads
-                            if len(active_threads) < launch_max_concurrent:
+                            if _launch_capacity_available(
+                                active_count=len(active_threads),
+                                launch_max_concurrent=launch_max_concurrent,
+                            ):
                                 break
                             if stop_event.is_set():
                                 break

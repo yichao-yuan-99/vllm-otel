@@ -22,6 +22,7 @@ class PortProfile:
     vllm_port: int
     jaeger_api_port: int
     jaeger_otlp_port: int
+    lmcache_port: int
 
 
 def _parse_port(value: object, key: str) -> int:
@@ -61,6 +62,7 @@ def load_port_profile(profile_id: int | str, *, config_path: Path | None = None)
         vllm_port=_parse_port(profile.get("vllm_port"), f"profiles.{profile_key}.vllm_port"),
         jaeger_api_port=_parse_port(profile.get("jaeger_api_port"), f"profiles.{profile_key}.jaeger_api_port"),
         jaeger_otlp_port=_parse_port(profile.get("jaeger_otlp_port"), f"profiles.{profile_key}.jaeger_otlp_port"),
+        lmcache_port=_parse_port(profile.get("lmcache_port"), f"profiles.{profile_key}.lmcache_port"),
     )
 
 
@@ -80,4 +82,3 @@ def default_local_server_port(
     resolved_profile_id = int(profile_id)
     local_server_port = remote_server_port + resolved_profile_id
     return _parse_port(local_server_port, "local_server_port")
-
