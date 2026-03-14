@@ -112,6 +112,12 @@ def test_main_generates_local_mode_bundle(tmp_path: Path) -> None:
         assert (exp_dir / "run_local_replay.sh").exists()
         assert (exp_dir / "sbatch.sh").exists()
 
+    submit_all_path = (batch_dir / "submit_all.sh").resolve()
+    assert submit_all_path.exists()
+    submit_all_content = submit_all_path.read_text(encoding="utf-8")
+    assert 'sbatch "${SCRIPT_DIR}/qps0_1/sbatch.sh"' in submit_all_content
+    assert 'sbatch "${SCRIPT_DIR}/qps0_2/sbatch.sh"' in submit_all_content
+
     replay_01 = tomllib.loads((qps_01_dir / "replay.toml").read_text(encoding="utf-8"))["replay"]
     assert replay_01["randomize_seed"] == 11
     assert replay_01["time_constraint_s"] == 600.0
@@ -131,4 +137,6 @@ def test_main_generates_local_mode_bundle(tmp_path: Path) -> None:
     assert manifest["model"] == "qwen3_coder_30b"
     assert manifest["lmcache"] == 100
     assert manifest["port_profile"] == 0
+    assert manifest["submit_all_script"] == str(submit_all_path)
+    assert manifest["submit_all_command"].startswith("bash ")
     assert len(manifest["generated_experiments"]) == 2

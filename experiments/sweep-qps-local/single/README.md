@@ -9,6 +9,10 @@ Each generated experiment (one per QPS) is isolated in its own subdirectory and 
 - `run_local_replay.sh`: local-mode script executed by sbatch
 - `sbatch.sh`: rendered sbatch script (not submitted automatically)
 
+Each generated batch root also includes:
+
+- `submit_all.sh`: submits every generated experiment in that batch with `sbatch`
+
 ## Generate Experiments
 
 ```bash
@@ -44,6 +48,12 @@ Each experiment is submitted independently:
 
 ```bash
 sbatch experiments/sweep-qps-local/single/generated/<utc-timestamp>/qps0_1/sbatch.sh
+```
+
+Or submit the whole batch:
+
+```bash
+bash experiments/sweep-qps-local/single/generated/<utc-timestamp>/submit_all.sh
 ```
 
 ## Notes

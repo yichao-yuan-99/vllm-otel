@@ -272,6 +272,23 @@ def write_local_mode_script(
     path.chmod(0o750)
 
 
+def write_submit_all_script(path: Path, *, qps_slugs: list[str]) -> None:
+    lines = [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "",
+        "SCRIPT_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")\" && pwd)\"",
+        "",
+    ]
+    for qps_slug in qps_slugs:
+        lines.append(f"sbatch \"${{SCRIPT_DIR}}/{qps_slug}/sbatch.sh\"")
+    lines.append("")
+    content = "\n".join(lines)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o750)
+
+
 def build_control_plane(server_config_path: Path) -> Any:
     module_dir = REPO_ROOT / "servers" / "servers-amdhpc"
     module_dir_str = str(module_dir)
@@ -505,8 +522,10 @@ def main(argv: list[str] | None = None) -> int:
         control_plane = build_control_plane(server_config_path)
 
         generated_experiments: list[dict[str, Any]] = []
+        generated_qps_slugs: list[str] = []
         for qps in qps_values:
             qps_slug = format_qps_for_slug(qps)
+            generated_qps_slugs.append(qps_slug)
             experiment_dir = (batch_dir / qps_slug).resolve()
             experiment_dir.mkdir(parents=True, exist_ok=True)
 
@@ -562,6 +581,11 @@ def main(argv: list[str] | None = None) -> int:
                 }
             )
 
+        submit_all_script_path = (batch_dir / "submit_all.sh").resolve()
+        write_submit_all_script(
+            submit_all_script_path,
+            qps_slugs=generated_qps_slugs,
+        )
         summary = {
             "status": "ok",
             "batch_timestamp": batch_timestamp,
@@ -581,6 +605,8 @@ def main(argv: list[str] | None = None) -> int:
             "randomize_seed": args.randomize_seed,
             "time_constraint_s": time_constraint_s,
             "qps_list": qps_values,
+            "submit_all_script": str(submit_all_script_path),
+            "submit_all_command": f"bash {path_for_config(submit_all_script_path)}",
             "generated_experiments": generated_experiments,
         }
         manifest_path = (batch_dir / "manifest.json").resolve()

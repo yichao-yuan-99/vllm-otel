@@ -184,6 +184,16 @@ def _normalize_local_mode_script(local_mode_script: str | None) -> str | None:
     return normalized
 
 
+def _effective_partition_vllm_sif(
+    *,
+    partition_vllm_sif: Path | None,
+    default_vllm_sif: Path,
+) -> Path:
+    if partition_vllm_sif is not None and partition_vllm_sif.exists():
+        return partition_vllm_sif
+    return default_vllm_sif
+
+
 class ControlPlaneError(RuntimeError):
     """Typed error raised by control-plane actions."""
 
@@ -209,6 +219,7 @@ class PartitionSpec:
     gpu_memory_gb: float
     total_vram_gb: float
     max_time: str
+    vllm_sif: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -443,6 +454,7 @@ class ControlPlane:
                         http_status=400,
                         details={"allowed_partitions": sorted(self._cfg.partitions.keys())},
                     )
+                effective_vllm_sif = self._ensure_partition_vllm_sif_file(partition_spec)
 
                 model_spec = self._cfg.models.get(model)
                 if model_spec is None:
@@ -537,6 +549,7 @@ class ControlPlane:
                     "service_port": port_profile.vllm_port,
                     "jaeger_otlp_port": port_profile.jaeger_otlp_port,
                     "jaeger_ui_port": port_profile.jaeger_api_port,
+                    "vllm_sif": str(effective_vllm_sif),
                     "sbatch_script": str(script_path),
                     "extra_env": dict(normalized_extra_env),
                     "blocked": block,
@@ -767,6 +780,7 @@ class ControlPlane:
                         http_status=400,
                         details={"allowed_partitions": sorted(self._cfg.partitions.keys())},
                     )
+                effective_vllm_sif = self._ensure_partition_vllm_sif_file(partition_spec)
 
                 model_spec = self._cfg.models.get(model)
                 if model_spec is None:
@@ -879,6 +893,7 @@ class ControlPlane:
                     "tensor_parallel_size": gpus_per_profile,
                     "gpus_per_profile": gpus_per_profile,
                     "total_vram_per_profile_gb": total_vram_per_profile_gb,
+                    "vllm_sif": str(effective_vllm_sif),
                     "extra_env": dict(normalized_extra_env),
                     "blocked": bool(block),
                     "sbatch_script": str(script_path),
@@ -1051,6 +1066,7 @@ class ControlPlane:
                     http_status=400,
                     details={"allowed_partitions": sorted(self._cfg.partitions.keys())},
                 )
+            effective_vllm_sif = self._ensure_partition_vllm_sif_file(partition_spec)
 
             model_spec = self._cfg.models.get(model)
             if model_spec is None:
@@ -1115,6 +1131,7 @@ class ControlPlane:
                 "service_port": port_profile.vllm_port,
                 "jaeger_otlp_port": port_profile.jaeger_otlp_port,
                 "jaeger_ui_port": port_profile.jaeger_api_port,
+                "vllm_sif": str(effective_vllm_sif),
                 "lmcache_port": port_profile.lmcache_port,
                 "sbatch_script": str(script_path),
                 "extra_env": dict(normalized_extra_env),
@@ -1187,6 +1204,7 @@ class ControlPlane:
                     http_status=400,
                     details={"allowed_partitions": sorted(self._cfg.partitions.keys())},
                 )
+            effective_vllm_sif = self._ensure_partition_vllm_sif_file(partition_spec)
 
             model_spec = self._cfg.models.get(model)
             if model_spec is None:
@@ -1269,6 +1287,7 @@ class ControlPlane:
                 "tensor_parallel_size": gpus_per_profile,
                 "gpus_per_profile": gpus_per_profile,
                 "total_vram_per_profile_gb": total_vram_per_profile_gb,
+                "vllm_sif": str(effective_vllm_sif),
                 "visible_devices_by_profile": list(visible_devices_by_profile),
                 "sbatch_script": str(script_path),
                 "extra_env": dict(normalized_extra_env),
@@ -2036,14 +2055,19 @@ class ControlPlane:
                 timeout_seconds=DEFAULT_JAEGER_PULL_TIMEOUT_SECONDS,
             )
         )
-        actions.append(
-            self._pull_image_if_missing(
-                name="vllm",
-                image=self._cfg.vllm_image,
-                sif_path=self._cfg.vllm_sif,
-                timeout_seconds=DEFAULT_VLLM_PULL_TIMEOUT_SECONDS,
+        if self._requires_default_vllm_sif():
+            actions.append(
+                self._pull_image_if_missing(
+                    name="vllm",
+                    image=self._cfg.vllm_image,
+                    sif_path=self._cfg.vllm_sif,
+                    timeout_seconds=DEFAULT_VLLM_PULL_TIMEOUT_SECONDS,
+                )
             )
-        )
+        else:
+            actions.append(
+                "skipped pulling default vllm image because all partitions have existing sif_img overrides"
+            )
         self._ensure_sif_files()
         return actions
 
@@ -2078,7 +2102,7 @@ class ControlPlane:
         missing: list[str] = []
         if not self._cfg.jaeger_sif.exists():
             missing.append(str(self._cfg.jaeger_sif))
-        if not self._cfg.vllm_sif.exists():
+        if self._requires_default_vllm_sif() and not self._cfg.vllm_sif.exists():
             missing.append(str(self._cfg.vllm_sif))
         if missing:
             raise ControlPlaneError(
@@ -2089,6 +2113,43 @@ class ControlPlane:
                     "missing": missing,
                 },
             )
+
+    def _requires_default_vllm_sif(self) -> bool:
+        for partition_spec in self._cfg.partitions.values():
+            if not self._partition_sif_override_exists(partition_spec):
+                return True
+        return False
+
+    def _partition_sif_override_exists(self, partition_spec: PartitionSpec) -> bool:
+        partition_vllm_sif = partition_spec.vllm_sif
+        return partition_vllm_sif is not None and partition_vllm_sif.exists()
+
+    def _effective_vllm_sif_path(self, partition_spec: PartitionSpec) -> Path:
+        return _effective_partition_vllm_sif(
+            partition_vllm_sif=partition_spec.vllm_sif,
+            default_vllm_sif=self._cfg.vllm_sif,
+        )
+
+    def _ensure_partition_vllm_sif_file(self, partition_spec: PartitionSpec) -> Path:
+        effective_vllm_sif = self._effective_vllm_sif_path(partition_spec)
+        if not effective_vllm_sif.exists():
+            raise ControlPlaneError(
+                message=(
+                    "missing required VLLM SIF image file for "
+                    f"partition '{partition_spec.name}'"
+                ),
+                code=91,
+                http_status=400,
+                details={
+                    "partition": partition_spec.name,
+                    "missing_vllm_sif": str(effective_vllm_sif),
+                    "partition_sif_img": (
+                        str(partition_spec.vllm_sif) if partition_spec.vllm_sif is not None else None
+                    ),
+                    "default_vllm_sif": str(self._cfg.vllm_sif),
+                },
+            )
+        return effective_vllm_sif
 
     def _empty_progress(self, *, message: str) -> dict[str, Any]:
         return {
@@ -2907,6 +2968,7 @@ class ControlPlane:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         safe_partition = _safe_token(partition_spec.name)
         safe_model = _safe_token(model_spec.name)
+        effective_vllm_sif = self._effective_vllm_sif_path(partition_spec)
         safe_group_name = _safe_token(group_name)
         script_path = (
             self._cfg.run_dir
@@ -2990,7 +3052,7 @@ class ControlPlane:
             JAEGER_UI_LOCAL_PORT={DEFAULT_JAEGER_QUERY_PORT}
 
             JAEGER_SIF={shlex.quote(str(self._cfg.jaeger_sif))}
-            VLLM_SIF={shlex.quote(str(self._cfg.vllm_sif))}
+            VLLM_SIF={shlex.quote(str(effective_vllm_sif))}
 
             VLLM_MODEL_NAME={shlex.quote(model_spec.vllm_model_name)}
             VLLM_SERVED_MODEL_NAME={shlex.quote(model_spec.served_model_name)}
@@ -3204,6 +3266,7 @@ class ControlPlane:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         safe_partition = _safe_token(partition_spec.name)
         safe_model = _safe_token(model_spec.name)
+        effective_vllm_sif = self._effective_vllm_sif_path(partition_spec)
         script_path = (
             self._cfg.run_dir
             / f"sbatch-{timestamp}-p{port_profile.profile_id}-{safe_partition}-{safe_model}.sh"
@@ -3263,7 +3326,7 @@ class ControlPlane:
             JAEGER_UI_LOCAL_PORT={DEFAULT_JAEGER_QUERY_PORT}
 
             JAEGER_SIF={shlex.quote(str(self._cfg.jaeger_sif))}
-            VLLM_SIF={shlex.quote(str(self._cfg.vllm_sif))}
+            VLLM_SIF={shlex.quote(str(effective_vllm_sif))}
 
             VLLM_MODEL_NAME={shlex.quote(model_spec.vllm_model_name)}
             VLLM_SERVED_MODEL_NAME={shlex.quote(model_spec.served_model_name)}
@@ -3423,6 +3486,7 @@ class ControlPlane:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         safe_partition = _safe_token(partition_spec.name)
         safe_model = _safe_token(model_spec.name)
+        effective_vllm_sif = self._effective_vllm_sif_path(partition_spec)
         script_path = (
             self._cfg.run_dir
             / f"sbatch-{timestamp}-p{port_profile.profile_id}-{safe_partition}-{safe_model}-local.sh"
@@ -3493,7 +3557,7 @@ class ControlPlane:
             LOCAL_MODE_SCRIPT={shlex.quote(local_mode_script)}
 
             JAEGER_SIF={shlex.quote(str(self._cfg.jaeger_sif))}
-            VLLM_SIF={shlex.quote(str(self._cfg.vllm_sif))}
+            VLLM_SIF={shlex.quote(str(effective_vllm_sif))}
 
             VLLM_MODEL_NAME={shlex.quote(model_spec.vllm_model_name)}
             VLLM_SERVED_MODEL_NAME={shlex.quote(model_spec.served_model_name)}
@@ -4020,12 +4084,33 @@ def load_runtime_config(config_path: Path) -> RuntimeConfig:
                 code=105,
                 http_status=500,
             )
+        raw_partition_sif = value.get("sif_img")
+        partition_vllm_sif: Path | None = None
+        if raw_partition_sif is not None:
+            if not isinstance(raw_partition_sif, str):
+                raise ControlPlaneError(
+                    message=f"partition.{name}.sif_img must be a string",
+                    code=124,
+                    http_status=500,
+                )
+            normalized_partition_sif = raw_partition_sif.strip()
+            if not normalized_partition_sif:
+                raise ControlPlaneError(
+                    message=f"partition.{name}.sif_img must be non-empty when provided",
+                    code=124,
+                    http_status=500,
+                )
+            partition_vllm_sif = _resolve_path(
+                repo_root,
+                _expand_vars(normalized_partition_sif, merged_env),
+            )
         partitions[name] = PartitionSpec(
             name=name,
             gpus_per_node=int(value["gpus_per_node"]),
             gpu_memory_gb=float(value["gpu_memory_gb"]),
             total_vram_gb=float(value["total_vram_gb"]),
             max_time=str(value.get("max_time", "04:00:00")),
+            vllm_sif=partition_vllm_sif,
         )
 
     if not model_config_path.exists():
