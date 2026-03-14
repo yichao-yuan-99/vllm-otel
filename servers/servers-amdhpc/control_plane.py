@@ -4060,6 +4060,25 @@ def load_runtime_config(config_path: Path) -> RuntimeConfig:
         )
     ssh_options = list(ssh_options_raw)
 
+    apptainer_imgs = _resolve_path(
+        repo_root,
+        _expand_vars(merged_env.get("APPTAINER_IMGS", f"{Path.home()}/apptainer-images"), merged_env),
+    )
+    jaeger_image = str(images_table.get("jaeger_image", DEFAULT_JAEGER_IMAGE))
+    vllm_image = str(images_table.get("vllm_image", DEFAULT_VLLM_IMAGE))
+    if not jaeger_image:
+        raise ControlPlaneError(
+            message="images.jaeger_image must be non-empty",
+            code=118,
+            http_status=500,
+        )
+    if not vllm_image:
+        raise ControlPlaneError(
+            message="images.vllm_image must be non-empty",
+            code=119,
+            http_status=500,
+        )
+
     try:
         port_profiles = load_port_profiles()
     except Exception as exc:  # noqa: BLE001
@@ -4102,9 +4121,10 @@ def load_runtime_config(config_path: Path) -> RuntimeConfig:
                     code=124,
                     http_status=500,
                 )
-            partition_vllm_sif = _resolve_path(
-                repo_root,
-                _expand_vars(normalized_partition_sif, merged_env),
+            partition_vllm_sif = _resolve_partition_sif_path(
+                repo_root=repo_root,
+                apptainer_imgs=apptainer_imgs,
+                raw_path=_expand_vars(normalized_partition_sif, merged_env),
             )
         partitions[name] = PartitionSpec(
             name=name,
@@ -4172,24 +4192,6 @@ def load_runtime_config(config_path: Path) -> RuntimeConfig:
             served_model_name=str(value["served_model_name"]),
             weight_vram_gb=float(value["weight_vram_gb"]),
             extra_args=list(extra_args_raw),
-        )
-
-    apptainer_imgs = Path(
-        _expand_vars(merged_env.get("APPTAINER_IMGS", f"{Path.home()}/apptainer-images"), merged_env)
-    ).expanduser()
-    jaeger_image = str(images_table.get("jaeger_image", DEFAULT_JAEGER_IMAGE))
-    vllm_image = str(images_table.get("vllm_image", DEFAULT_VLLM_IMAGE))
-    if not jaeger_image:
-        raise ControlPlaneError(
-            message="images.jaeger_image must be non-empty",
-            code=118,
-            http_status=500,
-        )
-    if not vllm_image:
-        raise ControlPlaneError(
-            message="images.vllm_image must be non-empty",
-            code=119,
-            http_status=500,
         )
 
     jaeger_sif_raw = merged_env.get("JAEGER_SIF", str(apptainer_imgs / _infer_sif_name_from_image(jaeger_image)))
@@ -4284,6 +4286,20 @@ def _resolve_path(repo_root: Path, raw_path: str) -> Path:
     path = Path(raw_path).expanduser()
     if path.is_absolute():
         return path
+    return (repo_root / path).resolve()
+
+
+def _resolve_partition_sif_path(
+    *,
+    repo_root: Path,
+    apptainer_imgs: Path,
+    raw_path: str,
+) -> Path:
+    path = Path(raw_path).expanduser()
+    if path.is_absolute():
+        return path
+    if path.parent == Path("."):
+        return (apptainer_imgs / path.name).resolve()
     return (repo_root / path).resolve()
 
 

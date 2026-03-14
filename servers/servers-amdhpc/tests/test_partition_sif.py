@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
@@ -104,6 +106,30 @@ class PartitionSifOverrideTest(unittest.TestCase):
                 "partition\\.test\\.sif_img must be non-empty",
             ):
                 load_runtime_config(config_path)
+
+    def test_load_runtime_config_resolves_partition_sif_filename_under_apptainer_imgs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_root = Path(tmp_dir)
+            apptainer_imgs = (tmp_root / "apptainer-imgs").resolve()
+            apptainer_imgs.mkdir(parents=True, exist_ok=True)
+            expected_partition_sif = (apptainer_imgs / "custom-vllm.sif").resolve()
+
+            config_path = (tmp_root / "server_config.toml").resolve()
+            _write_minimal_server_config(
+                config_path,
+                partition_body=(
+                    "gpus_per_node = 1\n"
+                    "gpu_memory_gb = 192\n"
+                    "total_vram_gb = 192\n"
+                    "max_time = \"01:00:00\"\n"
+                    "sif_img = \"custom-vllm.sif\"\n"
+                ),
+            )
+
+            with patch.dict(os.environ, {"APPTAINER_IMGS": str(apptainer_imgs)}, clear=False):
+                runtime_config = load_runtime_config(config_path)
+
+            self.assertEqual(runtime_config.partitions["test"].vllm_sif, expected_partition_sif)
 
 
 if __name__ == "__main__":

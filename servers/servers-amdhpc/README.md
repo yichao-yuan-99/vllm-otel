@@ -31,6 +31,7 @@ The server no longer reads `servers/servers-amdhpc/.env` or `server.env_file`.
 For Slurm-managed startup, login<->compute service ports come from `configs/port_profiles.toml`, not fixed `cluster.service_port` settings.
 Image refs now live in `[images]` inside `server_config.toml`. SIF filenames are inferred from the image basename by replacing `:` with `-` and adding `.sif`.
 You can optionally set `partition.<name>.sif_img` to override vLLM SIF per partition; when `sif_img` exists on disk, that partition uses it instead of the global `[images]` vLLM SIF.
+If `sif_img` is a bare filename (for example `my-image.sif`), it is resolved under `APPTAINER_IMGS`.
 
 `server_config.toml` includes the partition specs requested in `PROMPT.md` (`mi2104x`, `mi2508x`, `mi3001x`, `mi3008x`, `mi3258x`). Model entries are loaded from the shared top-level `configs/model_config.toml` with:
 
