@@ -13,6 +13,16 @@ import sys
 from typing import Any
 
 
+THIS_DIR = Path(__file__).resolve().parent
+MODULE_ROOT = THIS_DIR.parent
+if str(MODULE_ROOT) not in sys.path:
+    sys.path.insert(0, str(MODULE_ROOT))
+
+from pp_common.service_failure import cutoff_datetime_utc_from_payload
+from pp_common.service_failure import ensure_service_failure_payload
+from pp_common.service_failure import parse_iso8601_to_utc
+
+
 DEFAULT_OUTPUT_NAME = "job-throughput-timeseries.json"
 DEFAULT_TIMEPOINT_FREQ_HZ = 1.0
 DEFAULT_WINDOW_SIZE_S = 600.0
@@ -159,6 +169,8 @@ def _resolved_total_duration_s(
 
 def _extract_completion_offsets_from_replay_run(
     run_dir: Path,
+    *,
+    cutoff_time_utc: datetime | None = None,
 ) -> tuple[str, Any, Any, float | None, int, list[dict[str, Any]], float]:
     summary_path = run_dir / "replay" / "summary.json"
     payload = _load_json(summary_path)
@@ -168,6 +180,7 @@ def _extract_completion_offsets_from_replay_run(
     experiment_started_at = payload.get("started_at")
     experiment_finished_at = payload.get("finished_at")
     experiment_start_dt = _parse_iso8601(experiment_started_at)
+    experiment_start_dt_utc = parse_iso8601_to_utc(experiment_started_at)
     experiment_finish_dt = _parse_iso8601(experiment_finished_at)
     if experiment_start_dt is None:
         raise ValueError(f"Invalid or missing started_at in replay summary: {summary_path}")
@@ -183,6 +196,9 @@ def _extract_completion_offsets_from_replay_run(
             continue
         replay_count += 1
         finish_dt = _parse_iso8601(worker_payload.get("finished_at"))
+        finish_dt_utc = parse_iso8601_to_utc(worker_payload.get("finished_at"))
+        if cutoff_time_utc is not None and finish_dt_utc is not None and finish_dt_utc > cutoff_time_utc:
+            continue
         finish_offset_s = _duration_seconds(experiment_start_dt, finish_dt)
         if finish_offset_s is not None:
             finish_events.append(
@@ -195,7 +211,15 @@ def _extract_completion_offsets_from_replay_run(
     total_duration_s = _float_or_none(payload.get("run_duration_s"))
     if total_duration_s is None:
         total_duration_s = _duration_seconds(experiment_start_dt, experiment_finish_dt)
+    cutoff_offset_s = _duration_seconds(experiment_start_dt_utc, cutoff_time_utc)
+    if cutoff_offset_s is not None:
+        cutoff_offset_s = max(cutoff_offset_s, 0.0)
     time_constraint_s = _non_negative_float_or_none(payload.get("time_constraint_s"))
+    if cutoff_offset_s is not None:
+        if time_constraint_s is None:
+            time_constraint_s = cutoff_offset_s
+        else:
+            time_constraint_s = min(time_constraint_s, cutoff_offset_s)
     completion_offsets_s = [
         event["finish_offset_s"]
         for event in finish_events
@@ -218,6 +242,8 @@ def _extract_completion_offsets_from_replay_run(
 
 def _extract_completion_offsets_from_con_driver_run(
     run_dir: Path,
+    *,
+    cutoff_time_utc: datetime | None = None,
 ) -> tuple[str, Any, Any, float | None, int, list[dict[str, Any]], float]:
     manifest_path = run_dir / "meta" / "run_manifest.json"
     results_path = run_dir / "meta" / "results.json"
@@ -232,6 +258,7 @@ def _extract_completion_offsets_from_con_driver_run(
     experiment_started_at = manifest_payload.get("started_at")
     experiment_finished_at = manifest_payload.get("finished_at")
     experiment_start_dt = _parse_iso8601(experiment_started_at)
+    experiment_start_dt_utc = parse_iso8601_to_utc(experiment_started_at)
     experiment_finish_dt = _parse_iso8601(experiment_finished_at)
     if experiment_start_dt is None:
         raise ValueError(f"Invalid or missing started_at in run_manifest: {manifest_path}")
@@ -243,6 +270,9 @@ def _extract_completion_offsets_from_con_driver_run(
             continue
         replay_count += 1
         finish_dt = _parse_iso8601(entry.get("finished_at"))
+        finish_dt_utc = parse_iso8601_to_utc(entry.get("finished_at"))
+        if cutoff_time_utc is not None and finish_dt_utc is not None and finish_dt_utc > cutoff_time_utc:
+            continue
         finish_offset_s = _duration_seconds(experiment_start_dt, finish_dt)
         if finish_offset_s is not None:
             finish_events.append(
@@ -255,7 +285,15 @@ def _extract_completion_offsets_from_con_driver_run(
     total_duration_s = _float_or_none(manifest_payload.get("run_duration_s"))
     if total_duration_s is None:
         total_duration_s = _duration_seconds(experiment_start_dt, experiment_finish_dt)
+    cutoff_offset_s = _duration_seconds(experiment_start_dt_utc, cutoff_time_utc)
+    if cutoff_offset_s is not None:
+        cutoff_offset_s = max(cutoff_offset_s, 0.0)
     time_constraint_s = _non_negative_float_or_none(manifest_payload.get("time_constraint_s"))
+    if cutoff_offset_s is not None:
+        if time_constraint_s is None:
+            time_constraint_s = cutoff_offset_s
+        else:
+            time_constraint_s = min(time_constraint_s, cutoff_offset_s)
     completion_offsets_s = [
         event["finish_offset_s"]
         for event in finish_events
@@ -331,6 +369,9 @@ def extract_job_throughput_from_run_dir(
     if window_size_s <= 0:
         raise ValueError(f"window_size_s must be a positive number: {window_size_s}")
 
+    service_failure_payload = ensure_service_failure_payload(run_dir)
+    cutoff_time_utc = cutoff_datetime_utc_from_payload(service_failure_payload)
+
     replay_summary_path = run_dir / "replay" / "summary.json"
     con_driver_results_path = run_dir / "meta" / "results.json"
     con_driver_manifest_path = run_dir / "meta" / "run_manifest.json"
@@ -344,7 +385,10 @@ def extract_job_throughput_from_run_dir(
             replay_count,
             finish_events,
             total_duration_s,
-        ) = _extract_completion_offsets_from_replay_run(run_dir)
+        ) = _extract_completion_offsets_from_replay_run(
+            run_dir,
+            cutoff_time_utc=cutoff_time_utc,
+        )
     elif con_driver_results_path.is_file() and con_driver_manifest_path.is_file():
         (
             source_type,
@@ -354,7 +398,10 @@ def extract_job_throughput_from_run_dir(
             replay_count,
             finish_events,
             total_duration_s,
-        ) = _extract_completion_offsets_from_con_driver_run(run_dir)
+        ) = _extract_completion_offsets_from_con_driver_run(
+            run_dir,
+            cutoff_time_utc=cutoff_time_utc,
+        )
     else:
         raise ValueError(
             "Unrecognized run layout. Expected either replay/summary.json "
@@ -398,6 +445,10 @@ def extract_job_throughput_from_run_dir(
         "experiment_started_at": experiment_started_at,
         "experiment_finished_at": experiment_finished_at,
         "time_constraint_s": time_constraint_s,
+        "service_failure_detected": bool(
+            service_failure_payload.get("service_failure_detected", False)
+        ),
+        "service_failure_cutoff_time_utc": service_failure_payload.get("cutoff_time_utc"),
         "replay_count": replay_count,
         "finished_replay_count": len(completion_offsets_s),
         "finished_replay_count_excluding_cancelled": len(

@@ -23,6 +23,7 @@ class PortProfile:
     jaeger_otlp_port: int
     gateway_port: int
     gateway_parse_port: int
+    lmcache_port: int | None
 
 
 def _load_toml(path: Path) -> dict[str, Any]:
@@ -37,6 +38,12 @@ def _parse_port(value: object, key: str) -> int:
     if value < 1 or value > 65535:
         raise ValueError(f"{key} must be in range 1..65535")
     return value
+
+
+def _parse_optional_port(value: object, key: str) -> int | None:
+    if value is None:
+        return None
+    return _parse_port(value, key)
 
 
 def load_port_profile(
@@ -75,5 +82,9 @@ def load_port_profile(
         gateway_parse_port=_parse_port(
             raw.get("gateway_parse_port"),
             f"profiles.{key}.gateway_parse_port",
+        ),
+        lmcache_port=_parse_optional_port(
+            raw.get("lmcache_port"),
+            f"profiles.{key}.lmcache_port",
         ),
     )

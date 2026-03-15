@@ -182,6 +182,11 @@ def start(
             "Sets LMCACHE_MAX_LOCAL_CPU_SIZE and enables kv-transfer-config."
         ),
     ),
+    no_async_scheduling: bool = typer.Option(
+        False,
+        "--no-async-scheduling",
+        help="Append --no-async-scheduling to the rendered vLLM command.",
+    ),
     local_mode: Path | None = typer.Option(
         None,
         "--local-mode",
@@ -216,6 +221,7 @@ def start(
             model=model,
             extra_env=extra_env,
             lmcache_max_local_cpu_size=str(lmcache) if lmcache is not None else None,
+            no_async_scheduling=bool(no_async_scheduling),
             local_mode_script=local_mode_script,
             check_port_availability=_check_port_availability_from_ctx(ctx),
         )
@@ -271,6 +277,11 @@ def start_group(
             "Sets LMCACHE_MAX_LOCAL_CPU_SIZE and enables kv-transfer-config."
         ),
     ),
+    no_async_scheduling: bool = typer.Option(
+        False,
+        "--no-async-scheduling",
+        help="Append --no-async-scheduling to each rendered grouped vLLM command.",
+    ),
     clientd_timeout_seconds: float = typer.Option(
         10.0,
         "--clientd-timeout-seconds",
@@ -316,6 +327,7 @@ def start_group(
             model=model,
             extra_env=extra_env,
             lmcache_max_local_cpu_size=str(lmcache) if lmcache is not None else None,
+            no_async_scheduling=bool(no_async_scheduling),
             check_port_availability=_check_port_availability_from_ctx(ctx),
         )
     except ControlPlaneError as exc:

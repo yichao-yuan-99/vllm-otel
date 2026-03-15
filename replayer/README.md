@@ -6,6 +6,11 @@
 2. run replay from that plan
 3. validate replay output against the source profile
 
+Detailed reference for compile input requirements and replay timing drivers:
+
+- `replayer/README.replay-plan-inputs-and-timing.md`
+- `replayer/README.split-two-group-plans.md`
+
 ## CLI
 
 Show commands:
@@ -20,9 +25,16 @@ python -m replayer --help
 
 - `--config <path>`: TOML config path (`[compile]` or `[replayer.compile]`).
 - `--job-dir <path>`: profiled con-driver job directory.
-- `--plan-out <path>`: output replay plan path (default: `<job-dir>/replay-plan.json`).
+- `--job-root <path>`: recursively discover all profiled job dirs under this root and compile them in parallel with live batch progress (cannot be combined with `--job-dir` or `--plan-out`).
+- `--plan-out <path>`: output replay plan path (default: `<job-dir>/replay-plan.json`; with `--exclude-unranked-trails`, default: `<job-dir>/replay-plan.exclude-unranked.json`).
 - `--port-profile-id <int>`: required; resolve compile-time tokenizer endpoint from `configs/port_profiles.toml`.
 - `--request-timeout-s <float>`: optional HTTP timeout for compile-time tokenizer requests (default: `3600`).
+- `--split-two-group-plans`: optional; write two split plans based on precomputed grouping from `<job-dir>/original-analysis/split/`.
+- `--split-two-group-metric <token_usage|context_usage>`: grouping metric file for `--split-two-group-plans` (default: `token_usage`).
+  - `token_usage` reads `top-p-token-usage-two-groups.json`
+  - `context_usage` reads `top-p-context-usage-two-groups.json`
+- `--exclude-unranked-trails`: non-split compile only; exclude trails listed under `original-analysis/split/top-p-usage-ratio-summary.json` `unranked_trails`.
+- Naming/reuse details: `replayer/README.split-two-group-plans.md`
 
 `python -m replayer replay` options:
 
@@ -82,6 +94,26 @@ python -m replayer compile \
   --plan-out tests/output/tmp-replay-plan-20260225T035758Z-v2.json
 ```
 
+Compile every profiled job under a root:
+
+```bash
+python -m replayer compile \
+  --job-root tests/output/con-driver \
+  --port-profile-id 1
+```
+
+Compile while excluding split-unranked trails (non-split mode):
+
+```bash
+python -m replayer compile \
+  --job-dir tests/output/con-driver/job-20260225T035758Z \
+  --port-profile-id 1 \
+  --exclude-unranked-trails
+```
+
+Default output for that command is:
+`<job-dir>/replay-plan.exclude-unranked.json`.
+
 `replayer compile` shows a live progress bar while it builds worker plans and
 deterministic request payloads. The bar advances by recorded request and also
 shows completed workers.
@@ -117,6 +149,9 @@ connection after the recorded request duration. If the gateway returns an error
 after the request has already been running for at least `60s`, replay treats
 that as acceptable equivalent behavior for this mode instead of failing the
 worker.
+
+If you want to drop split-unranked trails from a non-split plan, use
+`--exclude-unranked-trails`.
 
 Replay:
 
@@ -164,6 +199,17 @@ Replay vLLM metrics are written under:
 
 Each compressed block stores the raw `/metrics` response text per scrape, not a
 parsed Prometheus JSON structure.
+
+Replay also attempts LMCache metrics logging from the selected profile's
+`lmcache_port` (same sampler and timeout settings as vLLM logging). LMCache
+logging is started only when a first `/metrics` probe succeeds; otherwise replay
+continues without LMCache logs.
+
+When enabled, LMCache metrics are written under:
+
+- `<replay-output>/lmcache-log/`
+- `<replay-output>/lmcache-log/monitor.stdout.log`
+- `<replay-output>/lmcache-log/monitor.stderr.log`
 
 Replay can also override the compiled `launch_policy` while preserving the
 compiled worker/request structure. Pass a JSON object with the fields you want

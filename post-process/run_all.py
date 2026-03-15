@@ -61,7 +61,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--skip-visualization",
         action="store_true",
-        help="Skip visualization/vllm-metrics/generate_all_figures.py.",
+        help="Skip visualization figure-generation steps.",
     )
     parser.add_argument(
         "--skip-aggregate-csv",
@@ -120,10 +120,13 @@ def _build_step_commands_for_run_dir(
     skip_visualization: bool,
 ) -> list[list[str]]:
     steps = [
+        "service-failure/extract_run.py",
         "global/extract_run.py",
         "global-progress/extract_run.py",
         "job-throughput/extract_run.py",
+        "job-concurrency/extract_run.py",
         "gateway/llm-requests/extract_run.py",
+        "gateway/stack/extract_run.py",
         "gateway/usage/extract_run.py",
         "split/duration/extract_run.py",
         "vllm-metrics/extract_run.py",
@@ -133,6 +136,8 @@ def _build_step_commands_for_run_dir(
         steps.extend(
             [
                 "visualization/job-throughput/generate_all_figures.py",
+                "visualization/job-concurrency/generate_all_figures.py",
+                "visualization/gateway-stack/generate_all_figures.py",
                 "visualization/vllm-metrics/generate_all_figures.py",
             ]
         )
@@ -160,10 +165,13 @@ def _build_step_commands_for_root_dir(
     aggregate_output: Path | None,
 ) -> list[list[str]]:
     steps = [
+        "service-failure/extract_run.py",
         "global/extract_run.py",
         "global-progress/extract_run.py",
         "job-throughput/extract_run.py",
+        "job-concurrency/extract_run.py",
         "gateway/llm-requests/extract_run.py",
+        "gateway/stack/extract_run.py",
         "gateway/usage/extract_run.py",
         "split/duration/extract_run.py",
         "vllm-metrics/extract_run.py",
@@ -173,6 +181,8 @@ def _build_step_commands_for_root_dir(
         steps.extend(
             [
                 "visualization/job-throughput/generate_all_figures.py",
+                "visualization/job-concurrency/generate_all_figures.py",
+                "visualization/gateway-stack/generate_all_figures.py",
                 "visualization/vllm-metrics/generate_all_figures.py",
             ]
         )

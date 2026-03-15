@@ -10,6 +10,16 @@ import sys
 from typing import Any
 
 
+THIS_DIR = Path(__file__).resolve().parent
+MODULE_ROOT = THIS_DIR.parent
+if str(MODULE_ROOT) not in sys.path:
+    sys.path.insert(0, str(MODULE_ROOT))
+
+from pp_common.service_failure import cutoff_datetime_utc_from_payload
+from pp_common.service_failure import ensure_service_failure_payload
+from pp_common.service_failure import parse_iso8601_to_utc
+
+
 DEFAULT_OUTPUT_NAME = "replay-progress-summary.json"
 DEFAULT_MILESTONE_STEP = 50
 
@@ -136,7 +146,11 @@ def _build_milestones(
     return milestones
 
 
-def _extract_replay_offsets_from_replay_run(run_dir: Path) -> tuple[str, Any, int, list[float]]:
+def _extract_replay_offsets_from_replay_run(
+    run_dir: Path,
+    *,
+    cutoff_time_utc: datetime | None = None,
+) -> tuple[str, Any, int, list[float]]:
     summary_path = run_dir / "replay" / "summary.json"
     payload = _load_json(summary_path)
     if not isinstance(payload, dict):
@@ -158,13 +172,20 @@ def _extract_replay_offsets_from_replay_run(run_dir: Path) -> tuple[str, Any, in
             continue
         replay_count += 1
         finish_dt = _parse_iso8601(worker_payload.get("finished_at"))
+        finish_dt_utc = parse_iso8601_to_utc(worker_payload.get("finished_at"))
+        if cutoff_time_utc is not None and finish_dt_utc is not None and finish_dt_utc > cutoff_time_utc:
+            continue
         end_offset_s = _duration_seconds(experiment_start_dt, finish_dt)
         if end_offset_s is not None:
             end_offsets_s.append(end_offset_s)
     return ("replay", experiment_started_at, replay_count, end_offsets_s)
 
 
-def _extract_replay_offsets_from_con_driver_run(run_dir: Path) -> tuple[str, Any, int, list[float]]:
+def _extract_replay_offsets_from_con_driver_run(
+    run_dir: Path,
+    *,
+    cutoff_time_utc: datetime | None = None,
+) -> tuple[str, Any, int, list[float]]:
     manifest_path = run_dir / "meta" / "run_manifest.json"
     results_path = run_dir / "meta" / "results.json"
 
@@ -187,6 +208,9 @@ def _extract_replay_offsets_from_con_driver_run(run_dir: Path) -> tuple[str, Any
             continue
         replay_count += 1
         finish_dt = _parse_iso8601(entry.get("finished_at"))
+        finish_dt_utc = parse_iso8601_to_utc(entry.get("finished_at"))
+        if cutoff_time_utc is not None and finish_dt_utc is not None and finish_dt_utc > cutoff_time_utc:
+            continue
         end_offset_s = _duration_seconds(experiment_start_dt, finish_dt)
         if end_offset_s is not None:
             end_offsets_s.append(end_offset_s)
@@ -201,17 +225,22 @@ def extract_global_progress_from_run_dir(
     if milestone_step <= 0:
         raise ValueError(f"milestone_step must be a positive integer: {milestone_step}")
 
+    service_failure_payload = ensure_service_failure_payload(run_dir)
+    cutoff_time_utc = cutoff_datetime_utc_from_payload(service_failure_payload)
+
     replay_summary_path = run_dir / "replay" / "summary.json"
     con_driver_results_path = run_dir / "meta" / "results.json"
     con_driver_manifest_path = run_dir / "meta" / "run_manifest.json"
 
     if replay_summary_path.is_file():
         source_type, experiment_started_at, replay_count, end_offsets_s = _extract_replay_offsets_from_replay_run(
-            run_dir
+            run_dir,
+            cutoff_time_utc=cutoff_time_utc,
         )
     elif con_driver_results_path.is_file() and con_driver_manifest_path.is_file():
         source_type, experiment_started_at, replay_count, end_offsets_s = _extract_replay_offsets_from_con_driver_run(
-            run_dir
+            run_dir,
+            cutoff_time_utc=cutoff_time_utc,
         )
     else:
         raise ValueError(
@@ -230,6 +259,10 @@ def extract_global_progress_from_run_dir(
         "experiment_started_at": experiment_started_at,
         "replay_count": replay_count,
         "finished_replay_count": len(end_offsets_s),
+        "service_failure_detected": bool(
+            service_failure_payload.get("service_failure_detected", False)
+        ),
+        "service_failure_cutoff_time_utc": service_failure_payload.get("cutoff_time_utc"),
         "milestone_step": milestone_step,
         "milestones": milestones,
     }

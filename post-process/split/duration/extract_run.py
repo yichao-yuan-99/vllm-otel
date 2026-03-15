@@ -12,6 +12,16 @@ from typing import Any
 from typing import Iterable
 
 
+THIS_DIR = Path(__file__).resolve().parent
+MODULE_ROOT = THIS_DIR.parent.parent
+if str(MODULE_ROOT) not in sys.path:
+    sys.path.insert(0, str(MODULE_ROOT))
+
+from pp_common.service_failure import cutoff_datetime_utc_from_payload
+from pp_common.service_failure import ensure_service_failure_payload
+from pp_common.service_failure import parse_iso8601_to_utc
+
+
 DEFAULT_OUTPUT_NAME = "duration-split-summary.json"
 DEFAULT_SPLIT_COUNT = 10
 METRIC_NAMES = (
@@ -217,6 +227,22 @@ def _extract_request_window(record: dict[str, Any]) -> tuple[datetime | None, da
     return start_dt, end_dt
 
 
+def _request_within_cutoff(
+    record: dict[str, Any],
+    *,
+    cutoff_time_utc: datetime | None = None,
+) -> bool:
+    if cutoff_time_utc is None:
+        return True
+    request_start_time = parse_iso8601_to_utc(record.get("request_start_time"))
+    request_end_time = parse_iso8601_to_utc(record.get("request_end_time"))
+    if request_start_time is not None and request_start_time > cutoff_time_utc:
+        return False
+    if request_end_time is not None and request_end_time > cutoff_time_utc:
+        return False
+    return True
+
+
 def _load_lifecycle_windows(
     lifecycle_path: Path,
 ) -> tuple[datetime | None, datetime | None, datetime | None, datetime | None]:
@@ -244,6 +270,7 @@ def _extract_job_metrics(
     gateway_run_dir: Path,
     *,
     profile_id: int | None,
+    cutoff_time_utc: datetime | None = None,
 ) -> dict[str, Any]:
     requests_path = gateway_run_dir / "requests" / "model_inference.jsonl"
     if not requests_path.is_file():
@@ -259,6 +286,8 @@ def _extract_job_metrics(
     last_valid_request_end: datetime | None = None
 
     for record in _iter_jsonl_dict_records(requests_path):
+        if not _request_within_cutoff(record, cutoff_time_utc=cutoff_time_utc):
+            continue
         request_count += 1
         prompt_tokens, decode_tokens, cached_prompt_tokens = _extract_usage_tokens(record)
 
@@ -295,6 +324,13 @@ def _extract_job_metrics(
         agent_start, agent_end, job_start, job_end = _load_lifecycle_windows(
             lifecycle_path
         )
+        if cutoff_time_utc is not None:
+            cutoff_local = _parse_iso8601(cutoff_time_utc.isoformat())
+            if cutoff_local is not None:
+                if agent_end is None or agent_end > cutoff_local:
+                    agent_end = cutoff_local
+                if job_end is None or job_end > cutoff_local:
+                    job_end = cutoff_local
         duration_s = _duration_seconds(agent_start, agent_end)
         if duration_s is None:
             duration_s = _duration_seconds(job_start, job_end)
@@ -405,6 +441,8 @@ def extract_split_duration_from_run_dir(
         raise ValueError(f"split_count must be a positive integer: {split_count}")
 
     resolved_run_dir = run_dir.expanduser().resolve()
+    service_failure_payload = ensure_service_failure_payload(resolved_run_dir)
+    cutoff_time_utc = cutoff_datetime_utc_from_payload(service_failure_payload)
     gateway_output_dir = resolved_run_dir / "gateway-output"
     if not gateway_output_dir.is_dir():
         raise ValueError(f"Missing required directory: {gateway_output_dir}")
@@ -418,7 +456,13 @@ def extract_split_duration_from_run_dir(
 
     jobs: list[dict[str, Any]] = []
     for gateway_run_dir, profile_id in discovered_run_dirs:
-        jobs.append(_extract_job_metrics(gateway_run_dir, profile_id=profile_id))
+        jobs.append(
+            _extract_job_metrics(
+                gateway_run_dir,
+                profile_id=profile_id,
+                cutoff_time_utc=cutoff_time_utc,
+            )
+        )
 
     ranked_jobs = [
         job for job in jobs if _int_or_none(job.get("max_request_length")) is not None
@@ -432,6 +476,10 @@ def extract_split_duration_from_run_dir(
     return {
         "source_run_dir": str(resolved_run_dir),
         "source_gateway_output_dir": str(gateway_output_dir.resolve()),
+        "service_failure_detected": bool(
+            service_failure_payload.get("service_failure_detected", False)
+        ),
+        "service_failure_cutoff_time_utc": service_failure_payload.get("cutoff_time_utc"),
         "split_count": split_count,
         "bin_labels": _bin_labels(split_count),
         "job_count_total": len(jobs),

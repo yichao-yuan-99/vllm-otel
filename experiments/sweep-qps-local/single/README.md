@@ -15,6 +15,14 @@ Rendered `sbatch.sh` files are patched so Slurm `--output/--error` and runtime l
 
 - `<replay output dir>/sbatch-logs/`
 
+The entire generated batch directory is also copied under replay outputs:
+
+- source: `experiments/sweep-qps-local/single/generated/<utc-timestamp>/`
+- destination: `results/replay/<utc-timestamp>/generated/`
+
+So `results/replay/<utc-timestamp>/generated/` mirrors the generated config batch
+(`qps*/`, `submit_all.sh`, `manifest.json`).
+
 This includes:
 
 - `jaeger.<job_id>.log`
@@ -36,6 +44,7 @@ python3 experiments/sweep-qps-local/single/generate_replay_configs.py \
   --qps-list 0.05,0.1,0.2,0.4 \
   --time-constraint-s 1800 \
   --lmcache 100 \
+  --no-async-scheduling \
   -p mi3001x \
   -m qwen3_coder_30b
 ```
@@ -53,7 +62,7 @@ Within that batch directory, each QPS has its own subdirectory:
 
 The script also writes:
 
-- `manifest.json` (batch summary + `sbatch` submit commands)
+- `manifest.json` (batch summary + `sbatch` submit commands + `generation_command_raw`)
 
 ## Submit
 
@@ -74,5 +83,6 @@ bash experiments/sweep-qps-local/single/generated/<utc-timestamp>/submit_all.sh
 - This is single-profile local mode (default `--port-profile 0`).
 - You can override profile with `-P/--port-profile`.
 - You can pass `--lmcache <size>` to forward LMCache settings into rendered sbatch via `render-sbatch.py start --lmcache`.
+- You can pass `--no-async-scheduling` to include `--no-async-scheduling` in rendered vLLM startup.
 - Baseline sweep-qps options are supported (including replay JSON overlays),
   plus render-sbatch model/partition options (`-m`, `-p`).

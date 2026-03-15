@@ -25,12 +25,34 @@ Default output:
 <run-dir>/original-analysis/split/top-p-usage-ratio-summary.json
 ```
 
+Additional per-run outputs:
+
+```text
+<run-dir>/original-analysis/split/top-p-token-usage-two-groups.json
+<run-dir>/original-analysis/split/top-p-context-usage-two-groups.json
+```
+
 Batch mode:
 
 ```bash
 python original-analysis/split/extract_run.py \
   --root-dir <root-dir>
 ```
+
+When `--root-dir` is used, two top-level CSV tables are also written:
+
+```text
+<root-dir>/split-top-p-token-usage-two-group-table.csv
+<root-dir>/split-top-p-context-usage-two-group-table.csv
+```
+
+Columns:
+
+- `run_path`
+- `group_top_trail_count`
+- `group_top_trail_percentage`
+- `group_rest_trail_count`
+- `group_rest_trail_percentage`
 
 Optional:
 
@@ -65,6 +87,32 @@ Output includes:
 - `table_2x99.top_p_context_usage_share`
 - `by_percentile` (per-p detailed totals and counts)
 - `ranked_trails` / `unranked_trails`
+- `two_group_summaries.token_usage`
+- `two_group_summaries.context_usage`
+
+## Two-Group Files
+
+Two additional files are emitted per run:
+
+- `top-p-token-usage-two-groups.json`
+- `top-p-context-usage-two-groups.json`
+
+Each file chooses a split from the existing top-p ratio table:
+
+1. find the first percentile where `top/rest > 1`
+2. if none exists, fallback to the first percentile where `top/rest >= 1`
+3. if neither exists (for example zero-usage edge cases), fallback to `p=1`
+
+Then it emits two groups:
+
+- `group_top`: the smallest top-p group that satisfies the criterion
+- `group_rest`: all remaining trails
+
+Each group includes:
+
+- `trail_names`
+- `trial_count`
+- `trial_percentage` (percentage among ranked trails)
 
 ## Root CSV Aggregation
 

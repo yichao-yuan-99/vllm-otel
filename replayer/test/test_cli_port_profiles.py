@@ -19,10 +19,12 @@ from replayer.cli import build_planned_request
 from replayer.cli import cmd_compile
 from replayer.cli import cmd_replay
 from replayer.cli import discover_gateway_run_dirs
+from replayer.cli import discover_profiled_job_dirs
 from replayer.cli import extract_response_text as extract_cli_response_text
 from replayer.cli import is_acceptable_client_disconnect_early_error
 from replayer.cli import parse_launch_policy_override_json
 from replayer.cli import REPLAY_PLAN_COMPILE_VERSION
+from replayer.cli import resolve_replay_lmcache_log_config
 from replayer.cli import resolve_replay_launch_policy
 from replayer.cli import resolve_replay_vllm_log_config
 from replayer.cli import resolve_compile_target, resolve_replay_target
@@ -65,6 +67,22 @@ def test_discover_gateway_run_dirs_supports_cluster_layout(tmp_path: Path) -> No
         ("run_profile_4", 4),
         ("run_root", None),
     ]
+
+
+def test_discover_profiled_job_dirs_recurses_and_filters(tmp_path: Path) -> None:
+    root = tmp_path / "jobs"
+    valid_a = root / "team-a" / "job-a"
+    valid_b = root / "team-b" / "batch" / "job-b"
+    invalid = root / "team-c" / "job-c"
+
+    _write_minimal_compile_job(valid_a)
+    _write_minimal_compile_job(valid_b)
+    (invalid / "meta").mkdir(parents=True, exist_ok=True)
+    (invalid / "meta" / "config.toml").write_text("", encoding="utf-8")
+
+    discovered = discover_profiled_job_dirs(root)
+
+    assert discovered == sorted([valid_a.resolve(), valid_b.resolve()])
 
 
 def test_resolve_compile_target_uses_selected_port_profile() -> None:
@@ -148,6 +166,21 @@ def test_resolve_replay_vllm_log_config_requires_port_profile() -> None:
             interval_s=1.0,
             timeout_s=5.0,
         )
+
+
+def test_resolve_replay_lmcache_log_config_defaults_from_port_profile() -> None:
+    config = resolve_replay_lmcache_log_config(
+        port_profile_id=1,
+        interval_s=1.0,
+        timeout_s=5.0,
+        probe_timeout_s=0.5,
+    )
+
+    assert config.configured is True
+    assert config.endpoint == "http://127.0.0.1:29437/metrics"
+    assert config.interval_s == 1.0
+    assert config.timeout_s == 5.0
+    assert config.probe_timeout_s == 0.5
 
 
 def test_parse_launch_policy_override_json_accepts_top_level_launch_policy() -> None:
@@ -858,6 +891,242 @@ url = "http://127.0.0.1:9999"
     (trace_dir / "jaeger_trace.json").write_text(json.dumps({"data": []}), encoding="utf-8")
 
 
+def test_cmd_compile_job_root_compiles_all_discovered_jobs(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    jobs_root = tmp_path / "jobs-root"
+    job_a = jobs_root / "job-a"
+    job_b = jobs_root / "team-x" / "job-b"
+    _write_minimal_compile_job(job_a, api_token="token-a")
+    _write_minimal_compile_job(job_b, api_token="token-b")
+
+    exit_code = cmd_compile(
+        argparse.Namespace(
+            config=None,
+            job_dir=None,
+            job_root=str(jobs_root),
+            plan_out=None,
+            backend=None,
+            port_profile_id=1,
+            request_timeout_s=None,
+            split_two_group_plans=None,
+            split_two_group_metric=None,
+        )
+    )
+
+    assert exit_code == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["mode"] == "job_root"
+    assert summary["job_count_total"] == 2
+    assert summary["job_count_succeeded"] == 2
+    assert summary["job_count_failed"] == 0
+    assert {item["job_dir"] for item in summary["jobs"]} == {
+        str(job_a.resolve()),
+        str(job_b.resolve()),
+    }
+    assert all(item["status"] == "ok" for item in summary["jobs"])
+    assert (job_a / "replay-plan.json").is_file()
+    assert (job_b / "replay-plan.json").is_file()
+
+
+def test_cmd_compile_job_root_rejects_plan_out(
+    tmp_path: Path,
+) -> None:
+    jobs_root = tmp_path / "jobs-root"
+    jobs_root.mkdir(parents=True)
+    with pytest.raises(ValueError, match="--job-root cannot be combined with --plan-out"):
+        cmd_compile(
+            argparse.Namespace(
+                config=None,
+                job_dir=None,
+                job_root=str(jobs_root),
+                plan_out=str(tmp_path / "plan.json"),
+                backend=None,
+                port_profile_id=1,
+                request_timeout_s=None,
+                split_two_group_plans=None,
+                split_two_group_metric=None,
+            )
+        )
+
+
+def _write_split_two_group_compile_job(job_dir: Path) -> None:
+    meta_dir = job_dir / "meta"
+    run_alpha = job_dir / "gateway-output" / "run_alpha"
+    run_beta = job_dir / "gateway-output" / "profile-2" / "run_beta"
+    split_dir = job_dir / "original-analysis" / "split"
+
+    for run_dir in [run_alpha, run_beta]:
+        (run_dir / "requests").mkdir(parents=True, exist_ok=True)
+        (run_dir / "events").mkdir(parents=True, exist_ok=True)
+        (run_dir / "trace").mkdir(parents=True, exist_ok=True)
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    split_dir.mkdir(parents=True, exist_ok=True)
+
+    token_alpha = "token-alpha"
+    token_beta = "token-beta"
+    hash_alpha = hashlib.sha256(token_alpha.encode()).hexdigest()
+    hash_beta = hashlib.sha256(token_beta.encode()).hexdigest()
+
+    (meta_dir / "config.toml").write_text(
+        """
+[backend]
+name = "harbor"
+forwarded_args = ["--model", "Test-Model"]
+
+[run]
+pattern = "eager"
+max_concurrent = 2
+""".strip(),
+        encoding="utf-8",
+    )
+    (meta_dir / "run_manifest.json").write_text(
+        json.dumps({"started_at": "2026-03-01T00:00:00Z"}),
+        encoding="utf-8",
+    )
+    (meta_dir / "results.json").write_text(
+        json.dumps(
+            [
+                {"trial_id": "trial-alpha", "command": ["harbor", "--api-token", token_alpha]},
+                {"trial_id": "trial-beta", "command": ["harbor", "--api-token", token_beta]},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (meta_dir / "events.jsonl").write_text("", encoding="utf-8")
+
+    (run_alpha / "manifest.json").write_text(
+        json.dumps(
+            {
+                "api_token_hash": hash_alpha,
+                "run_start_time": "2026-03-01T00:00:01Z",
+                "request_count": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_beta / "manifest.json").write_text(
+        json.dumps(
+            {
+                "api_token_hash": hash_beta,
+                "run_start_time": "2026-03-01T00:00:02Z",
+                "request_count": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    lifecycle_payload = "\n".join(
+        [
+            json.dumps({"event_type": "agent_start", "timestamp": "2026-03-01T00:00:03Z"}),
+            json.dumps({"event_type": "agent_end", "timestamp": "2026-03-01T00:00:04Z"}),
+        ]
+    )
+    for run_dir in [run_alpha, run_beta]:
+        (run_dir / "events" / "lifecycle.jsonl").write_text(lifecycle_payload, encoding="utf-8")
+        (run_dir / "requests" / "model_inference.jsonl").write_text("", encoding="utf-8")
+        (run_dir / "trace" / "jaeger_trace.json").write_text(
+            json.dumps({"data": []}),
+            encoding="utf-8",
+        )
+
+    (split_dir / "top-p-token-usage-two-groups.json").write_text(
+        json.dumps(
+            {
+                "selection": {"selected_p": 1},
+                "group_top": {"trail_names": ["run_alpha"]},
+                "group_rest": {"trail_names": ["profile-2/run_beta"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (split_dir / "top-p-context-usage-two-groups.json").write_text(
+        json.dumps(
+            {
+                "selection": {"selected_p": 1},
+                "group_top": {"trail_names": ["profile-2/run_beta"]},
+                "group_rest": {"trail_names": ["run_alpha"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_cmd_compile_split_two_group_plans_writes_top_and_rest(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    job_dir = tmp_path / "job"
+    _write_split_two_group_compile_job(job_dir)
+    plan_path = tmp_path / "replay-plan.json"
+
+    exit_code = cmd_compile(
+        argparse.Namespace(
+            job_dir=str(job_dir),
+            plan_out=str(plan_path),
+            backend=None,
+            port_profile_id=1,
+            split_two_group_plans=True,
+            split_two_group_metric=None,
+        )
+    )
+
+    assert exit_code == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["split_two_group_plans"] is True
+    assert summary["split_two_group_metric"] == "token_usage"
+
+    top_path = tmp_path / "replay-plan.token.top.json"
+    rest_path = tmp_path / "replay-plan.token.rest.json"
+    assert summary["plan_paths"]["top"] == str(top_path.resolve())
+    assert summary["plan_paths"]["rest"] == str(rest_path.resolve())
+    assert top_path.is_file()
+    assert rest_path.is_file()
+    assert not plan_path.exists()
+
+    top_payload = json.loads(top_path.read_text(encoding="utf-8"))
+    rest_payload = json.loads(rest_path.read_text(encoding="utf-8"))
+    assert len(top_payload["workers"]) == 1
+    assert len(rest_payload["workers"]) == 1
+    assert top_payload["workers"][0]["source_trail_name"] == "run_alpha"
+    assert rest_payload["workers"][0]["source_trail_name"] == "profile-2/run_beta"
+    assert top_payload["workers"][0]["launch_priority"] == 0
+    assert rest_payload["workers"][0]["launch_priority"] == 0
+    assert top_payload["split_two_group"]["group"] == "top"
+    assert rest_payload["split_two_group"]["group"] == "rest"
+
+
+def test_cmd_compile_split_two_group_plans_uses_context_metric(
+    tmp_path: Path,
+) -> None:
+    job_dir = tmp_path / "job"
+    _write_split_two_group_compile_job(job_dir)
+    plan_path = tmp_path / "replay-plan.json"
+
+    exit_code = cmd_compile(
+        argparse.Namespace(
+            job_dir=str(job_dir),
+            plan_out=str(plan_path),
+            backend=None,
+            port_profile_id=1,
+            split_two_group_plans=True,
+            split_two_group_metric="context_usage",
+        )
+    )
+
+    assert exit_code == 0
+
+    top_payload = json.loads(
+        (tmp_path / "replay-plan.context.top.json").read_text(encoding="utf-8")
+    )
+    rest_payload = json.loads(
+        (tmp_path / "replay-plan.context.rest.json").read_text(encoding="utf-8")
+    )
+    assert top_payload["workers"][0]["source_trail_name"] == "profile-2/run_beta"
+    assert rest_payload["workers"][0]["source_trail_name"] == "run_alpha"
+
+
 def test_cmd_compile_reuses_existing_plan_when_compile_version_matches(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -1172,6 +1441,125 @@ def test_cmd_replay_updates_progress_bar(monkeypatch: pytest.MonkeyPatch, tmp_pa
         "advance": 1,
         "fields": {"launched": 1, "active": 0, "failed": 0},
     } in fake_progress.updates
+
+
+def test_cmd_replay_enables_lmcache_log_when_probe_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plan_path = tmp_path / "replay-plan.json"
+    output_dir = tmp_path / "replay-output"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "replay_target": {
+                    "port_profile_id": "1",
+                    "api_base": "http://127.0.0.1:9999/v1",
+                    "gateway_url": "http://127.0.0.1:9999",
+                    "tokenize_endpoint": "http://127.0.0.1:9998/tokenize",
+                },
+                "launch_policy": {
+                    "strategy": "config_ordered",
+                    "max_concurrent": 1,
+                    "pattern": {"name": "eager"},
+                },
+                "workers": [
+                    {
+                        "worker_id": "worker-1",
+                        "api_token": "token-1",
+                        "delta_agent_start_s": 0.0,
+                        "delta_first_request_s": 0.0,
+                        "requests": [
+                            {
+                                "method": "POST",
+                                "path": "v1/chat/completions",
+                                "body": {"model": "Test-Model", "messages": []},
+                                "expected_response_text": "ok",
+                                "delta_agent_action_after_s": 0.0,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_http_json(
+        *,
+        method: str,
+        url: str,
+        payload: object,
+        timeout_s: float | None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, object]:
+        del method, payload, headers
+        assert timeout_s is None
+        if url.endswith("/v1/chat/completions"):
+            return (
+                200,
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "ok",
+                            }
+                        }
+                    ]
+                },
+            )
+        return 200, {}
+
+    def fake_vllm_monitor(*, output_dir: Path, config: object) -> object:
+        del config
+        return type(
+            "FakeMonitor",
+            (),
+            {
+                "stdout_log": output_dir / "vllm-log" / "monitor.stdout.log",
+                "stderr_log": output_dir / "vllm-log" / "monitor.stderr.log",
+            },
+        )()
+
+    def fake_lmcache_monitor(*, output_dir: Path, config: object) -> object:
+        del config
+        return type(
+            "FakeMonitor",
+            (),
+            {
+                "stdout_log": output_dir / "lmcache-log" / "monitor.stdout.log",
+                "stderr_log": output_dir / "lmcache-log" / "monitor.stderr.log",
+            },
+        )()
+
+    monkeypatch.setattr("replayer.cli.http_json", fake_http_json)
+    monkeypatch.setattr("replayer.cli.start_replay_vllm_monitor", fake_vllm_monitor)
+    monkeypatch.setattr("replayer.cli.start_replay_lmcache_monitor", fake_lmcache_monitor)
+    monkeypatch.setattr("replayer.cli.stop_replay_vllm_monitor", lambda monitor: 0)
+    monkeypatch.setattr(
+        "replayer.cli.probe_metrics_endpoint",
+        lambda *, endpoint, timeout_s: (True, None),
+    )
+
+    exit_code = cmd_replay(
+        argparse.Namespace(
+            plan=str(plan_path),
+            output_dir=str(output_dir),
+            port_profile_id=1,
+            launch_policy_override_json='{"max_concurrent": 1}',
+            vllm_log=None,
+            vllm_log_interval_s=1.0,
+            vllm_log_timeout_s=5.0,
+        )
+    )
+
+    assert exit_code == 0
+    summary = json.loads((output_dir / "replay" / "summary.json").read_text(encoding="utf-8"))
+    assert summary["lmcache_log_configured"] is True
+    assert summary["lmcache_log_probe_success"] is True
+    assert summary["lmcache_log_enabled"] is True
+    assert summary["lmcache_log_dir"] == str(output_dir / "lmcache-log")
+    assert summary["lmcache_log_monitor_return_code"] == 0
 
 
 def test_cmd_replay_num_tasks_truncates_to_first_launch_order_tasks(

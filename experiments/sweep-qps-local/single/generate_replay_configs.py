@@ -15,6 +15,7 @@ import copy
 from datetime import datetime, timezone
 import json
 import re
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -27,6 +28,8 @@ DEFAULT_OUTPUT_CONFIG_DIR = REPO_ROOT / "experiments" / "sweep-qps-local" / "sin
 DEFAULT_SERVER_CONFIG_PATH = (
     REPO_ROOT / "servers" / "servers-amdhpc" / "server_config.toml"
 )
+DEFAULT_PLAN_FILE_NAME = "replay-plan.json"
+EXCLUDE_UNRANKED_PLAN_FILE_NAME = "replay-plan.exclude-unranked.json"
 VALID_TOML_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
@@ -129,6 +132,18 @@ def derive_replay_output_base(
     )
 
 
+def derive_replay_timestamp_output_dir(
+    *,
+    replay_root_dir: Path | None,
+    batch_timestamp: str,
+) -> Path:
+    if replay_root_dir is None:
+        replay_root = (REPO_ROOT / "results" / "replay").resolve()
+    else:
+        replay_root = replay_root_dir.expanduser().resolve()
+    return (replay_root / batch_timestamp).resolve()
+
+
 def format_toml_scalar(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -178,6 +193,23 @@ def format_qps_for_slug(qps: float) -> str:
 
 def build_utc_timestamp_slug() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def build_generation_command_raw(argv: list[str] | None) -> str:
+    """Return a shell-safe raw command string for this generator invocation."""
+    if argv is None:
+        original = getattr(sys, "orig_argv", None)
+        if isinstance(original, list) and original:
+            return shlex.join([str(token) for token in original])
+        return shlex.join([str(sys.executable), *[str(token) for token in sys.argv]])
+
+    return shlex.join(
+        [
+            str(sys.executable),
+            str(Path(__file__).resolve()),
+            *[str(token) for token in argv],
+        ]
+    )
 
 
 def build_replay_config_payload(
@@ -351,6 +383,33 @@ def rewrite_sbatch_log_paths(
     sbatch_path.write_text(updated, encoding="utf-8")
 
 
+def copy_generated_batch_dir_to_replay_timestamp(
+    *,
+    source_generated_batch_dir: Path,
+    replay_timestamp_output_dir: Path,
+) -> Path:
+    generated_copy_dir = (replay_timestamp_output_dir / "generated").resolve()
+
+    # Prevent recursive copy when destination lives under source.
+    try:
+        generated_copy_dir.relative_to(source_generated_batch_dir.resolve())
+    except ValueError:
+        pass
+    else:
+        raise ValueError(
+            "generated copy destination must not be inside source generated batch dir: "
+            f"{generated_copy_dir}"
+        )
+
+    generated_copy_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(
+        source_generated_batch_dir.resolve(),
+        generated_copy_dir,
+        dirs_exist_ok=True,
+    )
+    return generated_copy_dir
+
+
 def write_submit_all_script(path: Path, *, qps_slugs: list[str]) -> None:
     lines = [
         "#!/usr/bin/env bash",
@@ -389,6 +448,7 @@ def render_local_mode_sbatch(
     local_mode_script_path: Path,
     check_port_availability: bool,
     lmcache_max_local_cpu_size: str | None,
+    no_async_scheduling: bool,
 ) -> Path:
     result = control_plane.render_start_sbatch(
         port_profile_id=port_profile_id,
@@ -396,6 +456,7 @@ def render_local_mode_sbatch(
         model=model,
         extra_env={},
         lmcache_max_local_cpu_size=lmcache_max_local_cpu_size,
+        no_async_scheduling=no_async_scheduling,
         local_mode_script=str(local_mode_script_path.resolve()),
         check_port_availability=check_port_availability,
     )
@@ -420,7 +481,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--source-run-dir",
         required=True,
-        help="Source run result directory that contains replay-plan.json",
+        help=(
+            "Source run result directory that contains replay-plan.json "
+            "(or replay-plan.exclude-unranked.json with --exclude-unranked-plan)"
+        ),
     )
     parser.add_argument(
         "--qps-list",
@@ -467,6 +531,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--no-async-scheduling",
+        action="store_true",
+        help=(
+            "Forward --no-async-scheduling to render-sbatch/start so generated sbatch "
+            "scripts include it in vLLM startup."
+        ),
+    )
+    parser.add_argument(
         "--port-profile",
         "-P",
         type=int,
@@ -484,7 +556,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--plan-path",
         default=None,
-        help="Optional explicit replay plan path (default: <source-run-dir>/replay-plan.json)",
+        help=(
+            "Optional explicit replay plan path "
+            "(default: <source-run-dir>/replay-plan.json; with "
+            "--exclude-unranked-plan: <source-run-dir>/replay-plan.exclude-unranked.json)"
+        ),
+    )
+    parser.add_argument(
+        "--exclude-unranked-plan",
+        action="store_true",
+        help=(
+            "Use <source-run-dir>/replay-plan.exclude-unranked.json as the default "
+            "plan path (single exclude-unranked variant). Ignored when --plan-path is set."
+        ),
     )
     parser.add_argument(
         "--replay-root-dir",
@@ -538,6 +622,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    generation_command_raw = build_generation_command_raw(argv)
 
     try:
         source_run_dir = Path(args.source_run_dir).expanduser().resolve()
@@ -561,7 +646,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.plan_path:
             plan_path = Path(args.plan_path).expanduser().resolve()
         else:
-            plan_path = (source_run_dir / "replay-plan.json").resolve()
+            default_plan_name = (
+                EXCLUDE_UNRANKED_PLAN_FILE_NAME
+                if bool(args.exclude_unranked_plan)
+                else DEFAULT_PLAN_FILE_NAME
+            )
+            plan_path = (source_run_dir / default_plan_name).resolve()
         if not plan_path.exists() or not plan_path.is_file():
             raise ValueError(f"replay plan does not exist: {plan_path}")
 
@@ -590,6 +680,10 @@ def main(argv: list[str] | None = None) -> int:
         batch_timestamp = build_utc_timestamp_slug()
         replay_output_base = derive_replay_output_base(
             source_run_dir,
+            replay_root_dir=replay_root_dir,
+            batch_timestamp=batch_timestamp,
+        )
+        replay_timestamp_output_dir = derive_replay_timestamp_output_dir(
             replay_root_dir=replay_root_dir,
             batch_timestamp=batch_timestamp,
         )
@@ -649,6 +743,7 @@ def main(argv: list[str] | None = None) -> int:
                 lmcache_max_local_cpu_size=(
                     str(args.lmcache) if args.lmcache is not None else None
                 ),
+                no_async_scheduling=bool(args.no_async_scheduling),
             )
             bundled_sbatch_path = (experiment_dir / "sbatch.sh").resolve()
             shutil.copy2(rendered_sbatch_path, bundled_sbatch_path)
@@ -688,20 +783,31 @@ def main(argv: list[str] | None = None) -> int:
             "batch_timestamp": batch_timestamp,
             "source_run_dir": str(source_run_dir),
             "plan_path": str(plan_path),
+            "plan_variant": (
+                "exclude-unranked"
+                if bool(args.exclude_unranked_plan)
+                else "default"
+            ),
+            "exclude_unranked_plan": bool(args.exclude_unranked_plan),
             "server_config": str(server_config_path),
             "partition": args.partition,
             "model": args.model,
             "lmcache": args.lmcache,
+            "no_async_scheduling": bool(args.no_async_scheduling),
             "port_profile": args.port_profile,
             "check_port_availability": bool(args.check_port_availability),
             "output_config_root_dir": str(output_config_root_dir),
             "output_batch_dir": str(batch_dir),
             "replay_root_dir": str(replay_root_dir) if replay_root_dir is not None else None,
             "replay_output_batch_dir": path_for_config(replay_batch_output_base_resolved),
+            "generated_batch_copy_dir": path_for_config(
+                replay_timestamp_output_dir / "generated"
+            ),
             "poisson_seed": args.poisson_seed,
             "randomize_seed": args.randomize_seed,
             "time_constraint_s": time_constraint_s,
             "qps_list": qps_values,
+            "generation_command_raw": generation_command_raw,
             "submit_all_script": str(submit_all_script_path),
             "submit_all_command": f"bash {path_for_config(submit_all_script_path)}",
             "generated_experiments": generated_experiments,
@@ -710,6 +816,10 @@ def main(argv: list[str] | None = None) -> int:
         manifest_path.write_text(
             json.dumps(summary, indent=2, ensure_ascii=True) + "\n",
             encoding="utf-8",
+        )
+        copy_generated_batch_dir_to_replay_timestamp(
+            source_generated_batch_dir=batch_dir,
+            replay_timestamp_output_dir=replay_timestamp_output_dir,
         )
         summary["manifest_path"] = str(manifest_path)
         print(json.dumps(summary, indent=2, ensure_ascii=True))

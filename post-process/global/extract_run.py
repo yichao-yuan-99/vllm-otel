@@ -10,6 +10,16 @@ import sys
 from typing import Any
 
 
+THIS_DIR = Path(__file__).resolve().parent
+MODULE_ROOT = THIS_DIR.parent
+if str(MODULE_ROOT) not in sys.path:
+    sys.path.insert(0, str(MODULE_ROOT))
+
+from pp_common.service_failure import cutoff_datetime_utc_from_payload
+from pp_common.service_failure import ensure_service_failure_payload
+from pp_common.service_failure import parse_iso8601_to_utc
+
+
 DEFAULT_OUTPUT_NAME = "trial-timing-summary.json"
 
 
@@ -122,7 +132,11 @@ def _build_duration_stats(trials: list[dict[str, Any]]) -> dict[str, float | Non
     }
 
 
-def _build_replay_summary(run_dir: Path) -> dict[str, Any]:
+def _build_replay_summary(
+    run_dir: Path,
+    *,
+    cutoff_time_utc: datetime | None = None,
+) -> dict[str, Any]:
     summary_path = run_dir / "replay" / "summary.json"
     payload = _load_json(summary_path)
     if not isinstance(payload, dict):
@@ -131,6 +145,7 @@ def _build_replay_summary(run_dir: Path) -> dict[str, Any]:
     experiment_started_at = payload.get("started_at")
     experiment_finished_at = payload.get("finished_at")
     experiment_start_dt = _parse_iso8601(experiment_started_at)
+    experiment_start_dt_utc = parse_iso8601_to_utc(experiment_started_at)
     experiment_finish_dt = _parse_iso8601(experiment_finished_at)
 
     worker_results = payload.get("worker_results")
@@ -147,6 +162,14 @@ def _build_replay_summary(run_dir: Path) -> dict[str, Any]:
         finished_at = worker_payload.get("finished_at")
         start_dt = _parse_iso8601(started_at)
         finish_dt = _parse_iso8601(finished_at)
+        start_dt_utc = parse_iso8601_to_utc(started_at)
+        finish_dt_utc = parse_iso8601_to_utc(finished_at)
+
+        if cutoff_time_utc is not None:
+            if start_dt_utc is not None and start_dt_utc > cutoff_time_utc:
+                continue
+            if finish_dt_utc is not None and finish_dt_utc > cutoff_time_utc:
+                continue
 
         duration_s = _duration_seconds(start_dt, finish_dt)
         start_offset_s = _duration_seconds(experiment_start_dt, start_dt)
@@ -171,9 +194,18 @@ def _build_replay_summary(run_dir: Path) -> dict[str, Any]:
         )
     )
 
+    cutoff_offset_s = _duration_seconds(experiment_start_dt_utc, cutoff_time_utc)
+    if cutoff_offset_s is not None:
+        cutoff_offset_s = max(cutoff_offset_s, 0.0)
+
     total_duration_s = _float_or_none(payload.get("run_duration_s"))
     if total_duration_s is None:
         total_duration_s = _duration_seconds(experiment_start_dt, experiment_finish_dt)
+    if cutoff_offset_s is not None:
+        if total_duration_s is None:
+            total_duration_s = cutoff_offset_s
+        else:
+            total_duration_s = min(total_duration_s, cutoff_offset_s)
 
     return {
         "source_type": "replay",
@@ -185,7 +217,11 @@ def _build_replay_summary(run_dir: Path) -> dict[str, Any]:
     }
 
 
-def _build_con_driver_summary(run_dir: Path) -> dict[str, Any]:
+def _build_con_driver_summary(
+    run_dir: Path,
+    *,
+    cutoff_time_utc: datetime | None = None,
+) -> dict[str, Any]:
     results_path = run_dir / "meta" / "results.json"
     manifest_path = run_dir / "meta" / "run_manifest.json"
 
@@ -200,6 +236,7 @@ def _build_con_driver_summary(run_dir: Path) -> dict[str, Any]:
     experiment_started_at = manifest_payload.get("started_at")
     experiment_finished_at = manifest_payload.get("finished_at")
     experiment_start_dt = _parse_iso8601(experiment_started_at)
+    experiment_start_dt_utc = parse_iso8601_to_utc(experiment_started_at)
     experiment_finish_dt = _parse_iso8601(experiment_finished_at)
 
     trials: list[dict[str, Any]] = []
@@ -210,6 +247,14 @@ def _build_con_driver_summary(run_dir: Path) -> dict[str, Any]:
         finished_at = entry.get("finished_at")
         start_dt = _parse_iso8601(started_at)
         finish_dt = _parse_iso8601(finished_at)
+        start_dt_utc = parse_iso8601_to_utc(started_at)
+        finish_dt_utc = parse_iso8601_to_utc(finished_at)
+
+        if cutoff_time_utc is not None:
+            if start_dt_utc is not None and start_dt_utc > cutoff_time_utc:
+                continue
+            if finish_dt_utc is not None and finish_dt_utc > cutoff_time_utc:
+                continue
 
         duration_s = _float_or_none(entry.get("duration_s"))
         if duration_s is None:
@@ -237,9 +282,18 @@ def _build_con_driver_summary(run_dir: Path) -> dict[str, Any]:
         )
     )
 
+    cutoff_offset_s = _duration_seconds(experiment_start_dt_utc, cutoff_time_utc)
+    if cutoff_offset_s is not None:
+        cutoff_offset_s = max(cutoff_offset_s, 0.0)
+
     total_duration_s = _float_or_none(manifest_payload.get("run_duration_s"))
     if total_duration_s is None:
         total_duration_s = _duration_seconds(experiment_start_dt, experiment_finish_dt)
+    if cutoff_offset_s is not None:
+        if total_duration_s is None:
+            total_duration_s = cutoff_offset_s
+        else:
+            total_duration_s = min(total_duration_s, cutoff_offset_s)
 
     return {
         "source_type": "con-driver",
@@ -252,14 +306,16 @@ def _build_con_driver_summary(run_dir: Path) -> dict[str, Any]:
 
 
 def extract_global_trial_summary_from_run_dir(run_dir: Path) -> dict[str, Any]:
+    service_failure_payload = ensure_service_failure_payload(run_dir)
+    cutoff_time_utc = cutoff_datetime_utc_from_payload(service_failure_payload)
     replay_summary_path = run_dir / "replay" / "summary.json"
     con_driver_results_path = run_dir / "meta" / "results.json"
     con_driver_manifest_path = run_dir / "meta" / "run_manifest.json"
 
     if replay_summary_path.is_file():
-        base = _build_replay_summary(run_dir)
+        base = _build_replay_summary(run_dir, cutoff_time_utc=cutoff_time_utc)
     elif con_driver_results_path.is_file() and con_driver_manifest_path.is_file():
-        base = _build_con_driver_summary(run_dir)
+        base = _build_con_driver_summary(run_dir, cutoff_time_utc=cutoff_time_utc)
     else:
         raise ValueError(
             "Unrecognized run layout. Expected either replay/summary.json "
@@ -275,6 +331,10 @@ def extract_global_trial_summary_from_run_dir(run_dir: Path) -> dict[str, Any]:
         "experiment_started_at": base["experiment_started_at"],
         "experiment_finished_at": base["experiment_finished_at"],
         "total_duration_s": base["total_duration_s"],
+        "service_failure_detected": bool(
+            service_failure_payload.get("service_failure_detected", False)
+        ),
+        "service_failure_cutoff_time_utc": service_failure_payload.get("cutoff_time_utc"),
         "trial_count": trial_count,
         "trail_count": trial_count,
         "trial_duration_stats_s": _build_duration_stats(trials),

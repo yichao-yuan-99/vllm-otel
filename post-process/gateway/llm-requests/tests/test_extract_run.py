@@ -274,8 +274,9 @@ def test_extract_run_updates_progress_bar(monkeypatch, tmp_path: Path) -> None:
 
     fake_progress = FakeProgress()
 
-    def fake_collect(run_dir_arg: Path, *, on_request_loaded=None):
+    def fake_collect(run_dir_arg: Path, *, cutoff_time_utc=None, on_request_loaded=None):
         assert run_dir_arg == run_dir.resolve()
+        assert cutoff_time_utc is None
         if on_request_loaded is not None:
             on_request_loaded(1, 2)
             on_request_loaded(2, 2)

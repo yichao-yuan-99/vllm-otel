@@ -13,6 +13,57 @@ From: __BASE_SIF__
         sed -i '/^install_lmcache_rocm_if_requested$/d' /opt/vllm-plugins/vllm_entrypoint.sh
     fi
 
+    # Work around vLLM crashes when prometheus_client Counter.inc receives
+    # a negative amount. Instead of raising, log to stderr and clamp to zero.
+    python3 - <<'PY'
+import importlib.util
+from pathlib import Path
+import re
+import sys
+
+spec = importlib.util.find_spec("prometheus_client.metrics")
+if spec is None or spec.origin is None:
+    raise SystemExit(
+        "error: prometheus_client.metrics not found while applying SIF workaround"
+    )
+
+metrics_path = Path(spec.origin)
+source = metrics_path.read_text(encoding="utf-8")
+
+if (
+    "Counters can only be incremented by non-negative amounts. value"
+    in source
+    and "amount = 0" in source
+    and "raise ValueError('Counters can only be incremented by non-negative amounts.')"
+    not in source
+):
+    print(f"prometheus workaround already present in {metrics_path}", file=sys.stderr)
+    raise SystemExit(0)
+
+pattern = re.compile(
+    r"(?m)^([ \t]*)if amount < 0:\n"
+    r"\1    raise ValueError\('Counters can only be incremented by non-negative amounts\.'\)\n"
+)
+match = pattern.search(source)
+if match is None:
+    raise SystemExit(
+        f"error: expected Counter.inc negative guard not found in {metrics_path}"
+    )
+
+indent = match.group(1)
+replacement = (
+    f"{indent}if amount < 0:\n"
+    f"{indent}    print(\n"
+    f"{indent}        'Counters can only be incremented by non-negative amounts. value ' + str(amount),\n"
+    f"{indent}        file=__import__('sys').stderr,\n"
+    f"{indent}    )\n"
+    f"{indent}    amount = 0\n"
+)
+patched = source[: match.start()] + replacement + source[match.end() :]
+metrics_path.write_text(patched, encoding="utf-8")
+print(f"applied prometheus workaround in {metrics_path}", file=sys.stderr)
+PY
+
     cd /opt/lmcache-src
     PYTORCH_ROCM_ARCH="__ROCM_ARCH__" \
       TORCH_DONT_CHECK_COMPILER_ABI=1 \

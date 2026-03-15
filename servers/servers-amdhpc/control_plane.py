@@ -1039,6 +1039,7 @@ class ControlPlane:
         model: str,
         extra_env: dict[str, str] | None = None,
         lmcache_max_local_cpu_size: str | None = None,
+        no_async_scheduling: bool = False,
         local_mode_script: str | None = None,
         check_port_availability: bool = False,
     ) -> CommandResult:
@@ -1110,6 +1111,7 @@ class ControlPlane:
                     local_mode_script=normalized_local_mode_script,
                     extra_env=normalized_extra_env,
                     lmcache_enabled=lmcache_enabled,
+                    no_async_scheduling=no_async_scheduling,
                 )
             else:
                 script_path = self._write_sbatch_script(
@@ -1118,6 +1120,7 @@ class ControlPlane:
                     port_profile=port_profile,
                     extra_env=normalized_extra_env,
                     lmcache_enabled=lmcache_enabled,
+                    no_async_scheduling=no_async_scheduling,
                 )
 
         return CommandResult(
@@ -1137,6 +1140,7 @@ class ControlPlane:
                 "sbatch_script": str(script_path),
                 "extra_env": dict(normalized_extra_env),
                 "lmcache_enabled": lmcache_enabled,
+                "no_async_scheduling": bool(no_async_scheduling),
                 "local_mode_enabled": normalized_local_mode_script is not None,
                 "local_mode_script": normalized_local_mode_script,
                 "validated_ports_available_on_login": bool(check_port_availability),
@@ -1152,6 +1156,7 @@ class ControlPlane:
         model: str,
         extra_env: dict[str, str] | None = None,
         lmcache_max_local_cpu_size: str | None = None,
+        no_async_scheduling: bool = False,
         check_port_availability: bool = False,
     ) -> CommandResult:
         try:
@@ -1275,6 +1280,7 @@ class ControlPlane:
                 visible_devices_by_profile=visible_devices_by_profile,
                 extra_env=normalized_extra_env,
                 lmcache_enabled=lmcache_enabled,
+                no_async_scheduling=no_async_scheduling,
             )
 
         return CommandResult(
@@ -1294,6 +1300,7 @@ class ControlPlane:
                 "sbatch_script": str(script_path),
                 "extra_env": dict(normalized_extra_env),
                 "lmcache_enabled": lmcache_enabled,
+                "no_async_scheduling": bool(no_async_scheduling),
                 "validated_ports_available_on_login": bool(check_port_availability),
                 "profiles": [
                     {
@@ -2966,6 +2973,7 @@ class ControlPlane:
         visible_devices_by_profile: list[str],
         extra_env: dict[str, str],
         lmcache_enabled: bool,
+        no_async_scheduling: bool = False,
     ) -> Path:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         safe_partition = _safe_token(partition_spec.name)
@@ -3022,6 +3030,9 @@ class ControlPlane:
                 "                --kv-transfer-config\n"
                 "                '{\"kv_connector\":\"LMCacheConnectorV1\", \"kv_role\":\"kv_both\"}'\n"
             )
+        no_async_scheduling_args = ""
+        if no_async_scheduling:
+            no_async_scheduling_args = "                --no-async-scheduling\n"
 
         script = textwrap.dedent(
             f"""\
@@ -3192,7 +3203,7 @@ class ControlPlane:
                 --collect-detailed-traces "${{VLLM_COLLECT_DETAILED_TRACES}}"
                 --enable-prompt-tokens-details
                 --logits-processors "${{VLLM_LOGITS_PROCESSORS}}"
-{lmcache_kv_transfer_args}              )
+{lmcache_kv_transfer_args}{no_async_scheduling_args}              )
 
               apptainer exec \
                 --rocm \
@@ -3264,6 +3275,7 @@ class ControlPlane:
         port_profile: AMDHPCPortProfile,
         extra_env: dict[str, str],
         lmcache_enabled: bool,
+        no_async_scheduling: bool = False,
     ) -> Path:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         safe_partition = _safe_token(partition_spec.name)
@@ -3304,6 +3316,9 @@ class ControlPlane:
                 "              --kv-transfer-config\n"
                 "              '{\"kv_connector\":\"LMCacheConnectorV1\", \"kv_role\":\"kv_both\"}'\n"
             )
+        no_async_scheduling_args = ""
+        if no_async_scheduling:
+            no_async_scheduling_args = "              --no-async-scheduling\n"
 
         script = textwrap.dedent(
             f"""\
@@ -3431,7 +3446,7 @@ class ControlPlane:
               --collect-detailed-traces "${{VLLM_COLLECT_DETAILED_TRACES}}"
               --enable-prompt-tokens-details
               --logits-processors "${{VLLM_LOGITS_PROCESSORS}}"
-{lmcache_kv_transfer_args}            )
+{lmcache_kv_transfer_args}{no_async_scheduling_args}            )
 
             apptainer exec \
               --rocm \
@@ -3484,6 +3499,7 @@ class ControlPlane:
         local_mode_script: str,
         extra_env: dict[str, str],
         lmcache_enabled: bool,
+        no_async_scheduling: bool = False,
     ) -> Path:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         safe_partition = _safe_token(partition_spec.name)
@@ -3523,6 +3539,9 @@ class ControlPlane:
                 "              --kv-transfer-config\n"
                 "              '{\"kv_connector\":\"LMCacheConnectorV1\", \"kv_role\":\"kv_both\"}'\n"
             )
+        no_async_scheduling_args = ""
+        if no_async_scheduling:
+            no_async_scheduling_args = "              --no-async-scheduling\n"
 
         gateway_config_default = self._cfg.repo_root / "gateway" / "config.toml"
         gateway_config_fallback = self._cfg.repo_root / "gateway" / "config.example.toml"
@@ -3745,7 +3764,7 @@ class ControlPlane:
               --collect-detailed-traces "${{VLLM_COLLECT_DETAILED_TRACES}}"
               --enable-prompt-tokens-details
               --logits-processors "${{VLLM_LOGITS_PROCESSORS}}"
-{lmcache_kv_transfer_args}            )
+{lmcache_kv_transfer_args}{no_async_scheduling_args}            )
 
             apptainer exec \
               --rocm \

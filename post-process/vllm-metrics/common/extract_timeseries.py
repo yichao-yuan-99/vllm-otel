@@ -4,6 +4,7 @@ import json
 import tarfile
 from dataclasses import dataclass
 from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 import re
 from typing import Any, Callable
@@ -23,6 +24,12 @@ def _parse_iso8601(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _to_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _build_series_key(name: str, labels: dict[str, str]) -> str:
     if not labels:
         return name
@@ -30,6 +37,10 @@ def _build_series_key(name: str, labels: dict[str, str]) -> str:
     for key in sorted(labels):
         parts.append(f"{key}={labels[key]}")
     return "|".join(parts)
+
+
+def _is_created_metric_name(name: str) -> bool:
+    return "created" in name.lower()
 
 
 def _load_json(path: Path) -> Any:
@@ -150,6 +161,7 @@ def count_metric_blocks_in_run_dir(run_dir: Path) -> int:
 def load_metric_records_from_run_dir(
     run_dir: Path,
     *,
+    cutoff_time_utc: datetime | None = None,
     on_block_loaded: Callable[[int, int], None] | None = None,
 ) -> list[ParsedMetricRecord]:
     vllm_log_dir = run_dir / "vllm-log"
@@ -175,9 +187,12 @@ def load_metric_records_from_run_dir(
             member_name = block.get("member")
             member_name_value = member_name if isinstance(member_name, str) else None
             for record in _read_jsonl_member(tar_path, member_name=member_name_value):
-                records.append(
-                    _parse_metric_record(record, port_profile_id=profile_id)
-                )
+                parsed_record = _parse_metric_record(record, port_profile_id=profile_id)
+                if cutoff_time_utc is not None:
+                    captured_at_dt = _to_utc(_parse_iso8601(parsed_record.captured_at))
+                    if captured_at_dt > cutoff_time_utc:
+                        continue
+                records.append(parsed_record)
             loaded_blocks += 1
             if on_block_loaded is not None:
                 on_block_loaded(loaded_blocks, total_blocks)
@@ -199,6 +214,8 @@ def build_gauge_counter_timeseries(records: list[ParsedMetricRecord]) -> dict[st
         for family_name, family_payload in record.families.items():
             if not isinstance(family_payload, dict):
                 continue
+            if _is_created_metric_name(family_name):
+                continue
             family_type = family_payload.get("type")
             if family_type not in _SUPPORTED_METRIC_TYPES:
                 continue
@@ -215,6 +232,8 @@ def build_gauge_counter_timeseries(records: list[ParsedMetricRecord]) -> dict[st
                 labels = sample.get("labels")
                 value = sample.get("value")
                 if not isinstance(sample_name, str) or not sample_name.startswith("vllm"):
+                    continue
+                if _is_created_metric_name(sample_name):
                     continue
                 if not isinstance(labels, dict):
                     continue
@@ -260,9 +279,14 @@ def build_gauge_counter_timeseries(records: list[ParsedMetricRecord]) -> dict[st
 def extract_gauge_counter_timeseries_from_run_dir(
     run_dir: Path,
     *,
+    cutoff_time_utc: datetime | None = None,
     on_block_loaded: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
-    records = load_metric_records_from_run_dir(run_dir, on_block_loaded=on_block_loaded)
+    records = load_metric_records_from_run_dir(
+        run_dir,
+        cutoff_time_utc=cutoff_time_utc,
+        on_block_loaded=on_block_loaded,
+    )
     result = build_gauge_counter_timeseries(records)
     profile_ids = sorted(
         {

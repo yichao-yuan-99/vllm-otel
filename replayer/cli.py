@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import copy
 import http.client
 import hashlib
@@ -89,9 +90,16 @@ REPLAY_PLAN_SCHEMA_VERSION = "replay-plan.v1"
 # increment this version.
 REPLAY_PLAN_COMPILE_VERSION = "1"
 REPLAY_PLAN_COMPILE_VERSION_V1 = "1"
+SPLIT_TWO_GROUP_METRICS = {"token_usage", "context_usage"}
+DEFAULT_SPLIT_TWO_GROUP_METRIC = "token_usage"
+SPLIT_TWO_GROUP_PLAN_METRIC_ALIASES = {
+    "token_usage": "token",
+    "context_usage": "context",
+}
 
 DEFAULT_VLLM_LOG_INTERVAL_S = 1.0
 DEFAULT_VLLM_LOG_TIMEOUT_S = 3600.0
+DEFAULT_LMCACHE_LOG_PROBE_TIMEOUT_S = 2.0
 DEFAULT_COMPILE_TOKENIZE_TIMEOUT_S = 3600.0
 _MONITOR_INTERRUPT_GRACE_SEC = 3600.0
 _MONITOR_TERMINATE_GRACE_SEC = 3600.0
@@ -103,6 +111,15 @@ class ReplayVLLMLogConfig:
     endpoint: str
     interval_s: float
     timeout_s: float
+
+
+@dataclass(frozen=True)
+class ReplayLMCacheLogConfig:
+    configured: bool
+    endpoint: str | None
+    interval_s: float
+    timeout_s: float
+    probe_timeout_s: float
 
 
 @dataclass
@@ -147,7 +164,7 @@ def create_replay_progress() -> Any:
 
 
 def create_compile_progress() -> Any:
-    if RichProgress is None:
+    if RichProgress is None or os.environ.get("REPLAYER_NO_PROGRESS") == "1":
         return _NullProgress()
     return RichProgress(
         SpinnerColumn(),
@@ -155,6 +172,20 @@ def create_compile_progress() -> Any:
         BarColumn(),
         TextColumn("{task.completed}/{task.total} requests"),
         TextColumn("workers={task.fields[workers_completed]}/{task.fields[workers_total]}"),
+        TimeElapsedColumn(),
+        transient=False,
+    )
+
+
+def create_batch_compile_progress() -> Any:
+    if RichProgress is None:
+        return _NullProgress()
+    return RichProgress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]{task.description}[/bold blue]"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total} jobs"),
+        TextColumn("ok={task.fields[succeeded]} failed={task.fields[failed]}"),
         TimeElapsedColumn(),
         transient=False,
     )
@@ -187,6 +218,62 @@ def resolve_replay_vllm_log_config(
     )
 
 
+def resolve_replay_lmcache_log_config(
+    *,
+    port_profile_id: int | None,
+    interval_s: float,
+    timeout_s: float,
+    probe_timeout_s: float = DEFAULT_LMCACHE_LOG_PROBE_TIMEOUT_S,
+) -> ReplayLMCacheLogConfig:
+    if interval_s <= 0:
+        raise ValueError("--vllm-log-interval-s must be > 0")
+    if timeout_s <= 0:
+        raise ValueError("--vllm-log-timeout-s must be > 0")
+    if probe_timeout_s <= 0:
+        raise ValueError("LMCache log probe timeout must be > 0")
+    if port_profile_id is None:
+        return ReplayLMCacheLogConfig(
+            configured=False,
+            endpoint=None,
+            interval_s=interval_s,
+            timeout_s=timeout_s,
+            probe_timeout_s=probe_timeout_s,
+        )
+    from gateway.port_profiles import load_port_profile
+
+    profile = load_port_profile(port_profile_id)
+    if profile.lmcache_port is None:
+        return ReplayLMCacheLogConfig(
+            configured=False,
+            endpoint=None,
+            interval_s=interval_s,
+            timeout_s=timeout_s,
+            probe_timeout_s=probe_timeout_s,
+        )
+    endpoint = f"http://127.0.0.1:{profile.lmcache_port}/metrics"
+    return ReplayLMCacheLogConfig(
+        configured=True,
+        endpoint=endpoint,
+        interval_s=interval_s,
+        timeout_s=timeout_s,
+        probe_timeout_s=probe_timeout_s,
+    )
+
+
+def probe_metrics_endpoint(*, endpoint: str, timeout_s: float) -> tuple[bool, str | None]:
+    request = url_request.Request(url=endpoint, method="GET")
+    try:
+        with url_request.urlopen(request, timeout=timeout_s) as response:
+            status = int(response.getcode())
+        if status >= 400:
+            return False, f"HTTP {status}"
+        return True, None
+    except url_error.HTTPError as exc:
+        return False, f"HTTP {int(exc.code)}"
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+
+
 def _build_monitor_env() -> dict[str, str]:
     env = os.environ.copy()
     repo_root = Path(__file__).resolve().parents[1]
@@ -198,15 +285,18 @@ def _build_monitor_env() -> dict[str, str]:
     return env
 
 
-def start_replay_vllm_monitor(
+def _start_replay_metrics_monitor(
     *,
     output_dir: Path,
-    config: ReplayVLLMLogConfig,
+    endpoint: str,
+    interval_s: float,
+    timeout_s: float,
+    log_dir_name: str,
 ) -> ReplayVLLMMonitorProcess:
-    vllm_log_dir = output_dir / "vllm-log"
-    vllm_log_dir.mkdir(parents=True, exist_ok=True)
-    stdout_log = vllm_log_dir / "monitor.stdout.log"
-    stderr_log = vllm_log_dir / "monitor.stderr.log"
+    metrics_log_dir = output_dir / log_dir_name
+    metrics_log_dir.mkdir(parents=True, exist_ok=True)
+    stdout_log = metrics_log_dir / "monitor.stdout.log"
+    stderr_log = metrics_log_dir / "monitor.stderr.log"
     stdout_handle = stdout_log.open("w", encoding="utf-8")
     stderr_handle = stderr_log.open("w", encoding="utf-8")
     command = [
@@ -214,13 +304,13 @@ def start_replay_vllm_monitor(
         "-m",
         "con_driver.vllm_metrics_monitor",
         "--endpoint",
-        config.endpoint,
+        endpoint,
         "--output-dir",
-        str(vllm_log_dir),
+        str(metrics_log_dir),
         "--interval-s",
-        str(config.interval_s),
+        str(interval_s),
         "--timeout-s",
-        str(config.timeout_s),
+        str(timeout_s),
         "--block-size",
         "100",
     ]
@@ -242,6 +332,36 @@ def start_replay_vllm_monitor(
         stderr_handle=stderr_handle,
         stdout_log=stdout_log,
         stderr_log=stderr_log,
+    )
+
+
+def start_replay_vllm_monitor(
+    *,
+    output_dir: Path,
+    config: ReplayVLLMLogConfig,
+) -> ReplayVLLMMonitorProcess:
+    return _start_replay_metrics_monitor(
+        output_dir=output_dir,
+        endpoint=config.endpoint,
+        interval_s=config.interval_s,
+        timeout_s=config.timeout_s,
+        log_dir_name="vllm-log",
+    )
+
+
+def start_replay_lmcache_monitor(
+    *,
+    output_dir: Path,
+    config: ReplayLMCacheLogConfig,
+) -> ReplayVLLMMonitorProcess:
+    if config.endpoint is None:
+        raise ValueError("LMCache metrics endpoint is required to start lmcache monitor")
+    return _start_replay_metrics_monitor(
+        output_dir=output_dir,
+        endpoint=config.endpoint,
+        interval_s=config.interval_s,
+        timeout_s=config.timeout_s,
+        log_dir_name="lmcache-log",
     )
 
 
@@ -793,6 +913,312 @@ def discover_gateway_run_dirs(
     return run_dirs
 
 
+def _is_profiled_job_dir(path: Path) -> bool:
+    required_files = [
+        path / "meta" / "config.toml",
+        path / "meta" / "run_manifest.json",
+        path / "meta" / "results.json",
+        path / "meta" / "events.jsonl",
+    ]
+    if not all(file_path.is_file() for file_path in required_files):
+        return False
+    return (path / "gateway-output").is_dir()
+
+
+def discover_profiled_job_dirs(job_root: Path) -> list[Path]:
+    resolved_root = job_root.expanduser().resolve()
+    discovered: set[Path] = set()
+
+    if _is_profiled_job_dir(resolved_root):
+        discovered.add(resolved_root)
+
+    for config_path in resolved_root.rglob("meta/config.toml"):
+        candidate_job_dir = config_path.parent.parent.resolve()
+        if _is_profiled_job_dir(candidate_job_dir):
+            discovered.add(candidate_job_dir)
+
+    return sorted(discovered)
+
+
+def _job_root_default_max_workers(job_count: int) -> int:
+    if job_count <= 0:
+        return 1
+    cpu_count = os.cpu_count() or 1
+    return max(1, min(job_count, cpu_count, 8))
+
+
+def _build_job_root_child_compile_command(
+    *,
+    job_dir: Path,
+    port_profile_id: int,
+    request_timeout_s: float | None,
+    split_two_group_plans: bool,
+    split_two_group_metric: str,
+    exclude_unranked_trails: bool,
+) -> list[str]:
+    command = [
+        sys.executable,
+        "-m",
+        "replayer",
+        "compile",
+        "--job-dir",
+        str(job_dir),
+        "--port-profile-id",
+        str(port_profile_id),
+    ]
+    if request_timeout_s is not None:
+        command.extend(["--request-timeout-s", str(request_timeout_s)])
+    if split_two_group_plans:
+        command.append("--split-two-group-plans")
+        command.extend(["--split-two-group-metric", split_two_group_metric])
+    if exclude_unranked_trails:
+        command.append("--exclude-unranked-trails")
+    return command
+
+
+def _run_job_root_child_compile(
+    *,
+    job_dir: Path,
+    port_profile_id: int,
+    request_timeout_s: float | None,
+    split_two_group_plans: bool,
+    split_two_group_metric: str,
+    exclude_unranked_trails: bool,
+) -> dict[str, Any]:
+    command = _build_job_root_child_compile_command(
+        job_dir=job_dir,
+        port_profile_id=port_profile_id,
+        request_timeout_s=request_timeout_s,
+        split_two_group_plans=split_two_group_plans,
+        split_two_group_metric=split_two_group_metric,
+        exclude_unranked_trails=exclude_unranked_trails,
+    )
+    env = os.environ.copy()
+    env["REPLAYER_NO_PROGRESS"] = "1"
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    if completed.returncode != 0:
+        error_text = completed.stderr.strip()
+        if not error_text:
+            error_text = completed.stdout.strip() or f"compile exited with {completed.returncode}"
+        return {
+            "job_dir": str(job_dir),
+            "status": "failed",
+            "error": error_text,
+            "exit_code": completed.returncode,
+        }
+    stdout = completed.stdout.strip()
+    parsed_summary: dict[str, Any] | None = None
+    if stdout:
+        with suppress(Exception):
+            parsed = json.loads(stdout)
+            if isinstance(parsed, dict):
+                parsed_summary = parsed
+    result: dict[str, Any] = {
+        "job_dir": str(job_dir),
+        "status": "ok",
+    }
+    if parsed_summary is not None:
+        result["summary"] = parsed_summary
+    return result
+
+
+def build_gateway_trail_name(
+    *,
+    run_dir: Path,
+    source_port_profile_id: int | None,
+) -> str:
+    run_id = run_dir.name
+    if isinstance(source_port_profile_id, int):
+        return f"profile-{source_port_profile_id}/{run_id}"
+    return run_id
+
+
+def resolve_split_two_group_file_path(
+    *,
+    job_dir: Path,
+    metric: str,
+) -> Path:
+    if metric == "token_usage":
+        file_name = "top-p-token-usage-two-groups.json"
+    elif metric == "context_usage":
+        file_name = "top-p-context-usage-two-groups.json"
+    else:
+        raise ValueError(
+            f"Unsupported split two-group metric {metric!r}; "
+            f"supported metrics: {sorted(SPLIT_TWO_GROUP_METRICS)}"
+        )
+    return (job_dir / "original-analysis" / "split" / file_name).resolve()
+
+
+def resolve_split_summary_file_path(split_payload_path: Path) -> Path:
+    return (split_payload_path.parent / "top-p-usage-ratio-summary.json").resolve()
+
+
+def _build_split_summary_trail_name(item: dict[str, Any]) -> str | None:
+    trail_name_raw = item.get("trail_name")
+    if isinstance(trail_name_raw, str):
+        trail_name = trail_name_raw.strip()
+        if trail_name:
+            return trail_name
+
+    run_id_raw = item.get("gateway_run_id")
+    if not isinstance(run_id_raw, str):
+        return None
+    run_id = run_id_raw.strip()
+    if not run_id:
+        return None
+
+    profile_id_raw = item.get("gateway_profile_id")
+    if profile_id_raw is None:
+        return run_id
+    if isinstance(profile_id_raw, bool):
+        return None
+    if isinstance(profile_id_raw, int):
+        return f"profile-{profile_id_raw}/{run_id}"
+    if isinstance(profile_id_raw, str) and profile_id_raw.strip():
+        with suppress(ValueError):
+            parsed_profile_id = parse_port_profile_id(
+                profile_id_raw,
+                field_name="split summary gateway_profile_id",
+            )
+            if isinstance(parsed_profile_id, int):
+                return f"profile-{parsed_profile_id}/{run_id}"
+    return None
+
+
+def load_split_unranked_trail_names(split_payload_path: Path) -> set[str]:
+    summary_path = resolve_split_summary_file_path(split_payload_path)
+    if not summary_path.is_file():
+        return set()
+
+    with suppress(Exception):
+        payload = read_json(summary_path)
+        if not isinstance(payload, dict):
+            return set()
+        unranked_payload = payload.get("unranked_trails")
+        if not isinstance(unranked_payload, list):
+            return set()
+
+        parsed_names: set[str] = set()
+        for item in unranked_payload:
+            if not isinstance(item, dict):
+                continue
+            parsed_name = _build_split_summary_trail_name(item)
+            if parsed_name:
+                parsed_names.add(parsed_name)
+        return parsed_names
+
+    return set()
+
+
+def _parse_group_trail_names(value: Any, *, field_name: str) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a list")
+    parsed: list[str] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            raise ValueError(f"{field_name}[{index}] must be a string")
+        name = item.strip()
+        if not name:
+            continue
+        parsed.append(name)
+    return parsed
+
+
+def load_split_two_group_trail_names(
+    split_payload_path: Path,
+) -> tuple[set[str], set[str], dict[str, Any]]:
+    require_file(split_payload_path)
+    payload = read_json(split_payload_path)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Invalid split payload (expected object): {split_payload_path}")
+
+    group_top = payload.get("group_top")
+    group_rest = payload.get("group_rest")
+    if not isinstance(group_top, dict) or not isinstance(group_rest, dict):
+        raise ValueError(
+            "Split payload must contain group_top and group_rest objects: "
+            f"{split_payload_path}"
+        )
+
+    top_names = set(
+        _parse_group_trail_names(
+            group_top.get("trail_names"),
+            field_name=f"{split_payload_path}.group_top.trail_names",
+        )
+    )
+    rest_names = set(
+        _parse_group_trail_names(
+            group_rest.get("trail_names"),
+            field_name=f"{split_payload_path}.group_rest.trail_names",
+        )
+    )
+    overlap = sorted(top_names.intersection(rest_names))
+    if overlap:
+        raise ValueError(
+            "Split payload has overlapping trail names between top/rest groups: "
+            f"{overlap}"
+        )
+
+    return top_names, rest_names, payload
+
+
+def with_plan_name_suffix(plan_path: Path, suffix: str) -> Path:
+    if not suffix:
+        raise ValueError("Plan suffix cannot be empty")
+    file_name = plan_path.name
+    dot_index = file_name.rfind(".")
+    if dot_index <= 0:
+        suffixed_name = f"{file_name}.{suffix}"
+    else:
+        suffixed_name = f"{file_name[:dot_index]}.{suffix}{file_name[dot_index:]}"
+    return (plan_path.parent / suffixed_name).resolve()
+
+
+def split_two_group_plan_paths(
+    *,
+    plan_path: Path,
+    metric: str,
+) -> tuple[Path, Path]:
+    metric_alias = SPLIT_TWO_GROUP_PLAN_METRIC_ALIASES.get(metric)
+    if metric_alias is None:
+        raise ValueError(
+            f"Unsupported split two-group metric {metric!r}; "
+            f"supported metrics: {sorted(SPLIT_TWO_GROUP_METRICS)}"
+        )
+    top_path = with_plan_name_suffix(plan_path, f"{metric_alias}.top")
+    rest_path = with_plan_name_suffix(plan_path, f"{metric_alias}.rest")
+    return top_path, rest_path
+
+
+def clone_workers_with_reindexed_launch_priority(
+    workers: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    cloned = copy.deepcopy(workers)
+    for launch_priority, worker in enumerate(cloned):
+        worker["launch_priority"] = launch_priority
+    return cloned
+
+
+def split_plan_matches_requested_metric(
+    *,
+    plan_payload: dict[str, Any],
+    metric: str,
+    group: str,
+) -> bool:
+    split_payload = plan_payload.get("split_two_group")
+    if not isinstance(split_payload, dict):
+        return False
+    payload_metric = split_payload.get("metric")
+    payload_group = split_payload.get("group")
+    return payload_metric == metric and payload_group == group
+
+
 def extract_agent_start_time(lifecycle_records: list[dict[str, Any]]) -> datetime:
     for record in lifecycle_records:
         if record.get("event_type") != "agent_start":
@@ -1169,13 +1595,14 @@ def cmd_compile(args: argparse.Namespace) -> int:
         ),
         field_name="job_dir",
     )
-    job_dir = resolve_required_option(
-        job_dir_value,
-        option_name="--job-dir",
-        config_key="job_dir",
-    ).expanduser().resolve()
-    if not job_dir.exists() or not job_dir.is_dir():
-        raise ValueError(f"Invalid --job-dir: {job_dir}")
+    job_root_value = parse_optional_path(
+        (
+            args.job_root
+            if getattr(args, "job_root", None) is not None
+            else compile_config.get("job_root")
+        ),
+        field_name="job_root",
+    )
 
     backend_override = parse_optional_str(
         compile_config.get("backend"),
@@ -1210,6 +1637,52 @@ def cmd_compile(args: argparse.Namespace) -> int:
         ),
         field_name="--request-timeout-s",
     )
+    split_two_group_plans = parse_optional_bool(
+        (
+            args.split_two_group_plans
+            if getattr(args, "split_two_group_plans", None) is not None
+            else compile_config.get("split_two_group_plans")
+        ),
+        field_name="split_two_group_plans",
+    )
+    split_two_group_plans = bool(split_two_group_plans) if split_two_group_plans is not None else False
+    split_two_group_metric_value = parse_optional_str(
+        (
+            args.split_two_group_metric
+            if getattr(args, "split_two_group_metric", None) is not None
+            else compile_config.get("split_two_group_metric")
+        ),
+        field_name="split_two_group_metric",
+    )
+    split_two_group_metric = (
+        split_two_group_metric_value.strip().lower()
+        if split_two_group_metric_value is not None
+        else DEFAULT_SPLIT_TWO_GROUP_METRIC
+    )
+    if split_two_group_metric not in SPLIT_TWO_GROUP_METRICS:
+        supported_values = ", ".join(sorted(SPLIT_TWO_GROUP_METRICS))
+        raise ValueError(
+            "split_two_group_metric must be one of: "
+            f"{supported_values}. Got {split_two_group_metric!r}"
+        )
+    exclude_unranked_trails_value = parse_optional_bool(
+        (
+            args.exclude_unranked_trails
+            if getattr(args, "exclude_unranked_trails", None) is not None
+            else compile_config.get("exclude_unranked_trails")
+        ),
+        field_name="exclude_unranked_trails",
+    )
+    exclude_unranked_trails = (
+        bool(exclude_unranked_trails_value)
+        if exclude_unranked_trails_value is not None
+        else False
+    )
+    if exclude_unranked_trails and split_two_group_plans:
+        raise ValueError(
+            "--exclude-unranked-trails cannot be combined with "
+            "--split-two-group-plans"
+        )
     plan_out_override = parse_optional_path(
         (
             args.plan_out
@@ -1218,44 +1691,245 @@ def cmd_compile(args: argparse.Namespace) -> int:
         ),
         field_name="plan_out",
     )
-    if plan_out_override is not None:
-        plan_path = plan_out_override.expanduser().resolve()
-    else:
-        plan_path = (job_dir / "replay-plan.json").resolve()
 
-    existing_plan_payload: dict[str, Any] | None = None
-    if plan_path.exists():
-        if not plan_path.is_file():
-            raise ValueError(f"Invalid replay plan path (not a file): {plan_path}")
-        with suppress(Exception):
-            loaded_payload = read_json(plan_path)
-            if isinstance(loaded_payload, dict):
-                existing_plan_payload = loaded_payload
-    if existing_plan_payload is not None and is_replay_plan_compile_version_current(
-        existing_plan_payload
-    ):
-        launch_policy_payload = existing_plan_payload.get("launch_policy")
-        launch_strategy = (
-            launch_policy_payload.get("strategy")
-            if isinstance(launch_policy_payload, dict)
-            else None
-        )
-        worker_count, request_count = count_plan_workers_and_requests(existing_plan_payload)
-        summary = {
-            "status": "ok",
-            "backend": existing_plan_payload.get("backend"),
-            "plan_path": str(plan_path),
-            "launch_strategy": launch_strategy,
-            "worker_count": worker_count,
-            "request_count": request_count,
+    if job_root_value is not None:
+        if job_dir_value is not None:
+            raise ValueError("--job-root cannot be combined with --job-dir")
+        if plan_out_override is not None:
+            raise ValueError("--job-root cannot be combined with --plan-out")
+        job_root = job_root_value.expanduser().resolve()
+        if not job_root.exists() or not job_root.is_dir():
+            raise ValueError(f"Invalid --job-root: {job_root}")
+        discovered_job_dirs = discover_profiled_job_dirs(job_root)
+        if not discovered_job_dirs:
+            raise ValueError(
+                "No profiled job directories found under --job-root: "
+                f"{job_root}"
+            )
+
+        max_workers = _job_root_default_max_workers(len(discovered_job_dirs))
+        job_summaries: list[dict[str, Any]] = []
+        failed_count = 0
+        succeeded_count = 0
+        show_plain_progress = RichProgress is None
+        with create_batch_compile_progress() as progress:
+            task_id = progress.add_task(
+                "compiling jobs under root",
+                total=len(discovered_job_dirs),
+                succeeded=succeeded_count,
+                failed=failed_count,
+            )
+            future_to_job_dir: dict[Future[dict[str, Any]], Path] = {}
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                for discovered_job_dir in discovered_job_dirs:
+                    future = executor.submit(
+                        _run_job_root_child_compile,
+                        job_dir=discovered_job_dir,
+                        port_profile_id=compile_port_profile_id,
+                        request_timeout_s=request_timeout_s_override,
+                        split_two_group_plans=split_two_group_plans,
+                        split_two_group_metric=split_two_group_metric,
+                        exclude_unranked_trails=exclude_unranked_trails,
+                    )
+                    future_to_job_dir[future] = discovered_job_dir
+
+                for future in as_completed(future_to_job_dir):
+                    discovered_job_dir = future_to_job_dir[future]
+                    try:
+                        job_summary = future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        job_summary = {
+                            "job_dir": str(discovered_job_dir),
+                            "status": "failed",
+                            "error": str(exc),
+                        }
+                    if job_summary.get("status") == "ok":
+                        succeeded_count += 1
+                    else:
+                        failed_count += 1
+                    job_summaries.append(job_summary)
+                    progress.update(
+                        task_id,
+                        advance=1,
+                        succeeded=succeeded_count,
+                        failed=failed_count,
+                    )
+                    if show_plain_progress:
+                        completed = succeeded_count + failed_count
+                        print(
+                            (
+                                f"[compile {completed}/{len(discovered_job_dirs)}] "
+                                f"ok={succeeded_count} failed={failed_count} "
+                                f"job={job_summary.get('job_dir')}"
+                            ),
+                            file=sys.stderr,
+                        )
+
+        job_summaries.sort(key=lambda item: str(item.get("job_dir", "")))
+
+        summary: dict[str, Any] = {
+            "status": "ok" if failed_count == 0 else "failed",
+            "mode": "job_root",
+            "job_root": str(job_root),
+            "job_count_total": len(discovered_job_dirs),
+            "job_count_succeeded": succeeded_count,
+            "job_count_failed": failed_count,
+            "parallel_max_workers": max_workers,
             "port_profile_id": compile_port_profile_id,
-            "compile_version": REPLAY_PLAN_COMPILE_VERSION,
-            "reused_existing_plan": True,
+            "split_two_group_plans": split_two_group_plans,
+            "exclude_unranked_trails": exclude_unranked_trails,
+            "jobs": job_summaries,
         }
+        if split_two_group_plans:
+            summary["split_two_group_metric"] = split_two_group_metric
         if config_file_path is not None:
             summary["source_config"] = str(config_file_path.expanduser().resolve())
         print(json.dumps(summary, indent=2, ensure_ascii=True))
-        return 0
+        return 0 if failed_count == 0 else 2
+
+    job_dir = resolve_required_option(
+        job_dir_value,
+        option_name="--job-dir",
+        config_key="job_dir",
+    ).expanduser().resolve()
+    if not job_dir.exists() or not job_dir.is_dir():
+        raise ValueError(f"Invalid --job-dir: {job_dir}")
+
+    if plan_out_override is not None:
+        plan_path = plan_out_override.expanduser().resolve()
+    else:
+        default_plan_path = (job_dir / "replay-plan.json").resolve()
+        if exclude_unranked_trails:
+            plan_path = with_plan_name_suffix(
+                default_plan_path,
+                "exclude-unranked",
+            )
+        else:
+            plan_path = default_plan_path
+
+    split_two_group_top_path, split_two_group_rest_path = split_two_group_plan_paths(
+        plan_path=plan_path,
+        metric=split_two_group_metric,
+    )
+
+    existing_plan_payload: dict[str, Any] | None = None
+    if not split_two_group_plans:
+        if plan_path.exists():
+            if not plan_path.is_file():
+                raise ValueError(f"Invalid replay plan path (not a file): {plan_path}")
+            with suppress(Exception):
+                loaded_payload = read_json(plan_path)
+                if isinstance(loaded_payload, dict):
+                    existing_plan_payload = loaded_payload
+        existing_exclude_unranked = False
+        if existing_plan_payload is not None:
+            existing_compile_options = existing_plan_payload.get("compile_options")
+            if isinstance(existing_compile_options, dict):
+                existing_exclude_unranked = bool(
+                    existing_compile_options.get("exclude_unranked_trails")
+                )
+        if (
+            existing_plan_payload is not None
+            and is_replay_plan_compile_version_current(existing_plan_payload)
+            and existing_exclude_unranked == exclude_unranked_trails
+        ):
+            launch_policy_payload = existing_plan_payload.get("launch_policy")
+            launch_strategy = (
+                launch_policy_payload.get("strategy")
+                if isinstance(launch_policy_payload, dict)
+                else None
+            )
+            worker_count, request_count = count_plan_workers_and_requests(existing_plan_payload)
+            summary = {
+                "status": "ok",
+                "backend": existing_plan_payload.get("backend"),
+                "plan_path": str(plan_path),
+                "launch_strategy": launch_strategy,
+                "worker_count": worker_count,
+                "request_count": request_count,
+                "port_profile_id": compile_port_profile_id,
+                "compile_version": REPLAY_PLAN_COMPILE_VERSION,
+                "reused_existing_plan": True,
+                "exclude_unranked_trails": exclude_unranked_trails,
+            }
+            if config_file_path is not None:
+                summary["source_config"] = str(config_file_path.expanduser().resolve())
+            print(json.dumps(summary, indent=2, ensure_ascii=True))
+            return 0
+    else:
+        existing_top_plan: dict[str, Any] | None = None
+        existing_rest_plan: dict[str, Any] | None = None
+        if split_two_group_top_path.exists():
+            if not split_two_group_top_path.is_file():
+                raise ValueError(
+                    "Invalid replay plan path (not a file): "
+                    f"{split_two_group_top_path}"
+                )
+            with suppress(Exception):
+                loaded_top_payload = read_json(split_two_group_top_path)
+                if isinstance(loaded_top_payload, dict):
+                    existing_top_plan = loaded_top_payload
+        if split_two_group_rest_path.exists():
+            if not split_two_group_rest_path.is_file():
+                raise ValueError(
+                    "Invalid replay plan path (not a file): "
+                    f"{split_two_group_rest_path}"
+                )
+            with suppress(Exception):
+                loaded_rest_payload = read_json(split_two_group_rest_path)
+                if isinstance(loaded_rest_payload, dict):
+                    existing_rest_plan = loaded_rest_payload
+
+        if (
+            existing_top_plan is not None
+            and existing_rest_plan is not None
+            and is_replay_plan_compile_version_current(existing_top_plan)
+            and is_replay_plan_compile_version_current(existing_rest_plan)
+            and split_plan_matches_requested_metric(
+                plan_payload=existing_top_plan,
+                metric=split_two_group_metric,
+                group="top",
+            )
+            and split_plan_matches_requested_metric(
+                plan_payload=existing_rest_plan,
+                metric=split_two_group_metric,
+                group="rest",
+            )
+        ):
+            top_launch_policy = existing_top_plan.get("launch_policy")
+            top_launch_strategy = (
+                top_launch_policy.get("strategy")
+                if isinstance(top_launch_policy, dict)
+                else None
+            )
+            top_worker_count, top_request_count = count_plan_workers_and_requests(
+                existing_top_plan
+            )
+            rest_worker_count, rest_request_count = count_plan_workers_and_requests(
+                existing_rest_plan
+            )
+            summary = {
+                "status": "ok",
+                "backend": existing_top_plan.get("backend"),
+                "plan_paths": {
+                    "top": str(split_two_group_top_path),
+                    "rest": str(split_two_group_rest_path),
+                },
+                "launch_strategy": top_launch_strategy,
+                "worker_count_top": top_worker_count,
+                "request_count_top": top_request_count,
+                "worker_count_rest": rest_worker_count,
+                "request_count_rest": rest_request_count,
+                "port_profile_id": compile_port_profile_id,
+                "compile_version": REPLAY_PLAN_COMPILE_VERSION,
+                "reused_existing_plan": True,
+                "split_two_group_plans": True,
+                "split_two_group_metric": split_two_group_metric,
+            }
+            if config_file_path is not None:
+                summary["source_config"] = str(config_file_path.expanduser().resolve())
+            print(json.dumps(summary, indent=2, ensure_ascii=True))
+            return 0
 
     config_path = job_dir / "meta" / "config.toml"
     run_manifest_path = job_dir / "meta" / "run_manifest.json"
@@ -1286,6 +1960,37 @@ def cmd_compile(args: argparse.Namespace) -> int:
         else DEFAULT_COMPILE_TOKENIZE_TIMEOUT_S
     )
     launch_policy = build_launch_policy_from_config(config)
+
+    split_two_group_source_path: Path | None = None
+    split_two_group_unranked_source_path: Path | None = None
+    top_group_trail_names: set[str] = set()
+    rest_group_trail_names: set[str] = set()
+    unranked_trail_names: set[str] = set()
+    split_two_group_source_payload: dict[str, Any] | None = None
+    if split_two_group_plans:
+        split_two_group_source_path = resolve_split_two_group_file_path(
+            job_dir=job_dir,
+            metric=split_two_group_metric,
+        )
+        (
+            top_group_trail_names,
+            rest_group_trail_names,
+            split_two_group_source_payload,
+        ) = load_split_two_group_trail_names(split_two_group_source_path)
+        split_two_group_unranked_source_path = resolve_split_summary_file_path(
+            split_two_group_source_path
+        )
+        unranked_trail_names = load_split_unranked_trail_names(split_two_group_source_path)
+        if not top_group_trail_names:
+            raise ValueError(
+                "Split two-group payload has no top-group trail names: "
+                f"{split_two_group_source_path}"
+            )
+        if not rest_group_trail_names:
+            raise ValueError(
+                "Split two-group payload has no rest-group trail names: "
+                f"{split_two_group_source_path}"
+            )
 
     t0_dt, t0_source = resolve_t0(run_manifest, events_records)
     t0_iso = to_iso8601_utc(t0_dt)
@@ -1318,8 +2023,10 @@ def cmd_compile(args: argparse.Namespace) -> int:
             "Expected either gateway-output/run_* or gateway-output/profile-*/run_*."
         )
 
-    run_infos: list[tuple[Path, dict[str, Any], int, int | None]] = []
+    run_infos: list[tuple[Path, dict[str, Any], int, int | None, str]] = []
     total_requests = 0
+    exclude_unranked_source_path: Path | None = None
+    excluded_unranked_trails: list[str] = []
     for run_dir, source_port_profile_id in discovered_run_dirs:
         manifest_path = run_dir / "manifest.json"
         require_file(manifest_path)
@@ -1330,8 +2037,53 @@ def cmd_compile(args: argparse.Namespace) -> int:
         request_count = 0
         if isinstance(request_count_raw, int) and not isinstance(request_count_raw, bool):
             request_count = max(0, request_count_raw)
-        run_infos.append((run_dir, run_manifest_payload, request_count, source_port_profile_id))
+        source_trail_name = build_gateway_trail_name(
+            run_dir=run_dir,
+            source_port_profile_id=source_port_profile_id,
+        )
+        run_infos.append(
+            (
+                run_dir,
+                run_manifest_payload,
+                request_count,
+                source_port_profile_id,
+                source_trail_name,
+            )
+        )
         total_requests += request_count
+
+    if exclude_unranked_trails:
+        split_payload_probe_path = resolve_split_two_group_file_path(
+            job_dir=job_dir,
+            metric=DEFAULT_SPLIT_TWO_GROUP_METRIC,
+        )
+        exclude_unranked_source_path = resolve_split_summary_file_path(
+            split_payload_probe_path
+        )
+        if not exclude_unranked_source_path.is_file():
+            raise ValueError(
+                "--exclude-unranked-trails requires split summary file: "
+                f"{exclude_unranked_source_path}"
+            )
+        compile_unranked_trail_names = load_split_unranked_trail_names(
+            split_payload_probe_path
+        )
+        filtered_run_infos: list[tuple[Path, dict[str, Any], int, int | None, str]] = []
+        for run_info in run_infos:
+            source_trail_name = run_info[4]
+            if source_trail_name in compile_unranked_trail_names:
+                excluded_unranked_trails.append(source_trail_name)
+                continue
+            filtered_run_infos.append(run_info)
+        run_infos = filtered_run_infos
+        excluded_unranked_trails = sorted(set(excluded_unranked_trails))
+        total_requests = sum(run_info[2] for run_info in run_infos)
+        if excluded_unranked_trails:
+            print(
+                "[compile] note: excluding trails listed in unranked_trails "
+                f"({len(excluded_unranked_trails)}): {exclude_unranked_source_path}",
+                file=sys.stderr,
+            )
 
     worker_plans: list[dict[str, Any]] = []
     compile_progress_state = {
@@ -1361,7 +2113,13 @@ def cmd_compile(args: argparse.Namespace) -> int:
                 workers_total=compile_progress_state["workers_total"],
             )
 
-        for run_dir, run_manifest_payload, expected_request_count, _source_port_profile_id in run_infos:
+        for (
+            run_dir,
+            run_manifest_payload,
+            expected_request_count,
+            source_port_profile_id,
+            source_trail_name,
+        ) in run_infos:
             manifest_path = run_dir / "manifest.json"
             lifecycle_path = run_dir / "events" / "lifecycle.jsonl"
             requests_path = run_dir / "requests" / "model_inference.jsonl"
@@ -1463,6 +2221,9 @@ def cmd_compile(args: argparse.Namespace) -> int:
                     "run_offset_s": run_offset_s,
                     "delta_agent_start_s": delta_agent_start_s,
                     "delta_first_request_s": delta_first_request_s,
+                    "source_gateway_run_id": run_dir.name,
+                    "source_gateway_profile_id": source_port_profile_id,
+                    "source_trail_name": source_trail_name,
                     "requests": planned_requests,
                 }
             )
@@ -1473,34 +2234,193 @@ def cmd_compile(args: argparse.Namespace) -> int:
     for launch_priority, worker in enumerate(worker_plans):
         worker["launch_priority"] = launch_priority
 
-    plan_payload = {
-        "schema_version": REPLAY_PLAN_SCHEMA_VERSION,
-        "compile_version": REPLAY_PLAN_COMPILE_VERSION,
-        "compiled_at": now_iso8601_utc(),
-        "source_job_dir": str(job_dir),
-        "backend": backend_name,
-        "t0": t0_iso,
-        "t0_source": t0_source,
-        "replay_target": {
-            "model": configured_model,
-            "deterministic_required": True,
-        },
-        "launch_policy": launch_policy,
-        "workers": worker_plans,
+    compiled_at = now_iso8601_utc()
+
+    def _build_plan_payload_for_workers(
+        workers_payload: list[dict[str, Any]],
+        *,
+        split_group: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "schema_version": REPLAY_PLAN_SCHEMA_VERSION,
+            "compile_version": REPLAY_PLAN_COMPILE_VERSION,
+            "compiled_at": compiled_at,
+            "source_job_dir": str(job_dir),
+            "backend": backend_name,
+            "t0": t0_iso,
+            "t0_source": t0_source,
+            "replay_target": {
+                "model": configured_model,
+                "deterministic_required": True,
+            },
+            "launch_policy": launch_policy,
+            "workers": workers_payload,
+            "compile_options": {
+                "exclude_unranked_trails": exclude_unranked_trails,
+            },
+        }
+        if exclude_unranked_trails:
+            payload["compile_options"]["exclude_unranked_source_path"] = (
+                str(exclude_unranked_source_path)
+                if exclude_unranked_source_path is not None
+                else None
+            )
+            payload["compile_options"]["excluded_unranked_trails_count"] = len(
+                excluded_unranked_trails
+            )
+        if split_two_group_plans:
+            payload["split_two_group"] = {
+                "enabled": True,
+                "metric": split_two_group_metric,
+                "source_path": (
+                    str(split_two_group_source_path)
+                    if split_two_group_source_path is not None
+                    else None
+                ),
+                "source_selected_p": (
+                    split_two_group_source_payload.get("selection", {}).get("selected_p")
+                    if isinstance(split_two_group_source_payload, dict)
+                    else None
+                ),
+                "group": split_group,
+            }
+        return payload
+
+    if not split_two_group_plans:
+        plan_payload = _build_plan_payload_for_workers(worker_plans)
+        write_json(plan_path, plan_payload)
+
+        summary = {
+            "status": "ok",
+            "backend": backend_name,
+            "plan_path": str(plan_path),
+            "launch_strategy": launch_policy.get("strategy"),
+            "worker_count": len(worker_plans),
+            "request_count": sum(len(worker["requests"]) for worker in worker_plans),
+            "port_profile_id": compile_port_profile_id,
+            "compile_version": REPLAY_PLAN_COMPILE_VERSION,
+            "reused_existing_plan": False,
+            "exclude_unranked_trails": exclude_unranked_trails,
+        }
+        if exclude_unranked_trails:
+            summary["exclude_unranked_source_path"] = (
+                str(exclude_unranked_source_path)
+                if exclude_unranked_source_path is not None
+                else None
+            )
+            summary["excluded_unranked_trails_count"] = len(excluded_unranked_trails)
+            summary["excluded_unranked_trails"] = excluded_unranked_trails
+        if config_file_path is not None:
+            summary["source_config"] = str(config_file_path.expanduser().resolve())
+        print(json.dumps(summary, indent=2, ensure_ascii=True))
+        return 0
+
+    all_compiled_trail_names = {
+        str(worker.get("source_trail_name") or "")
+        for worker in worker_plans
+        if isinstance(worker.get("source_trail_name"), str)
     }
-    write_json(plan_path, plan_payload)
+    unmatched_trails = sorted(
+        trail_name
+        for trail_name in all_compiled_trail_names
+        if trail_name not in top_group_trail_names and trail_name not in rest_group_trail_names
+    )
+    ignored_unranked_unmatched_trails: list[str] = []
+    if unmatched_trails:
+        unmatched_not_unranked = sorted(
+            trail_name
+            for trail_name in unmatched_trails
+            if trail_name not in unranked_trail_names
+        )
+        if unmatched_not_unranked:
+            raise ValueError(
+                "Split two-group payload does not partition all compiled trails. "
+                f"Unmatched trails: {unmatched_not_unranked}"
+            )
+        ignored_unranked_unmatched_trails = list(unmatched_trails)
+        note_path = (
+            str(split_two_group_unranked_source_path)
+            if split_two_group_unranked_source_path is not None
+            else "split summary"
+        )
+        print(
+            "[compile] split two-group note: ignoring unmatched trails because they are "
+            f"listed in unranked_trails ({len(ignored_unranked_unmatched_trails)}): {note_path}",
+            file=sys.stderr,
+        )
+    missing_from_compiled = sorted(
+        trail_name
+        for trail_name in top_group_trail_names.union(rest_group_trail_names)
+        if trail_name not in all_compiled_trail_names
+    )
+    if missing_from_compiled:
+        raise ValueError(
+            "Split two-group payload references trails that are not present in compiled artifacts. "
+            f"Missing trails: {missing_from_compiled}"
+        )
+
+    top_group_workers = [
+        worker for worker in worker_plans if worker.get("source_trail_name") in top_group_trail_names
+    ]
+    rest_group_workers = [
+        worker for worker in worker_plans if worker.get("source_trail_name") in rest_group_trail_names
+    ]
+    if not top_group_workers:
+        raise ValueError("Split two-group top plan would be empty")
+    if not rest_group_workers:
+        raise ValueError("Split two-group rest plan would be empty")
+
+    top_group_workers = clone_workers_with_reindexed_launch_priority(top_group_workers)
+    rest_group_workers = clone_workers_with_reindexed_launch_priority(rest_group_workers)
+
+    top_plan_payload = _build_plan_payload_for_workers(
+        top_group_workers,
+        split_group="top",
+    )
+    rest_plan_payload = _build_plan_payload_for_workers(
+        rest_group_workers,
+        split_group="rest",
+    )
+    write_json(split_two_group_top_path, top_plan_payload)
+    write_json(split_two_group_rest_path, rest_plan_payload)
 
     summary = {
         "status": "ok",
         "backend": backend_name,
-        "plan_path": str(plan_path),
+        "plan_paths": {
+            "top": str(split_two_group_top_path),
+            "rest": str(split_two_group_rest_path),
+        },
         "launch_strategy": launch_policy.get("strategy"),
-        "worker_count": len(worker_plans),
-        "request_count": sum(len(worker["requests"]) for worker in worker_plans),
+        "worker_count_top": len(top_group_workers),
+        "request_count_top": sum(len(worker["requests"]) for worker in top_group_workers),
+        "worker_count_rest": len(rest_group_workers),
+        "request_count_rest": sum(len(worker["requests"]) for worker in rest_group_workers),
         "port_profile_id": compile_port_profile_id,
         "compile_version": REPLAY_PLAN_COMPILE_VERSION,
         "reused_existing_plan": False,
+        "split_two_group_plans": True,
+        "split_two_group_metric": split_two_group_metric,
+        "split_two_group_source_path": (
+            str(split_two_group_source_path) if split_two_group_source_path is not None else None
+        ),
     }
+    if ignored_unranked_unmatched_trails:
+        summary["split_two_group_note"] = (
+            "ignored unmatched compiled trails that were listed in split summary "
+            "unranked_trails"
+        )
+        summary["split_two_group_ignored_unranked_trails_count"] = len(
+            ignored_unranked_unmatched_trails
+        )
+        summary["split_two_group_ignored_unranked_trails"] = (
+            ignored_unranked_unmatched_trails
+        )
+        summary["split_two_group_unranked_source_path"] = (
+            str(split_two_group_unranked_source_path)
+            if split_two_group_unranked_source_path is not None
+            else None
+        )
     if config_file_path is not None:
         summary["source_config"] = str(config_file_path.expanduser().resolve())
     print(json.dumps(summary, indent=2, ensure_ascii=True))
@@ -2148,6 +3068,11 @@ def cmd_replay(args: argparse.Namespace) -> int:
         interval_s=vllm_log_interval_s,
         timeout_s=vllm_log_timeout_s,
     )
+    lmcache_log_config = resolve_replay_lmcache_log_config(
+        port_profile_id=resolved_port_profile_id_int,
+        interval_s=vllm_log_interval_s,
+        timeout_s=vllm_log_timeout_s,
+    )
 
     stop_event = threading.Event()
     lock = threading.Lock()
@@ -2188,6 +3113,15 @@ def cmd_replay(args: argparse.Namespace) -> int:
         "vllm_log_interval_s": vllm_log_config.interval_s,
         "vllm_log_timeout_s": vllm_log_config.timeout_s,
         "vllm_log_dir": str(output_dir / "vllm-log") if vllm_log_config.enabled else None,
+        "lmcache_log_configured": lmcache_log_config.configured,
+        "lmcache_log_enabled": False,
+        "lmcache_log_endpoint": lmcache_log_config.endpoint,
+        "lmcache_log_interval_s": lmcache_log_config.interval_s,
+        "lmcache_log_timeout_s": lmcache_log_config.timeout_s,
+        "lmcache_log_probe_timeout_s": lmcache_log_config.probe_timeout_s,
+        "lmcache_log_probe_success": None,
+        "lmcache_log_probe_error": None,
+        "lmcache_log_dir": None,
         "workers_total": len(scheduled_workers),
         "workers_completed": 0,
         "workers_failed": 0,
@@ -2246,6 +3180,23 @@ def cmd_replay(args: argparse.Namespace) -> int:
         monitor = start_replay_vllm_monitor(output_dir=output_dir, config=vllm_log_config)
         summary["vllm_log_stdout"] = str(monitor.stdout_log)
         summary["vllm_log_stderr"] = str(monitor.stderr_log)
+    lmcache_monitor: ReplayVLLMMonitorProcess | None = None
+    if lmcache_log_config.configured and lmcache_log_config.endpoint is not None:
+        probe_success, probe_error = probe_metrics_endpoint(
+            endpoint=lmcache_log_config.endpoint,
+            timeout_s=lmcache_log_config.probe_timeout_s,
+        )
+        summary["lmcache_log_probe_success"] = probe_success
+        summary["lmcache_log_probe_error"] = probe_error
+        if probe_success:
+            lmcache_monitor = start_replay_lmcache_monitor(
+                output_dir=output_dir,
+                config=lmcache_log_config,
+            )
+            summary["lmcache_log_enabled"] = True
+            summary["lmcache_log_dir"] = str(output_dir / "lmcache-log")
+            summary["lmcache_log_stdout"] = str(lmcache_monitor.stdout_log)
+            summary["lmcache_log_stderr"] = str(lmcache_monitor.stderr_log)
 
     def worker_fn(worker: dict[str, Any]) -> None:
         worker_id = str(worker.get("worker_id") or worker.get("trial_id") or "worker")
@@ -2851,6 +3802,10 @@ def cmd_replay(args: argparse.Namespace) -> int:
     finally:
         if monitor is not None:
             summary["vllm_log_monitor_return_code"] = stop_replay_vllm_monitor(monitor)
+        if lmcache_monitor is not None:
+            summary["lmcache_log_monitor_return_code"] = stop_replay_vllm_monitor(
+                lmcache_monitor
+            )
         summary["finished_at"] = now_iso8601_utc()
         summary["worker_results"] = worker_results
         write_json(summary_path, summary)
@@ -2885,7 +3840,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     compile_parser = subparsers.add_parser(
         "compile",
-        help="Compile a profiled job directory into replay-plan.json",
+        help="Compile one profiled job dir or all jobs under a root into replay plans",
     )
     compile_parser.add_argument(
         "--config",
@@ -2901,9 +3856,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to profiled con-driver job directory.",
     )
     compile_parser.add_argument(
+        "--job-root",
+        default=None,
+        help=(
+            "Path root to recursively discover and compile all profiled job directories. "
+            "Cannot be combined with --job-dir or --plan-out."
+        ),
+    )
+    compile_parser.add_argument(
         "--plan-out",
         default=None,
-        help="Output path for replay plan. Default: <job-dir>/replay-plan.json",
+        help=(
+            "Output path for replay plan. Default: <job-dir>/replay-plan.json "
+            "(or <job-dir>/replay-plan.exclude-unranked.json when "
+            "--exclude-unranked-trails is set)."
+        ),
     )
     compile_parser.add_argument(
         "--port-profile-id",
@@ -2921,6 +3888,35 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Optional HTTP timeout seconds for compile-time tokenizer requests. "
             f"Default: {DEFAULT_COMPILE_TOKENIZE_TIMEOUT_S:.0f}s."
+        ),
+    )
+    compile_parser.add_argument(
+        "--split-two-group-plans",
+        action="store_true",
+        default=None,
+        help=(
+            "When set, compile writes two plans instead of one: "
+            "<plan>.<metric>.top.<ext> and <plan>.<metric>.rest.<ext>, based on "
+            "<job-dir>/original-analysis/split top/rest grouping."
+        ),
+    )
+    compile_parser.add_argument(
+        "--split-two-group-metric",
+        choices=sorted(SPLIT_TWO_GROUP_METRICS),
+        default=None,
+        help=(
+            "Grouping metric used with --split-two-group-plans. "
+            f"Default: {DEFAULT_SPLIT_TWO_GROUP_METRIC}."
+        ),
+    )
+    compile_parser.add_argument(
+        "--exclude-unranked-trails",
+        action="store_true",
+        default=None,
+        help=(
+            "Non-split mode only. Exclude trails listed under "
+            "<job-dir>/original-analysis/split/top-p-usage-ratio-summary.json "
+            "unranked_trails."
         ),
     )
     compile_parser.set_defaults(func=cmd_compile)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ProcessPoolExecutor
+import csv
 import json
 import math
 import os
@@ -13,6 +14,10 @@ from typing import Iterable
 
 
 DEFAULT_OUTPUT_NAME = "top-p-usage-ratio-summary.json"
+TOKEN_TWO_GROUP_OUTPUT_NAME = "top-p-token-usage-two-groups.json"
+CONTEXT_TWO_GROUP_OUTPUT_NAME = "top-p-context-usage-two-groups.json"
+ROOT_TOKEN_TABLE_NAME = "split-top-p-token-usage-two-group-table.csv"
+ROOT_CONTEXT_TABLE_NAME = "split-top-p-context-usage-two-group-table.csv"
 DEFAULT_P_MIN = 1
 DEFAULT_P_MAX = 99
 
@@ -292,6 +297,100 @@ def _build_percentile_rows(
     )
 
 
+def _trail_name(trail: dict[str, Any]) -> str:
+    gateway_run_id = str(trail.get("gateway_run_id") or "")
+    profile_id = trail.get("gateway_profile_id")
+    if isinstance(profile_id, int):
+        return f"profile-{profile_id}/{gateway_run_id}"
+    return gateway_run_id
+
+
+def _ratio_or_none(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _build_two_group_payload(
+    *,
+    ranked_trails: list[dict[str, Any]],
+    percentile_rows: list[dict[str, Any]],
+    ratio_field: str,
+    metric_name: str,
+) -> dict[str, Any]:
+    selected_row: dict[str, Any] | None = None
+    selection_reason = "fallback_first_percentile"
+
+    for row in percentile_rows:
+        ratio_value = _ratio_or_none(row.get(ratio_field))
+        if ratio_value is not None and ratio_value > 1.0:
+            selected_row = row
+            selection_reason = "first_ratio_gt_1"
+            break
+
+    if selected_row is None:
+        for row in percentile_rows:
+            ratio_value = _ratio_or_none(row.get(ratio_field))
+            if ratio_value is not None and ratio_value >= 1.0:
+                selected_row = row
+                selection_reason = "first_ratio_ge_1"
+                break
+
+    if selected_row is None and percentile_rows:
+        selected_row = percentile_rows[0]
+
+    trail_count_ranked = len(ranked_trails)
+    if selected_row is None:
+        selected_p = DEFAULT_P_MIN
+        selected_top_count = 0
+        selected_rest_count = 0
+        selected_ratio = None
+    else:
+        selected_p = int(selected_row.get("p", DEFAULT_P_MIN))
+        selected_top_count = int(selected_row.get("top_trail_count", 0))
+        selected_rest_count = int(selected_row.get("rest_trail_count", 0))
+        selected_ratio = _ratio_or_none(selected_row.get(ratio_field))
+
+    selected_top_count = max(0, min(trail_count_ranked, selected_top_count))
+    selected_rest_count = max(0, min(trail_count_ranked, selected_rest_count))
+
+    top_group = ranked_trails[:selected_top_count]
+    rest_group = ranked_trails[selected_top_count:]
+    if trail_count_ranked > 0 and len(rest_group) != selected_rest_count:
+        selected_rest_count = len(rest_group)
+
+    def _percentage(count: int) -> float:
+        if trail_count_ranked <= 0:
+            return 0.0
+        return round((count * 100.0) / float(trail_count_ranked), 6)
+
+    return {
+        "metric": metric_name,
+        "ratio_field": ratio_field,
+        "selection": {
+            "criterion": "first_ratio_gt_1_then_ge_1_then_fallback_p1",
+            "selected_p": selected_p,
+            "selected_ratio": selected_ratio,
+            "selected_top_trial_count": len(top_group),
+            "selected_rest_trial_count": len(rest_group),
+            "selection_reason": selection_reason,
+        },
+        "trail_count_ranked": trail_count_ranked,
+        "group_top": {
+            "trial_count": len(top_group),
+            "trial_percentage": _percentage(len(top_group)),
+            "trail_names": [_trail_name(trail) for trail in top_group],
+        },
+        "group_rest": {
+            "trial_count": len(rest_group),
+            "trial_percentage": _percentage(len(rest_group)),
+            "trail_names": [_trail_name(trail) for trail in rest_group],
+        },
+    }
+
+
 def extract_split_from_run_dir(run_dir: Path) -> dict[str, Any]:
     resolved_run_dir = run_dir.expanduser().resolve()
     gateway_output_dir = resolved_run_dir / "gateway-output"
@@ -334,6 +433,19 @@ def extract_split_from_run_dir(run_dir: Path) -> dict[str, Any]:
         context_share_series,
     ) = _build_percentile_rows(ranked_trails)
 
+    token_two_group = _build_two_group_payload(
+        ranked_trails=ranked_trails,
+        percentile_rows=percentile_rows,
+        ratio_field="top_token_usage_ratio",
+        metric_name="token_usage",
+    )
+    context_two_group = _build_two_group_payload(
+        ranked_trails=ranked_trails,
+        percentile_rows=percentile_rows,
+        ratio_field="top_context_usage_ratio",
+        metric_name="context_usage",
+    )
+
     return {
         "source_run_dir": str(resolved_run_dir),
         "source_gateway_output_dir": str(gateway_output_dir.resolve()),
@@ -352,6 +464,10 @@ def extract_split_from_run_dir(run_dir: Path) -> dict[str, Any]:
         "by_percentile": percentile_rows,
         "ranked_trails": ranked_trails,
         "unranked_trails": unranked_trails,
+        "two_group_summaries": {
+            "token_usage": token_two_group,
+            "context_usage": context_two_group,
+        },
     }
 
 
@@ -362,9 +478,25 @@ def _default_output_path_for_run(run_dir: Path) -> Path:
 def extract_run_dir(run_dir: Path, *, output_path: Path | None = None) -> Path:
     resolved_output_path = (output_path or _default_output_path_for_run(run_dir)).expanduser().resolve()
     result = extract_split_from_run_dir(run_dir)
+    token_output_path = (resolved_output_path.parent / TOKEN_TWO_GROUP_OUTPUT_NAME).resolve()
+    context_output_path = (resolved_output_path.parent / CONTEXT_TWO_GROUP_OUTPUT_NAME).resolve()
+    result["additional_outputs"] = {
+        "token_usage_two_groups": str(token_output_path),
+        "context_usage_two_groups": str(context_output_path),
+    }
     resolved_output_path.parent.mkdir(parents=True, exist_ok=True)
     resolved_output_path.write_text(
         json.dumps(result, ensure_ascii=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    token_payload = result.get("two_group_summaries", {}).get("token_usage")
+    context_payload = result.get("two_group_summaries", {}).get("context_usage")
+    token_output_path.write_text(
+        json.dumps(token_payload, ensure_ascii=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    context_output_path.write_text(
+        json.dumps(context_payload, ensure_ascii=True, indent=2) + "\n",
         encoding="utf-8",
     )
     return resolved_output_path
@@ -404,6 +536,101 @@ def _run_root_dir_parallel(run_dirs: list[Path], *, max_procs: int) -> int:
                 failure_count += 1
                 print(f"[error] {run_dir_text}: {error_text}", file=sys.stderr)
     return failure_count
+
+
+def _build_two_group_table_row(
+    run_dir: Path,
+    *,
+    metric_key: str,
+) -> dict[str, str] | None:
+    summary_path = _default_output_path_for_run(run_dir)
+    if not summary_path.is_file():
+        print(f"[warn] Missing summary file for table row: {summary_path}", file=sys.stderr)
+        return None
+
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        print(f"[warn] Invalid summary payload (not object): {summary_path}", file=sys.stderr)
+        return None
+    two_group_summaries = payload.get("two_group_summaries")
+    if not isinstance(two_group_summaries, dict):
+        print(
+            f"[warn] Missing two_group_summaries in summary payload: {summary_path}",
+            file=sys.stderr,
+        )
+        return None
+    metric_payload = two_group_summaries.get(metric_key)
+    if not isinstance(metric_payload, dict):
+        print(
+            f"[warn] Missing two_group_summaries.{metric_key} in summary payload: {summary_path}",
+            file=sys.stderr,
+        )
+        return None
+
+    group_top = metric_payload.get("group_top")
+    group_rest = metric_payload.get("group_rest")
+    if not isinstance(group_top, dict) or not isinstance(group_rest, dict):
+        print(
+            f"[warn] Missing group_top/group_rest for {metric_key}: {summary_path}",
+            file=sys.stderr,
+        )
+        return None
+
+    return {
+        "run_path": str(run_dir.resolve()),
+        "group_top_trail_count": str(group_top.get("trial_count", "")),
+        "group_top_trail_percentage": str(group_top.get("trial_percentage", "")),
+        "group_rest_trail_count": str(group_rest.get("trial_count", "")),
+        "group_rest_trail_percentage": str(group_rest.get("trial_percentage", "")),
+    }
+
+
+def _write_root_two_group_table(
+    *,
+    root_dir: Path,
+    run_dirs: list[Path],
+    metric_key: str,
+    output_name: str,
+) -> Path:
+    rows: list[dict[str, str]] = []
+    for run_dir in run_dirs:
+        row = _build_two_group_table_row(run_dir, metric_key=metric_key)
+        if row is not None:
+            rows.append(row)
+
+    output_path = (root_dir / output_name).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "run_path",
+                "group_top_trail_count",
+                "group_top_trail_percentage",
+                "group_rest_trail_count",
+                "group_rest_trail_percentage",
+            ],
+        )
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+    return output_path
+
+
+def _write_root_two_group_tables(root_dir: Path, run_dirs: list[Path]) -> tuple[Path, Path]:
+    token_table_path = _write_root_two_group_table(
+        root_dir=root_dir,
+        run_dirs=run_dirs,
+        metric_key="token_usage",
+        output_name=ROOT_TOKEN_TABLE_NAME,
+    )
+    context_table_path = _write_root_two_group_table(
+        root_dir=root_dir,
+        run_dirs=run_dirs,
+        metric_key="context_usage",
+        output_name=ROOT_CONTEXT_TABLE_NAME,
+    )
+    return token_table_path, context_table_path
 
 
 def _main_run_dir(args: argparse.Namespace) -> int:
@@ -454,6 +681,10 @@ def _main_root_dir(args: argparse.Namespace) -> int:
             f"Completed with {failure_count} failure(s) out of {len(run_dirs)} run directories.",
             file=sys.stderr,
         )
+    token_table_path, context_table_path = _write_root_two_group_tables(root_dir, run_dirs)
+    print(f"Wrote token split table: {token_table_path}")
+    print(f"Wrote context split table: {context_table_path}")
+    if failure_count:
         return 1
     print(f"Completed extraction for {len(run_dirs)} run directories.")
     return 0

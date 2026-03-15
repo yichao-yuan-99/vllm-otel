@@ -23,8 +23,13 @@ except ImportError:  # pragma: no cover
 THIS_DIR = Path(__file__).resolve().parent
 if str(THIS_DIR) not in sys.path:
     sys.path.insert(0, str(THIS_DIR))
+MODULE_ROOT = THIS_DIR.parent
+if str(MODULE_ROOT) not in sys.path:
+    sys.path.insert(0, str(MODULE_ROOT))
 
 from common import count_metric_blocks_in_run_dir, extract_gauge_counter_timeseries_from_run_dir
+from pp_common.service_failure import cutoff_datetime_utc_from_payload
+from pp_common.service_failure import ensure_service_failure_payload
 
 
 DEFAULT_OUTPUT_NAME = "gauge-counter-timeseries.json"
@@ -140,6 +145,8 @@ def extract_run_dir(
     output_path: Path | None = None,
     show_progress: bool = True,
 ) -> Path:
+    service_failure_payload = ensure_service_failure_payload(run_dir)
+    cutoff_time_utc = cutoff_datetime_utc_from_payload(service_failure_payload)
     if show_progress:
         total_blocks = count_metric_blocks_in_run_dir(run_dir)
         with create_extract_progress() as progress:
@@ -153,12 +160,21 @@ def extract_run_dir(
 
             result = extract_gauge_counter_timeseries_from_run_dir(
                 run_dir,
+                cutoff_time_utc=cutoff_time_utc,
                 on_block_loaded=_on_block_loaded,
             )
             if total_blocks == 0:
                 progress.update(task_id, completed=1, total=1)
     else:
-        result = extract_gauge_counter_timeseries_from_run_dir(run_dir)
+        result = extract_gauge_counter_timeseries_from_run_dir(
+            run_dir,
+            cutoff_time_utc=cutoff_time_utc,
+        )
+
+    result["service_failure_detected"] = bool(
+        service_failure_payload.get("service_failure_detected", False)
+    )
+    result["service_failure_cutoff_time_utc"] = service_failure_payload.get("cutoff_time_utc")
 
     resolved_output_path = output_path or _default_output_path_for_run(run_dir)
     resolved_output_path = resolved_output_path.expanduser().resolve()

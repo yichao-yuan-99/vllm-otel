@@ -1,0 +1,10 @@
+connect_to 127.0.0.1 port 11451: failed.
+connect_to 127.0.0.1 port 11451: failed.
+connect_to 127.0.0.1 port 11451: failed.
+connect_to 127.0.0.1 port 11451: failed.
+connect_to 127.0.0.1 port 11451: failed.
+connect_to 127.0.0.1 port 11451: failed.
+connect_to 127.0.0.1 port 11451: failed.
+connect_to 127.0.0.1 port 11451: failed.
+connect_to 127.0.0.1 port 11451: failed.
+slurmstepd-k004-009: error: *** JOB 273621 ON k004-009 CANCELLED AT 2026-02-26T13:31:48 ***

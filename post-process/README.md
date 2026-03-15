@@ -8,9 +8,11 @@ outputs.
 - `global`: run-level timing extraction and cross-run CSV aggregation
 - `global-progress`: run-level replay completion milestone timing
 - `job-throughput`: moving replay/job throughput over time for each run
+- `job-concurrency`: per-second active job concurrency over time for each run
 - `split/duration`: context-usage percentile split tables for per-job duration/turn/token metrics
 - `vllm-metrics`: parse/extract/summarize vLLM Prometheus metrics
 - `gateway/llm-requests`: flatten and summarize gateway LLM request traces
+- `gateway/stack`: recover stacked per-second gateway token throughput from request ranges
 - `gateway/usage`: aggregate gateway token usage per run and per agent
 
 ## Quick Navigation
@@ -18,11 +20,15 @@ outputs.
 - `post-process/global/README.md`
 - `post-process/global-progress/README.md`
 - `post-process/job-throughput/README.md`
+- `post-process/job-concurrency/README.md`
 - `post-process/visualization/job-throughput/README.md`
+- `post-process/visualization/job-concurrency/README.md`
 - `post-process/split/duration/README.md`
 - `post-process/vllm-metrics/README.md`
 - `post-process/gateway/llm-requests/README.md`
+- `post-process/gateway/stack/README.md`
 - `post-process/gateway/usage/README.md`
+- `post-process/visualization/gateway-stack/README.md`
 - `post-process/visualization/vllm-metrics/README.md`
 
 ## Script Index
@@ -48,14 +54,18 @@ Pipeline order:
 1. `global/extract_run.py`
 2. `global-progress/extract_run.py`
 3. `job-throughput/extract_run.py`
-4. `gateway/llm-requests/extract_run.py`
-5. `gateway/usage/extract_run.py`
-6. `split/duration/extract_run.py`
-7. `vllm-metrics/extract_run.py`
-8. `vllm-metrics/summarize_timeseries.py`
-9. `visualization/job-throughput/generate_all_figures.py`
-10. `visualization/vllm-metrics/generate_all_figures.py`
-11. `global/aggregate_runs_csv.py` (root-dir mode only, skipped in dry-run)
+4. `job-concurrency/extract_run.py`
+5. `gateway/llm-requests/extract_run.py`
+6. `gateway/stack/extract_run.py`
+7. `gateway/usage/extract_run.py`
+8. `split/duration/extract_run.py`
+9. `vllm-metrics/extract_run.py`
+10. `vllm-metrics/summarize_timeseries.py`
+11. `visualization/job-throughput/generate_all_figures.py`
+12. `visualization/job-concurrency/generate_all_figures.py`
+13. `visualization/gateway-stack/generate_all_figures.py`
+14. `visualization/vllm-metrics/generate_all_figures.py`
+15. `global/aggregate_runs_csv.py` (root-dir mode only, skipped in dry-run)
 
 ### `global-progress`
 
@@ -95,6 +105,31 @@ Pipeline order:
 - `--window-size-s`
 - default output:
 - `<run-dir>/post-processed/job-throughput/job-throughput-timeseries.json`
+
+### `job-concurrency`
+
+- `post-process/job-concurrency/extract_run.py`
+- purpose: compute per-second active job concurrency from trial start/end ranges
+- supports:
+- single run: `--run-dir <run-dir>`
+- batch discovery: `--root-dir <root-dir>`
+- parallel workers: `--max-procs`
+- dry-run: `--dry-run`
+- default output:
+- `<run-dir>/post-processed/job-concurrency/job-concurrency-timeseries.json`
+
+- `post-process/visualization/job-concurrency/generate_all_figures.py`
+- purpose: render one concurrency line chart per run from extracted job-concurrency timeseries
+- supports:
+- single run: `--run-dir <run-dir>`
+- batch discovery: `--root-dir <root-dir>`
+- parallel workers: `--max-procs`
+- dry-run: `--dry-run`
+- rendering controls:
+- `--format`
+- `--dpi`
+- default output:
+- `<run-dir>/post-processed/visualization/job-concurrency/`
 
 - `post-process/visualization/job-throughput/generate_all_figures.py`
 - purpose: render one throughput line chart per run from extracted job-throughput timeseries
@@ -206,6 +241,43 @@ Pipeline order:
 - `llm-requests-longest-10.json`
 - `llm-requests-shortest-10.json`
 - `llm-requests-stats.<status_code>.json`
+
+### `gateway/stack`
+
+- `post-process/gateway/stack/extract_run.py`
+- purpose: recover per-request token ranges and stacked per-second throughput from `llm-requests.json`
+- supports:
+- single run: `--run-dir <run-dir>`
+- batch discovery: `--root-dir <root-dir>`
+- parallel workers: `--max-procs`
+- dry-run: `--dry-run`
+- optional input override: `--llm-requests <path>` (run-dir mode only)
+- default output directory:
+- `<run-dir>/post-processed/gateway/stack/`
+- primary outputs:
+- `prompt-tokens-ranges.json`
+- `cached-tokens-ranges.json`
+- `compute-prompt-tokens-ranges.json`
+- `completion-tokens-ranges.json`
+- `compute-prompt-plus-completion-tokens-ranges.json`
+- `prompt-tokens-stacked-histogram.json`
+- `cached-tokens-stacked-histogram.json`
+- `compute-prompt-tokens-stacked-histogram.json`
+- `completion-tokens-stacked-histogram.json`
+- `compute-prompt-plus-completion-tokens-stacked-histogram.json`
+
+- `post-process/visualization/gateway-stack/generate_all_figures.py`
+- purpose: render raw + smoothed stacked-throughput line charts for the 5 gateway stack metrics
+- supports:
+- single run: `--run-dir <run-dir>`
+- batch discovery: `--root-dir <root-dir>`
+- parallel workers: `--max-procs`
+- dry-run: `--dry-run`
+- rendering controls:
+- `--format`
+- `--dpi`
+- default output:
+- `<run-dir>/post-processed/visualization/gateway-stack/`
 
 ### `gateway/usage`
 

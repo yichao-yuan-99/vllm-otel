@@ -26,6 +26,13 @@ except ImportError:  # pragma: no cover
 THIS_DIR = Path(__file__).resolve().parent
 if str(THIS_DIR) not in sys.path:
     sys.path.insert(0, str(THIS_DIR))
+MODULE_ROOT = THIS_DIR.parent.parent
+if str(MODULE_ROOT) not in sys.path:
+    sys.path.insert(0, str(MODULE_ROOT))
+
+from pp_common.service_failure import cutoff_datetime_utc_from_payload
+from pp_common.service_failure import ensure_service_failure_payload
+from pp_common.service_failure import parse_iso8601_to_utc
 
 DEFAULT_REQUESTS_OUTPUT_NAME = "llm-requests.json"
 DEFAULT_STATS_OUTPUT_NAME = "llm-request-stats.json"
@@ -148,7 +155,11 @@ def discover_gateway_run_dirs(gateway_output_dir: Path) -> list[tuple[Path, int 
     return run_dirs
 
 
-def _load_lifecycle_window(lifecycle_path: Path) -> tuple[datetime, datetime | None]:
+def _load_lifecycle_window(
+    lifecycle_path: Path,
+    *,
+    cutoff_time_utc: datetime | None = None,
+) -> tuple[datetime, datetime | None]:
     records = _load_jsonl(lifecycle_path)
     job_start: datetime | None = None
     job_end: datetime | None = None
@@ -160,10 +171,21 @@ def _load_lifecycle_window(lifecycle_path: Path) -> tuple[datetime, datetime | N
         if event_type == "job_start" and job_start is None:
             job_start = timestamp
         if event_type == "job_end":
+            if cutoff_time_utc is not None:
+                timestamp_utc = parse_iso8601_to_utc(record.get("timestamp"))
+                if timestamp_utc is not None and timestamp_utc > cutoff_time_utc:
+                    continue
             job_end = timestamp
 
     if job_start is None:
         raise ValueError(f"Missing job_start timestamp in lifecycle file: {lifecycle_path}")
+    if cutoff_time_utc is not None:
+        if job_end is None:
+            job_end = cutoff_time_utc
+        else:
+            job_end_utc = parse_iso8601_to_utc(job_end.isoformat())
+            if job_end_utc is not None and job_end_utc > cutoff_time_utc:
+                job_end = cutoff_time_utc
     return job_start, job_end
 
 
@@ -285,9 +307,26 @@ def _build_request_record(
     return flattened
 
 
+def _request_within_cutoff(
+    record: dict[str, Any],
+    *,
+    cutoff_time_utc: datetime | None = None,
+) -> bool:
+    if cutoff_time_utc is None:
+        return True
+    request_start_time = parse_iso8601_to_utc(record.get("request_start_time"))
+    request_end_time = parse_iso8601_to_utc(record.get("request_end_time"))
+    if request_start_time is not None and request_start_time > cutoff_time_utc:
+        return False
+    if request_end_time is not None and request_end_time > cutoff_time_utc:
+        return False
+    return True
+
+
 def collect_llm_request_records(
     run_dir: Path,
     *,
+    cutoff_time_utc: datetime | None = None,
     on_request_loaded: Callable[[int, int], None] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     gateway_output_dir = run_dir / "gateway-output"
@@ -318,7 +357,10 @@ def collect_llm_request_records(
             if not path.is_file():
                 raise ValueError(f"Missing required file: {path}")
 
-        job_start_time, job_end_time = _load_lifecycle_window(lifecycle_path)
+        job_start_time, job_end_time = _load_lifecycle_window(
+            lifecycle_path,
+            cutoff_time_utc=cutoff_time_utc,
+        )
         model_requests = _load_jsonl(requests_path)
         trace_payload = _load_json(trace_path)
         if not isinstance(trace_payload, dict):
@@ -326,6 +368,11 @@ def collect_llm_request_records(
         llm_tags_by_span = _index_llm_tags_by_model_span(trace_payload)
 
         for record in model_requests:
+            loaded_requests += 1
+            if on_request_loaded is not None:
+                on_request_loaded(loaded_requests, total_requests)
+            if not _request_within_cutoff(record, cutoff_time_utc=cutoff_time_utc):
+                continue
             model_span_id = record.get("model_inference_span_id")
             llm_tags = {}
             if isinstance(model_span_id, str):
@@ -340,9 +387,6 @@ def collect_llm_request_records(
                     llm_tags=llm_tags,
                 )
             )
-            loaded_requests += 1
-            if on_request_loaded is not None:
-                on_request_loaded(loaded_requests, total_requests)
 
     all_requests.sort(
         key=lambda item: (
@@ -480,6 +524,8 @@ def extract_run_dir(
     output_dir: Path | None = None,
     show_progress: bool = True,
 ) -> list[Path]:
+    service_failure_payload = ensure_service_failure_payload(run_dir)
+    cutoff_time_utc = cutoff_datetime_utc_from_payload(service_failure_payload)
     if show_progress:
         with create_extract_progress() as progress:
             task_id = progress.add_task(
@@ -492,12 +538,16 @@ def extract_run_dir(
 
             request_records, total_requests = collect_llm_request_records(
                 run_dir,
+                cutoff_time_utc=cutoff_time_utc,
                 on_request_loaded=_on_request_loaded,
             )
             if total_requests == 0:
                 progress.update(task_id, completed=1, total=1)
     else:
-        request_records, _total_requests = collect_llm_request_records(run_dir)
+        request_records, _total_requests = collect_llm_request_records(
+            run_dir,
+            cutoff_time_utc=cutoff_time_utc,
+        )
 
     resolved_output_dir = (output_dir or _default_output_dir_for_run(run_dir)).expanduser().resolve()
     source_gateway_output_dir = str((run_dir / "gateway-output").resolve())
@@ -505,12 +555,20 @@ def extract_run_dir(
     requests_payload = {
         "source_run_dir": str(run_dir),
         "source_gateway_output_dir": source_gateway_output_dir,
+        "service_failure_detected": bool(
+            service_failure_payload.get("service_failure_detected", False)
+        ),
+        "service_failure_cutoff_time_utc": service_failure_payload.get("cutoff_time_utc"),
         "request_count": len(request_records),
         "requests": request_records,
     }
     stats_payload = {
         "source_run_dir": str(run_dir),
         "source_gateway_output_dir": source_gateway_output_dir,
+        "service_failure_detected": bool(
+            service_failure_payload.get("service_failure_detected", False)
+        ),
+        "service_failure_cutoff_time_utc": service_failure_payload.get("cutoff_time_utc"),
         "request_count": len(request_records),
     }
     stats_payload.update(build_numeric_stats(request_records))
@@ -522,6 +580,10 @@ def extract_run_dir(
     longest_payload = {
         "source_run_dir": str(run_dir),
         "source_gateway_output_dir": source_gateway_output_dir,
+        "service_failure_detected": bool(
+            service_failure_payload.get("service_failure_detected", False)
+        ),
+        "service_failure_cutoff_time_utc": service_failure_payload.get("cutoff_time_utc"),
         "request_count": len(request_records),
         "selected_count": len(longest_requests),
         "selection": "longest",
@@ -532,6 +594,10 @@ def extract_run_dir(
     shortest_payload = {
         "source_run_dir": str(run_dir),
         "source_gateway_output_dir": source_gateway_output_dir,
+        "service_failure_detected": bool(
+            service_failure_payload.get("service_failure_detected", False)
+        ),
+        "service_failure_cutoff_time_utc": service_failure_payload.get("cutoff_time_utc"),
         "request_count": len(request_records),
         "selected_count": len(shortest_requests),
         "selection": "shortest",

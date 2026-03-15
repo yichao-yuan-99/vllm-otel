@@ -187,6 +187,52 @@ def test_extract_job_throughput_hard_cuts_off_at_time_constraint(tmp_path: Path)
     assert result["throughput_points_excluding_cancelled"] == result["throughput_points"]
 
 
+def test_extract_job_throughput_applies_service_failure_cutoff(tmp_path: Path) -> None:
+    run_dir = tmp_path / "job-replay"
+    replay_dir = run_dir / "replay"
+    sbatch_logs_dir = run_dir / "sbatch-logs"
+    replay_dir.mkdir(parents=True)
+    sbatch_logs_dir.mkdir(parents=True)
+
+    (replay_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "started_at": "2026-03-08T00:00:00.000Z",
+                "finished_at": "2026-03-08T00:00:10.000Z",
+                "worker_results": {
+                    "trial-0001": {
+                        "worker_id": "trial-0001",
+                        "status": "completed",
+                        "finished_at": "2026-03-08T00:00:01.000Z",
+                    },
+                    "trial-0002": {
+                        "worker_id": "trial-0002",
+                        "status": "completed",
+                        "finished_at": "2026-03-08T00:00:05.000Z",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (sbatch_logs_dir / "vllm.1.log").write_text(
+        "2026-03-08T00:00:03Z AsyncLLM output_handler failed.\n",
+        encoding="utf-8",
+    )
+
+    result = extract_run.extract_job_throughput_from_run_dir(
+        run_dir,
+        timepoint_freq_hz=1.0,
+        window_size_s=1.0,
+    )
+
+    assert result["service_failure_detected"] is True
+    assert result["service_failure_cutoff_time_utc"] == "2026-03-08T00:00:03Z"
+    assert result["finished_replay_count"] == 1
+    assert result["total_duration_s"] == 3.0
+    assert result["sample_count"] == 3
+
+
 def test_discover_run_dirs_with_job_throughput_sources_scans_recursively(
     tmp_path: Path,
 ) -> None:

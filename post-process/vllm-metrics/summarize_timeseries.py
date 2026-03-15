@@ -9,6 +9,16 @@ import sys
 from typing import Any
 
 
+THIS_DIR = Path(__file__).resolve().parent
+MODULE_ROOT = THIS_DIR.parent
+if str(MODULE_ROOT) not in sys.path:
+    sys.path.insert(0, str(MODULE_ROOT))
+
+from pp_common.service_failure import cutoff_datetime_utc_from_payload
+from pp_common.service_failure import ensure_service_failure_payload
+from pp_common.service_failure import parse_iso8601_to_utc
+
+
 DEFAULT_INPUT_NAME = "gauge-counter-timeseries.json"
 DEFAULT_OUTPUT_NAME = "gauge-counter-timeseries.stats.json"
 
@@ -150,6 +160,50 @@ def summarize_timeseries_payload(
     return result
 
 
+def _apply_cutoff_to_timeseries_payload(
+    payload: dict[str, Any],
+    *,
+    cutoff_time_utc: Any,
+) -> dict[str, Any]:
+    if cutoff_time_utc is None:
+        return payload
+
+    metrics_payload = payload.get("metrics")
+    if not isinstance(metrics_payload, dict):
+        return payload
+
+    trimmed_metrics: dict[str, Any] = {}
+    for series_key, metric_payload in metrics_payload.items():
+        if not isinstance(metric_payload, dict):
+            trimmed_metrics[series_key] = metric_payload
+            continue
+
+        captured_at = metric_payload.get("captured_at")
+        if not isinstance(captured_at, list):
+            trimmed_metrics[series_key] = metric_payload
+            continue
+
+        keep_indices = []
+        for index, ts in enumerate(captured_at):
+            captured_dt = parse_iso8601_to_utc(ts)
+            if captured_dt is None or captured_dt <= cutoff_time_utc:
+                keep_indices.append(index)
+
+        trimmed_metric = dict(metric_payload)
+        for field_name in ("captured_at", "value", "time_from_start_s"):
+            field_value = metric_payload.get(field_name)
+            if not isinstance(field_value, list):
+                continue
+            if len(field_value) != len(captured_at):
+                continue
+            trimmed_metric[field_name] = [field_value[i] for i in keep_indices]
+        trimmed_metrics[series_key] = trimmed_metric
+
+    trimmed_payload = dict(payload)
+    trimmed_payload["metrics"] = trimmed_metrics
+    return trimmed_payload
+
+
 def _default_input_path_for_run(run_dir: Path) -> Path:
     return (run_dir / "post-processed" / "vllm-log" / DEFAULT_INPUT_NAME).resolve()
 
@@ -177,6 +231,9 @@ def summarize_run_dir(
     input_path: Path | None = None,
     output_path: Path | None = None,
 ) -> Path:
+    service_failure_payload = ensure_service_failure_payload(run_dir)
+    cutoff_time_utc = cutoff_datetime_utc_from_payload(service_failure_payload)
+
     resolved_input_path = (input_path or _default_input_path_for_run(run_dir)).expanduser().resolve()
     resolved_output_path = (output_path or _default_output_path_for_run(run_dir)).expanduser().resolve()
 
@@ -186,11 +243,16 @@ def summarize_run_dir(
     payload = json.loads(resolved_input_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"Input JSON must be an object: {resolved_input_path}")
+    payload = _apply_cutoff_to_timeseries_payload(payload, cutoff_time_utc=cutoff_time_utc)
 
     result = summarize_timeseries_payload(
         payload,
         source_timeseries_path=resolved_input_path,
     )
+    result["service_failure_detected"] = bool(
+        service_failure_payload.get("service_failure_detected", False)
+    )
+    result["service_failure_cutoff_time_utc"] = service_failure_payload.get("cutoff_time_utc")
 
     resolved_output_path.parent.mkdir(parents=True, exist_ok=True)
     resolved_output_path.write_text(

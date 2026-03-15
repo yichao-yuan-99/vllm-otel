@@ -42,3 +42,8 @@ python3 servers/sif/build_lmcache_sif.py \
   - `--lmcache-repo-tag`
 - Uses `--fakeroot` by default for `apptainer build`; pass `--no-fakeroot` to disable.
 - Use `--force` to overwrite an existing output SIF.
+
+## Related Docs
+
+- Prometheus negative counter increment workaround:
+  - `servers/sif/README_prometheus_counter_workaround.md`

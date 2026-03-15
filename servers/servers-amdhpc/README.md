@@ -11,6 +11,7 @@ The server keeps cluster partition config, loads shared model definitions, submi
 
 - `servers/servers-amdhpc/pyproject.toml`: Python package/dependency setup.
 - `servers/servers-amdhpc/server_config.toml`: cluster/server settings and partition config.
+- `servers/servers-amdhpc/README.remote-host.md`: using `-r/--remote-host` to override SSH target.
 - `servers/servers-amdhpc/tests/test_live_multi_profile.py`: gated live integration test for concurrent profiles `5..9`.
 - `configs/model_config.toml`: shared model definitions used by the AMD HPC control plane.
 - `servers/servers-amdhpc/run/control_state.json`: active job state (auto-generated).
@@ -56,24 +57,25 @@ Server startup now ensures the required SIF files exist and pulls them automatic
 ## 3) Use client
 
 ```bash
-python3 servers/servers-amdhpc/client.py status -P 0
-python3 servers/servers-amdhpc/client.py start -P 0 -p mi3008x -m kimi_k2_5
-python3 servers/servers-amdhpc/client.py start -P 0 -p mi3008x -m kimi_k2_5 -b
-python3 servers/servers-amdhpc/client.py start -P 0 -p mi3008x -m kimi_k2_5 --lmcache 100
-python3 servers/servers-amdhpc/client.py start-group -g bench_a -L 0,1,2,3 -p mi3008x -m kimi_k2_5
-python3 servers/servers-amdhpc/client.py start-group -g bench_a -L 0,1,2,3 -p mi3008x -m kimi_k2_5 --lmcache 100
-python3 servers/servers-amdhpc/client.py start-group -g bench_b -L 0,1,2,3,4,5,6,7 -p mi3008x -m qwen3_coder_30b
-python3 servers/servers-amdhpc/client.py group-status -g bench_a
-python3 servers/servers-amdhpc/client.py up -P 0
-python3 servers/servers-amdhpc/client.py wait-up -P 0 --timeout-seconds 900
-python3 servers/servers-amdhpc/client.py logs -P 0 -n 200
-python3 servers/servers-amdhpc/client.py alive-profiles
-python3 servers/servers-amdhpc/client.py stop-alive-profiles
-python3 servers/servers-amdhpc/client.py stop -P 0
-python3 servers/servers-amdhpc/client.py stop-group -g bench_a
+python3 servers/servers-amdhpc/client.py status -r amd-hpc -P 0
+python3 servers/servers-amdhpc/client.py start -r amd-hpc -P 0 -p mi3008x -m kimi_k2_5
+python3 servers/servers-amdhpc/client.py start -r amd-hpc -P 0 -p mi3008x -m kimi_k2_5 -b
+python3 servers/servers-amdhpc/client.py start -r amd-hpc -P 0 -p mi3008x -m kimi_k2_5 --lmcache 100
+python3 servers/servers-amdhpc/client.py start-group -r amd-hpc -g bench_a -L 0,1,2,3 -p mi3008x -m kimi_k2_5
+python3 servers/servers-amdhpc/client.py start-group -r amd-hpc -g bench_a -L 0,1,2,3 -p mi3008x -m kimi_k2_5 --lmcache 100
+python3 servers/servers-amdhpc/client.py start-group -r amd-hpc -g bench_b -L 0,1,2,3,4,5,6,7 -p mi3008x -m qwen3_coder_30b
+python3 servers/servers-amdhpc/client.py group-status -r amd-hpc -g bench_a
+python3 servers/servers-amdhpc/client.py up -r amd-hpc -P 0
+python3 servers/servers-amdhpc/client.py wait-up -r amd-hpc -P 0 --timeout-seconds 900
+python3 servers/servers-amdhpc/client.py logs -r amd-hpc -P 0 -n 200
+python3 servers/servers-amdhpc/client.py alive-profiles -r amd-hpc
+python3 servers/servers-amdhpc/client.py stop-alive-profiles -r amd-hpc
+python3 servers/servers-amdhpc/client.py stop -r amd-hpc -P 0
+python3 servers/servers-amdhpc/client.py stop-group -r amd-hpc -g bench_a
 ```
 
 `-P` is the short alias for `--port-profile`.
+`-r` / `--remote-host` is an alias for `--ssh-target` and is accepted by all client commands; see `servers/servers-amdhpc/README.remote-host.md`.
 Client default server URL is derived from the selected local tunnel record. By default the local control port is `23971 + <port_profile>` (for example: profile `0` -> `23971`, profile `1` -> `23972`).
 Client `start` now also launches a per-profile local gateway daemon in the background after services are up, and `stop` tears it down first.
 
@@ -119,10 +121,10 @@ Example commands:
 
 ```bash
 # 4 profiles on one MI3008x node -> 2 GPUs/profile (tp=2)
-python3 servers/servers-amdhpc/client.py start-group -g mi300_tp2 -L 0,1,2,3 -p mi3008x -m qwen3_coder_30b
+python3 servers/servers-amdhpc/client.py start-group -r amd-hpc -g mi300_tp2 -L 0,1,2,3 -p mi3008x -m qwen3_coder_30b
 
 # 8 profiles on one MI3008x node -> 1 GPU/profile (tp=1)
-python3 servers/servers-amdhpc/client.py start-group -g mi300_tp1 -L 0,1,2,3,4,5,6,7 -p mi3008x -m qwen3_coder_30b
+python3 servers/servers-amdhpc/client.py start-group -r amd-hpc -g mi300_tp1 -L 0,1,2,3,4,5,6,7 -p mi3008x -m qwen3_coder_30b
 ```
 
 Validation and failure cases:
@@ -170,6 +172,7 @@ Optional overrides:
 
 - `start`: always starts the local SSH tunnel first and rejects the request if a tunnel daemon is already running for that port profile.
 - `start`: defaults `--ssh-target` to `amd-hpc` (override with `--ssh-target` as needed).
+- all client commands accept `--ssh-target`/`--remote-host`/`-r` for a consistent CLI surface.
 - `start`: the selected port profile sets the local forwarded vLLM/Jaeger ports and the local forwarded control port.
 - `start`: remote vLLM/Jaeger ports on the login node also come from the selected port profile; the remote control server stays on `23971` unless overridden with `--server-port`.
 - `start`: the selected port profile is sent to the remote control server and is also used there to pick the login<->compute reverse-tunnel ports.

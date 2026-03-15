@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import shlex
 import sys
 import tomllib
 from pathlib import Path
@@ -64,12 +65,14 @@ def test_main_generates_local_mode_bundle(tmp_path: Path) -> None:
         local_mode_script_path: Path,
         check_port_availability: bool,
         lmcache_max_local_cpu_size: str | None,
+        no_async_scheduling: bool,
     ) -> Path:
         del control_plane, check_port_availability
         assert port_profile_id == 0
         assert partition == "mi3001x"
         assert model == "qwen3_coder_30b"
         assert lmcache_max_local_cpu_size == "100"
+        assert no_async_scheduling is False
         assert local_mode_script_path.exists()
         target = rendered_dir / f"{local_mode_script_path.parent.name}.sh"
         target.write_text(
@@ -124,7 +127,7 @@ def test_main_generates_local_mode_bundle(tmp_path: Path) -> None:
 
     sbatch_01 = (qps_01_dir / "sbatch.sh").read_text(encoding="utf-8")
     assert f"GATEWAY_CONFIG_DEFAULT={(qps_01_dir / 'gateway-config.toml').resolve()}" in sbatch_01
-    expected_log_dir_01 = (
+    expected_replay_dir_01 = (
         repo_root
         / "results"
         / "replay"
@@ -135,8 +138,8 @@ def test_main_generates_local_mode_bundle(tmp_path: Path) -> None:
         / "sweep-qps-local"
         / "single"
         / "qps0_1"
-        / "sbatch-logs"
     ).resolve()
+    expected_log_dir_01 = (expected_replay_dir_01 / "sbatch-logs").resolve()
     assert f"#SBATCH --output={expected_log_dir_01}/slurm.%j.out" in sbatch_01
     assert f"#SBATCH --error={expected_log_dir_01}/slurm.%j.err" in sbatch_01
     assert f'JOB_LOG_DIR=\"{expected_log_dir_01}\"' in sbatch_01
@@ -165,11 +168,56 @@ def test_main_generates_local_mode_bundle(tmp_path: Path) -> None:
     assert "--config \"${SCRIPT_DIR}/replay.toml\"" in local_script
     assert "--port-profile-id \"${PORT_PROFILE_ID_VALUE}\"" in local_script
 
+    expected_replay_timestamp_dir = (
+        repo_root / "results" / "replay" / batch_dir.name
+    ).resolve()
+    expected_generated_copy_dir = (expected_replay_timestamp_dir / "generated").resolve()
+    assert (expected_generated_copy_dir / "qps0_1" / "replay.toml").exists()
+    assert (expected_generated_copy_dir / "qps0_1" / "run_local_replay.sh").exists()
+    assert (expected_generated_copy_dir / "qps0_1" / "gateway-config.toml").exists()
+    assert (expected_generated_copy_dir / "qps0_1" / "sbatch.sh").exists()
+    assert (expected_generated_copy_dir / "qps0_2" / "replay.toml").exists()
+    assert (expected_generated_copy_dir / "qps0_2" / "run_local_replay.sh").exists()
+    assert (expected_generated_copy_dir / "qps0_2" / "gateway-config.toml").exists()
+    assert (expected_generated_copy_dir / "qps0_2" / "sbatch.sh").exists()
+    assert (expected_generated_copy_dir / "submit_all.sh").exists()
+    assert (expected_generated_copy_dir / "manifest.json").exists()
+
     manifest = json.loads((batch_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["status"] == "ok"
     assert manifest["partition"] == "mi3001x"
     assert manifest["model"] == "qwen3_coder_30b"
     assert manifest["lmcache"] == 100
+    assert manifest["no_async_scheduling"] is False
+    assert manifest["generated_batch_copy_dir"] == module.path_for_config(
+        expected_generated_copy_dir
+    )
+    assert manifest["generation_command_raw"] == shlex.join(
+        [
+            sys.executable,
+            str((Path(module.__file__).resolve())),
+            "--source-run-dir",
+            str(source_run_dir),
+            "--qps-list",
+            "0.1,0.2",
+            "--poisson-seed",
+            "7",
+            "--randomize-seed",
+            "11",
+            "--time-constraint-s",
+            "600",
+            "--partition",
+            "mi3001x",
+            "--model",
+            "qwen3_coder_30b",
+            "--lmcache",
+            "100",
+            "--server-config",
+            str(server_config_path),
+            "--output-config-dir",
+            str(output_config_dir),
+        ]
+    )
     assert manifest["port_profile"] == 0
     assert manifest["submit_all_script"] == str(submit_all_path)
     assert manifest["submit_all_command"].startswith("bash ")
@@ -177,3 +225,5 @@ def test_main_generates_local_mode_bundle(tmp_path: Path) -> None:
     for experiment in manifest["generated_experiments"]:
         assert experiment["gateway_config"].endswith("gateway-config.toml")
         assert experiment["sbatch_log_dir"].endswith("/sbatch-logs")
+        assert "generated_config_copy_dir" not in experiment
+        assert "generated_config_copies" not in experiment

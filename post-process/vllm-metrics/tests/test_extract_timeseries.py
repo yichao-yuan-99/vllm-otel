@@ -91,6 +91,44 @@ def test_build_gauge_counter_timeseries_computes_counter_deltas() -> None:
     assert counter["time_from_start_s"] == [0.0, 2.0]
 
 
+def test_build_gauge_counter_timeseries_excludes_created_metrics() -> None:
+    records = [
+        ParsedMetricRecord(
+            captured_at="2026-03-01T00:00:00+00:00",
+            families={
+                "vllm:prompt_tokens": {
+                    "type": "counter",
+                    "help": "prompt",
+                    "samples": [
+                        {
+                            "name": "vllm:prompt_tokens_total",
+                            "labels": {"engine": "0"},
+                            "value": 5.0,
+                        }
+                    ],
+                },
+                "vllm:prompt_tokens_created": {
+                    "type": "gauge",
+                    "help": "created timestamp",
+                    "samples": [
+                        {
+                            "name": "vllm:prompt_tokens_created",
+                            "labels": {"engine": "0"},
+                            "value": 1.772332529162273e9,
+                        }
+                    ],
+                },
+            },
+        )
+    ]
+
+    result = build_gauge_counter_timeseries(records)
+
+    assert "vllm:prompt_tokens|engine=0" in result["metrics"]
+    assert "vllm:prompt_tokens_created|engine=0" not in result["metrics"]
+    assert result["metrics"]["vllm:prompt_tokens|engine=0"]["value"] == [0.0]
+
+
 def test_extract_run_script_reads_run_directory(tmp_path: Path) -> None:
     run_dir = tmp_path / "job"
     vllm_log_dir = run_dir / "vllm-log"
@@ -155,6 +193,75 @@ def test_extract_run_script_reads_run_directory(tmp_path: Path) -> None:
     assert payload["metric_count"] == 2
     assert payload["metrics"]["vllm:num_requests_running|engine=0"]["value"] == [1.0, 4.0]
     assert payload["metrics"]["vllm:prompt_tokens|engine=0"]["value"] == [0.0, 3.0]
+
+
+def test_extract_run_applies_service_failure_cutoff(tmp_path: Path) -> None:
+    run_dir = tmp_path / "job"
+    vllm_log_dir = run_dir / "vllm-log"
+    sbatch_logs_dir = run_dir / "sbatch-logs"
+    vllm_log_dir.mkdir(parents=True)
+    sbatch_logs_dir.mkdir(parents=True)
+
+    records = [
+        {
+            "timestamp": 1,
+            "captured_at": "2026-03-01T00:00:00+00:00",
+            "content": (
+                "# HELP vllm:num_requests_running Number of requests in model execution batches.\n"
+                "# TYPE vllm:num_requests_running gauge\n"
+                'vllm:num_requests_running{engine="0"} 1\n'
+            ),
+        },
+        {
+            "timestamp": 2,
+            "captured_at": "2026-03-01T00:00:05+00:00",
+            "content": (
+                "# HELP vllm:num_requests_running Number of requests in model execution batches.\n"
+                "# TYPE vllm:num_requests_running gauge\n"
+                'vllm:num_requests_running{engine="0"} 4\n'
+            ),
+        },
+    ]
+
+    jsonl_path = tmp_path / "block-000000.jsonl"
+    jsonl_path.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    tar_path = vllm_log_dir / "block-000000.tar.gz"
+    with tarfile.open(tar_path, mode="w:gz") as archive:
+        archive.add(jsonl_path, arcname="block-000000.jsonl")
+
+    (vllm_log_dir / "blocks.index.json").write_text(
+        json.dumps(
+            {
+                "blocks": [
+                    {
+                        "file": "block-000000.tar.gz",
+                        "member": "block-000000.jsonl",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (sbatch_logs_dir / "vllm.1.log").write_text(
+        "2026-03-01T00:00:03Z AsyncLLM output_handler failed.\n",
+        encoding="utf-8",
+    )
+
+    exit_code = extract_run.main(["--run-dir", str(run_dir)])
+    assert exit_code == 0
+
+    payload = json.loads(
+        (run_dir / "post-processed" / "vllm-log" / "gauge-counter-timeseries.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert payload["service_failure_detected"] is True
+    assert payload["service_failure_cutoff_time_utc"] == "2026-03-01T00:00:03Z"
+    assert payload["metrics"]["vllm:num_requests_running|engine=0"]["value"] == [1.0]
 
 
 def test_count_metric_blocks_in_run_dir_reads_index(tmp_path: Path) -> None:
@@ -317,8 +424,9 @@ def test_extract_run_updates_progress_bar(monkeypatch, tmp_path: Path) -> None:
 
     fake_progress = FakeProgress()
 
-    def fake_extract(run_dir_arg: Path, *, on_block_loaded=None):
+    def fake_extract(run_dir_arg: Path, *, cutoff_time_utc=None, on_block_loaded=None):
         assert run_dir_arg == run_dir.resolve()
+        assert cutoff_time_utc is None
         if on_block_loaded is not None:
             on_block_loaded(1, 2)
             on_block_loaded(2, 2)

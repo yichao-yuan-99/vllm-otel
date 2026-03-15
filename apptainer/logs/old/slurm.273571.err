@@ -1,0 +1,2 @@
+Error: remote port forwarding failed for listen port 11451
+slurmstepd-k002-004-v3: error: *** JOB 273571 ON k002-004-v3 CANCELLED AT 2026-02-26T11:39:12 ***

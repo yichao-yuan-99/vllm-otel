@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ProcessPoolExecutor
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,16 @@ import re
 import sys
 from typing import Any
 from typing import Iterable
+
+
+THIS_DIR = Path(__file__).resolve().parent
+MODULE_ROOT = THIS_DIR.parent.parent
+if str(MODULE_ROOT) not in sys.path:
+    sys.path.insert(0, str(MODULE_ROOT))
+
+from pp_common.service_failure import cutoff_datetime_utc_from_payload
+from pp_common.service_failure import ensure_service_failure_payload
+from pp_common.service_failure import parse_iso8601_to_utc
 
 
 DEFAULT_OUTPUT_NAME = "usage-summary.json"
@@ -169,6 +180,22 @@ def _extract_usage_tokens(record: dict[str, Any]) -> tuple[int | None, int | Non
     return prompt_tokens, completion_tokens, cached_tokens
 
 
+def _request_within_cutoff(
+    record: dict[str, Any],
+    *,
+    cutoff_time_utc: datetime | None = None,
+) -> bool:
+    if cutoff_time_utc is None:
+        return True
+    request_start_time = parse_iso8601_to_utc(record.get("request_start_time"))
+    request_end_time = parse_iso8601_to_utc(record.get("request_end_time"))
+    if request_start_time is not None and request_start_time > cutoff_time_utc:
+        return False
+    if request_end_time is not None and request_end_time > cutoff_time_utc:
+        return False
+    return True
+
+
 def _new_usage_accumulator() -> dict[str, int]:
     return {
         "prompt_tokens": 0,
@@ -262,6 +289,7 @@ def _collect_agent_usage(
     gateway_run_dir: Path,
     *,
     profile_id: int | None,
+    cutoff_time_utc: datetime | None = None,
 ) -> tuple[dict[str, Any], dict[str, int]]:
     requests_path = gateway_run_dir / "requests" / "model_inference.jsonl"
     if not requests_path.is_file():
@@ -270,6 +298,8 @@ def _collect_agent_usage(
     request_count = 0
     usage_accumulator = _new_usage_accumulator()
     for record in _iter_jsonl_dict_records(requests_path):
+        if not _request_within_cutoff(record, cutoff_time_utc=cutoff_time_utc):
+            continue
         request_count += 1
         prompt_tokens, completion_tokens, cached_prompt_tokens = _extract_usage_tokens(record)
         _add_request_usage(
@@ -292,6 +322,8 @@ def _collect_agent_usage(
 
 def extract_gateway_usage_from_run_dir(run_dir: Path) -> dict[str, Any]:
     resolved_run_dir = run_dir.expanduser().resolve()
+    service_failure_payload = ensure_service_failure_payload(resolved_run_dir)
+    cutoff_time_utc = cutoff_datetime_utc_from_payload(service_failure_payload)
     gateway_output_dir = resolved_run_dir / "gateway-output"
     if not gateway_output_dir.is_dir():
         raise ValueError(f"Missing gateway-output directory: {gateway_output_dir}")
@@ -310,6 +342,7 @@ def extract_gateway_usage_from_run_dir(run_dir: Path) -> dict[str, Any]:
         agent_payload, agent_usage_accumulator = _collect_agent_usage(
             gateway_run_dir,
             profile_id=profile_id,
+            cutoff_time_utc=cutoff_time_utc,
         )
         agents.append(agent_payload)
         total_request_count += agent_payload["request_count"]
@@ -334,6 +367,10 @@ def extract_gateway_usage_from_run_dir(run_dir: Path) -> dict[str, Any]:
     return {
         "source_run_dir": str(resolved_run_dir),
         "source_gateway_output_dir": str(gateway_output_dir.resolve()),
+        "service_failure_detected": bool(
+            service_failure_payload.get("service_failure_detected", False)
+        ),
+        "service_failure_cutoff_time_utc": service_failure_payload.get("cutoff_time_utc"),
         "agent_count": len(agents),
         "request_count": total_request_count,
         "usage": run_usage,

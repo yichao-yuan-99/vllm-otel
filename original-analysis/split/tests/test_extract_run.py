@@ -89,9 +89,26 @@ def test_extract_run_generates_expected_top_p_series(tmp_path: Path) -> None:
     )
     payload = json.loads(output_path.read_text(encoding="utf-8"))
 
+    token_groups_path = (
+        run_dir
+        / "original-analysis"
+        / "split"
+        / "top-p-token-usage-two-groups.json"
+    )
+    context_groups_path = (
+        run_dir
+        / "original-analysis"
+        / "split"
+        / "top-p-context-usage-two-groups.json"
+    )
+    token_groups = json.loads(token_groups_path.read_text(encoding="utf-8"))
+    context_groups = json.loads(context_groups_path.read_text(encoding="utf-8"))
+
     assert payload["trail_count_total"] == 3
     assert payload["trail_count_ranked"] == 3
     assert payload["trail_count_unranked"] == 0
+    assert payload["additional_outputs"]["token_usage_two_groups"] == str(token_groups_path.resolve())
+    assert payload["additional_outputs"]["context_usage_two_groups"] == str(context_groups_path.resolve())
 
     ranked_ids = [trail["gateway_run_id"] for trail in payload["ranked_trails"]]
     assert ranked_ids == ["run_high", "run_mid", "run_low"]
@@ -146,6 +163,32 @@ def test_extract_run_generates_expected_top_p_series(tmp_path: Path) -> None:
     assert rows[98]["top_token_usage_ratio"] is None
     assert rows[98]["top_context_usage_ratio"] is None
 
+    assert token_groups["selection"]["selected_p"] == 1
+    assert token_groups["selection"]["selection_reason"] == "first_ratio_gt_1"
+    assert token_groups["group_top"]["trial_count"] == 1
+    assert token_groups["group_top"]["trail_names"] == ["profile-0/run_high"]
+    assert token_groups["group_rest"]["trial_count"] == 2
+    assert token_groups["group_rest"]["trail_names"] == [
+        "profile-1/run_mid",
+        "profile-2/run_low",
+    ]
+    assert math.isclose(
+        token_groups["group_top"]["trial_percentage"],
+        100.0 / 3.0,
+        abs_tol=1e-6,
+    )
+    assert math.isclose(
+        token_groups["group_rest"]["trial_percentage"],
+        200.0 / 3.0,
+        abs_tol=1e-6,
+    )
+
+    assert context_groups["selection"]["selected_p"] == 1
+    assert context_groups["selection"]["selection_reason"] == "first_ratio_gt_1"
+    assert context_groups["group_top"]["trial_count"] == 1
+    assert context_groups["group_top"]["trail_names"] == ["profile-0/run_high"]
+    assert context_groups["group_rest"]["trial_count"] == 2
+
 
 def test_extract_run_keeps_missing_context_trails_unranked(tmp_path: Path) -> None:
     run_dir = tmp_path / "job"
@@ -170,6 +213,12 @@ def test_extract_run_keeps_missing_context_trails_unranked(tmp_path: Path) -> No
     assert payload["trail_count_unranked"] == 1
     assert payload["ranked_trails"][0]["gateway_run_id"] == "run_ranked"
     assert payload["unranked_trails"][0]["gateway_run_id"] == "run_unranked"
+    token_groups = payload["two_group_summaries"]["token_usage"]
+    context_groups = payload["two_group_summaries"]["context_usage"]
+    assert token_groups["group_top"]["trail_names"] == ["run_ranked"]
+    assert token_groups["group_rest"]["trail_names"] == []
+    assert context_groups["group_top"]["trail_names"] == ["run_ranked"]
+    assert context_groups["group_rest"]["trail_names"] == []
 
 
 def test_discover_run_dirs_with_gateway_output_scans_recursively(tmp_path: Path) -> None:
@@ -191,12 +240,24 @@ def test_extract_run_root_dir_processes_discovered_runs(monkeypatch, tmp_path: P
     (run_b / "gateway-output").mkdir(parents=True)
 
     processed: list[tuple[Path, Path | None]] = []
+    root_table_calls: list[tuple[Path, list[Path]]] = []
 
     def fake_extract_run_dir(run_dir: Path, *, output_path: Path | None = None) -> Path:
         processed.append((run_dir, output_path))
         return run_dir / "original-analysis" / "split" / "top-p-usage-ratio-summary.json"
 
+    def fake_write_root_two_group_tables(
+        root_dir_value: Path,
+        run_dirs_value: list[Path],
+    ) -> tuple[Path, Path]:
+        root_table_calls.append((root_dir_value, list(run_dirs_value)))
+        return (
+            root_dir_value / "split-top-p-token-usage-two-group-table.csv",
+            root_dir_value / "split-top-p-context-usage-two-group-table.csv",
+        )
+
     monkeypatch.setattr(extract_run, "extract_run_dir", fake_extract_run_dir)
+    monkeypatch.setattr(extract_run, "_write_root_two_group_tables", fake_write_root_two_group_tables)
 
     exit_code = extract_run.main(["--root-dir", str(root_dir), "--max-procs", "1"])
 
@@ -205,6 +266,62 @@ def test_extract_run_root_dir_processes_discovered_runs(monkeypatch, tmp_path: P
         (run_a.resolve(), None),
         (run_b.resolve(), None),
     ]
+    assert root_table_calls == [
+        (
+            root_dir.resolve(),
+            [run_a.resolve(), run_b.resolve()],
+        )
+    ]
+
+
+def test_extract_run_root_dir_writes_two_group_tables(tmp_path: Path) -> None:
+    root_dir = tmp_path / "results"
+    run_a = root_dir / "a"
+    run_b = root_dir / "b"
+    _write_gateway_job(
+        run_a,
+        profile_id=None,
+        gateway_run_id="run_a_high",
+        requests=[(15, 5, 0)],
+    )
+    _write_gateway_job(
+        run_a,
+        profile_id=None,
+        gateway_run_id="run_a_low",
+        requests=[(3, 2, 0)],
+    )
+    _write_gateway_job(
+        run_b,
+        profile_id=None,
+        gateway_run_id="run_b_high",
+        requests=[(18, 6, 0)],
+    )
+    _write_gateway_job(
+        run_b,
+        profile_id=None,
+        gateway_run_id="run_b_low",
+        requests=[(2, 1, 0)],
+    )
+
+    exit_code = extract_run.main(["--root-dir", str(root_dir), "--max-procs", "1"])
+    assert exit_code == 0
+
+    token_table_path = root_dir / "split-top-p-token-usage-two-group-table.csv"
+    context_table_path = root_dir / "split-top-p-context-usage-two-group-table.csv"
+    assert token_table_path.is_file()
+    assert context_table_path.is_file()
+
+    token_lines = token_table_path.read_text(encoding="utf-8").splitlines()
+    context_lines = context_table_path.read_text(encoding="utf-8").splitlines()
+    assert token_lines[0] == (
+        "run_path,group_top_trail_count,group_top_trail_percentage,"
+        "group_rest_trail_count,group_rest_trail_percentage"
+    )
+    assert context_lines[0] == token_lines[0]
+    assert len(token_lines) == 3
+    assert len(context_lines) == 3
+    assert str(run_a.resolve()) in token_lines[1]
+    assert str(run_b.resolve()) in token_lines[2]
 
 
 def test_extract_run_rejects_dry_run_for_single_run(tmp_path: Path) -> None:

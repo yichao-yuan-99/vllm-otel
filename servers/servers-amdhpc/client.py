@@ -62,6 +62,21 @@ DEFAULT_GATEWAY_VENV_DIR = REPO_ROOT / ".venv"
 DEFAULT_GATEWAY_HOST = "0.0.0.0"
 DEFAULT_GATEWAY_PID_FILE_PREFIX = "gateway_d"
 DEFAULT_GATEWAY_LOG_FILE_PREFIX = "gateway_d"
+REMOTE_HOST_OPTION_HELP = (
+    "SSH target, same as in `ssh <target>`. "
+    "`--remote-host`/`-r` is an alias for this option."
+)
+
+
+def _remote_host_option(default: str = "amd-hpc") -> Any:
+    return typer.Option(
+        default,
+        "--ssh-target",
+        "--remote-host",
+        "-t",
+        "-r",
+        help=REMOTE_HOST_OPTION_HELP,
+    )
 
 
 def _utc_now_iso() -> str:
@@ -1488,12 +1503,7 @@ def _cleanup_after_start_interrupt(ctx: typer.Context, *, port_profile: int) -> 
 @app.command()
 def start(
     ctx: typer.Context,
-    ssh_target: str = typer.Option(
-        "amd-hpc",
-        "--ssh-target",
-        "-t",
-        help="SSH target, same as in `ssh <target>`.",
-    ),
+    ssh_target: str = _remote_host_option(),
     port_profile: int = typer.Option(
         ...,
         "--port-profile",
@@ -1673,6 +1683,7 @@ def start(
 @app.command()
 def stop(
     ctx: typer.Context,
+    ssh_target: str = _remote_host_option(),
     port_profile: int = typer.Option(
         ...,
         "--port-profile",
@@ -1686,6 +1697,7 @@ def stop(
     ),
 ) -> None:
     """Stop gateway first, then stop the active sbatch job and client-d."""
+    _ = ssh_target
     stop_payload = _stop_profile_flow(
         ctx,
         port_profile=port_profile,
@@ -1701,12 +1713,7 @@ def stop(
 @app.command(name="start-group")
 def start_group(
     ctx: typer.Context,
-    ssh_target: str = typer.Option(
-        "amd-hpc",
-        "--ssh-target",
-        "-t",
-        help="SSH target, same as in `ssh <target>`.",
-    ),
+    ssh_target: str = _remote_host_option(),
     group_name: str = typer.Option(
         ...,
         "--group-name",
@@ -1974,6 +1981,7 @@ def start_group(
 @app.command(name="group-status")
 def group_status(
     ctx: typer.Context,
+    ssh_target: str = _remote_host_option(),
     group_name: str = typer.Option(
         ...,
         "--group-name",
@@ -1982,6 +1990,7 @@ def group_status(
     ),
 ) -> None:
     """Show status for an active grouped service run."""
+    _ = ssh_target
     typer.echo(f"[group-status] querying group={group_name}")
     payload = _run_group_command_with_timeout(
         ctx,
@@ -1999,6 +2008,7 @@ def group_status(
 @app.command(name="stop-group")
 def stop_group(
     ctx: typer.Context,
+    ssh_target: str = _remote_host_option(),
     group_name: str = typer.Option(
         ...,
         "--group-name",
@@ -2012,6 +2022,7 @@ def stop_group(
     ),
 ) -> None:
     """Stop a grouped service run and tear down local daemons for all group profiles."""
+    _ = ssh_target
     typer.echo(f"[stop-group] querying group={group_name}")
     group_status_payload = _run_group_command_with_timeout(
         ctx,
@@ -2088,6 +2099,7 @@ def stop_group(
 @app.command()
 def logs(
     ctx: typer.Context,
+    ssh_target: str = _remote_host_option(),
     port_profile: int = typer.Option(
         ...,
         "--port-profile",
@@ -2097,6 +2109,7 @@ def logs(
     lines: int = typer.Option(200, "--lines", "-n", min=1, help="Lines per log file."),
 ) -> None:
     """Fetch current tail of Slurm/Jaeger/vLLM logs."""
+    _ = ssh_target
     payload = _run_command(ctx, "/logs", {"port_profile": port_profile, "lines": lines})
     _require_ok(payload)
 
@@ -2123,6 +2136,7 @@ def logs(
 @app.command()
 def up(
     ctx: typer.Context,
+    ssh_target: str = _remote_host_option(),
     port_profile: int = typer.Option(
         ...,
         "--port-profile",
@@ -2131,6 +2145,7 @@ def up(
     ),
 ) -> None:
     """Check whether both tunneled vLLM and Jaeger endpoints are up."""
+    _ = ssh_target
     payload = _run_command(ctx, "/up", {"port_profile": port_profile})
     _require_ok(payload)
     _print_json(payload)
@@ -2139,6 +2154,7 @@ def up(
 @app.command(name="wait-up")
 def wait_up(
     ctx: typer.Context,
+    ssh_target: str = _remote_host_option(),
     port_profile: int = typer.Option(
         ...,
         "--port-profile",
@@ -2164,6 +2180,7 @@ def wait_up(
     ),
 ) -> None:
     """Block until both tunneled vLLM and Jaeger endpoints are up."""
+    _ = ssh_target
     request_timeout_seconds = (
         24.0 * 60.0 * 60.0
         if defer_timeout_until_running
@@ -2187,6 +2204,7 @@ def wait_up(
 @app.command(name="alive-profiles")
 def alive_profiles(
     ctx: typer.Context,
+    ssh_target: str = _remote_host_option(),
     include_remote_status: bool = typer.Option(
         True,
         "--include-remote-status/--local-only",
@@ -2202,6 +2220,7 @@ def alive_profiles(
     ),
 ) -> None:
     """List all configured port profiles and mark which ones are currently alive."""
+    _ = ssh_target
     payload = {
         "ok": True,
         "code": 0,
@@ -2218,6 +2237,7 @@ def alive_profiles(
 @app.command(name="stop-alive-profiles")
 def stop_alive_profiles(
     ctx: typer.Context,
+    ssh_target: str = _remote_host_option(),
     clientd_timeout_seconds: float = typer.Option(
         10.0,
         "--clientd-timeout-seconds",
@@ -2233,6 +2253,7 @@ def stop_alive_profiles(
     ),
 ) -> None:
     """Stop every profile that is currently alive."""
+    _ = ssh_target
     liveness = _collect_profile_liveness(
         ctx,
         include_remote_status=include_remote_status,
@@ -2426,6 +2447,7 @@ def stop_alive_profiles(
 @app.command()
 def status(
     ctx: typer.Context,
+    ssh_target: str = _remote_host_option(),
     port_profile: int = typer.Option(
         ...,
         "--port-profile",
@@ -2434,6 +2456,7 @@ def status(
     ),
 ) -> None:
     """Show control-plane status and configured partitions/models."""
+    _ = ssh_target
     payload = _run_command(ctx, "/status", {"port_profile": port_profile})
     _require_ok(payload)
     _print_json(payload)

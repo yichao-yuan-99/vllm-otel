@@ -1,0 +1,14 @@
+schema_version = 1
+
+[run]
+# Optional. If omitted, gateway uses configs/port_profiles.toml default_profile.
+port_profile_id = 0
+output_root = "./tests/output/gateway-artifacts"
+
+[telemetry]
+service_name = "vllm-gateway"
+otlp_traces_insecure = true
+
+[gateway]
+artifact_compression = "none"
+job_end_trace_wait_seconds = 10

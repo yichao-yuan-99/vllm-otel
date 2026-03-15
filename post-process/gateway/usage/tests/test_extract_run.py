@@ -174,6 +174,52 @@ def test_extract_run_supports_non_cluster_gateway_layout(tmp_path: Path) -> None
     assert payload["usage"]["avg_worker_max_request_length"] == 6.0
 
 
+def test_extract_run_applies_service_failure_cutoff(tmp_path: Path) -> None:
+    run_dir = tmp_path / "job"
+    gateway_run_dir = run_dir / "gateway-output" / "run_001"
+    sbatch_logs_dir = run_dir / "sbatch-logs"
+    (gateway_run_dir / "requests").mkdir(parents=True)
+    sbatch_logs_dir.mkdir(parents=True)
+
+    _write_jsonl(
+        gateway_run_dir / "requests" / "model_inference.jsonl",
+        [
+            {
+                "request_start_time": "2026-03-08T00:00:01.000Z",
+                "request_end_time": "2026-03-08T00:00:02.000Z",
+                "response": {
+                    "usage": {
+                        "prompt_tokens": 5,
+                        "completion_tokens": 2,
+                    }
+                },
+            },
+            {
+                "request_start_time": "2026-03-08T00:00:05.000Z",
+                "request_end_time": "2026-03-08T00:00:06.000Z",
+                "response": {
+                    "usage": {
+                        "prompt_tokens": 9,
+                        "completion_tokens": 3,
+                    }
+                },
+            },
+        ],
+    )
+    (sbatch_logs_dir / "vllm.1.log").write_text(
+        "2026-03-08T00:00:03Z AsyncLLM output_handler failed.\n",
+        encoding="utf-8",
+    )
+
+    payload = extract_run.extract_gateway_usage_from_run_dir(run_dir)
+
+    assert payload["service_failure_detected"] is True
+    assert payload["service_failure_cutoff_time_utc"] == "2026-03-08T00:00:03Z"
+    assert payload["request_count"] == 1
+    assert payload["usage"]["prompt_tokens"] == 5
+    assert payload["usage"]["completion_tokens"] == 2
+
+
 def test_discover_run_dirs_with_gateway_output_scans_recursively(tmp_path: Path) -> None:
     root_dir = tmp_path / "results"
     run_a = root_dir / "job-a"

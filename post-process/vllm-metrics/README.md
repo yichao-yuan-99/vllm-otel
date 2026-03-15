@@ -101,6 +101,7 @@ Behavior:
 - scans all recorded vLLM metric blocks for the run
 - parses each raw scrape record
 - keeps only `gauge` and `counter` families whose names start with `vllm`
+- excludes metric names containing `created` (timestamp-style helper series)
 - converts counters to per-scrape deltas
 - writes one consolidated timeseries JSON file for visualization
 
