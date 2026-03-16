@@ -484,6 +484,28 @@ def parse_optional_float(value: Any, *, field_name: str) -> float | None:
     raise ValueError(f"{field_name} must be a number")
 
 
+def resolve_configured_compile_model_override(
+    model_override: str,
+) -> tuple[str, str]:
+    try:
+        from gateway.model_configs import load_model_registry
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(
+            "failed to import gateway model registry for --model validation"
+        ) from exc
+
+    registry = load_model_registry()
+    spec = registry.resolve(model_override)
+    if spec is None:
+        allowed_keys = ", ".join(sorted(registry.models.keys()))
+        raise ValueError(
+            "--model must match a name configured in configs/model_config.toml "
+            f"(model key, served_model_name, or vllm_model_name). Got {model_override!r}. "
+            f"Allowed model keys: {allowed_keys}"
+        )
+    return spec.key, spec.served_model_name
+
+
 def is_replay_plan_compile_version_current(plan_payload: dict[str, Any]) -> bool:
     raw_version = plan_payload.get("compile_version")
     if raw_version is None:
@@ -509,6 +531,28 @@ def count_plan_workers_and_requests(plan_payload: dict[str, Any]) -> tuple[int, 
         if isinstance(requests_payload, list):
             request_count += len(requests_payload)
     return len(workers_payload), request_count
+
+
+def extract_plan_compile_model_override(plan_payload: dict[str, Any]) -> str | None:
+    compile_options = plan_payload.get("compile_options")
+    if not isinstance(compile_options, dict):
+        return None
+    model_override = compile_options.get("model_override")
+    if not isinstance(model_override, str):
+        return None
+    stripped = model_override.strip()
+    return stripped or None
+
+
+def extract_plan_replay_model(plan_payload: dict[str, Any]) -> str | None:
+    replay_target = plan_payload.get("replay_target")
+    if not isinstance(replay_target, dict):
+        return None
+    replay_model = replay_target.get("model")
+    if not isinstance(replay_model, str):
+        return None
+    stripped = replay_model.strip()
+    return stripped or None
 
 
 def resolve_required_option(value: Any, *, option_name: str, config_key: str) -> Any:
@@ -952,6 +996,7 @@ def _build_job_root_child_compile_command(
     job_dir: Path,
     port_profile_id: int,
     request_timeout_s: float | None,
+    model_override: str | None,
     split_two_group_plans: bool,
     split_two_group_metric: str,
     exclude_unranked_trails: bool,
@@ -968,6 +1013,8 @@ def _build_job_root_child_compile_command(
     ]
     if request_timeout_s is not None:
         command.extend(["--request-timeout-s", str(request_timeout_s)])
+    if model_override is not None:
+        command.extend(["--model", model_override])
     if split_two_group_plans:
         command.append("--split-two-group-plans")
         command.extend(["--split-two-group-metric", split_two_group_metric])
@@ -981,6 +1028,7 @@ def _run_job_root_child_compile(
     job_dir: Path,
     port_profile_id: int,
     request_timeout_s: float | None,
+    model_override: str | None,
     split_two_group_plans: bool,
     split_two_group_metric: str,
     exclude_unranked_trails: bool,
@@ -989,6 +1037,7 @@ def _run_job_root_child_compile(
         job_dir=job_dir,
         port_profile_id=port_profile_id,
         request_timeout_s=request_timeout_s,
+        model_override=model_override,
         split_two_group_plans=split_two_group_plans,
         split_two_group_metric=split_two_group_metric,
         exclude_unranked_trails=exclude_unranked_trails,
@@ -1178,6 +1227,24 @@ def with_plan_name_suffix(plan_path: Path, suffix: str) -> Path:
     else:
         suffixed_name = f"{file_name[:dot_index]}.{suffix}{file_name[dot_index:]}"
     return (plan_path.parent / suffixed_name).resolve()
+
+
+def apply_additional_suffix(plan_path: Path, additional_suffix: str | None) -> Path:
+    """Apply an additional suffix before the final file extension.
+
+    Examples:
+        replay-plan.json + "v2" -> replay-plan.v2.json
+        replay-plan.exclude-unranked.json + "v2" -> replay-plan.exclude-unranked.v2.json
+    """
+    if not additional_suffix:
+        return plan_path
+    file_name = plan_path.name
+    dot_index = file_name.rfind(".")
+    if dot_index <= 0:
+        new_name = f"{file_name}.{additional_suffix}"
+    else:
+        new_name = f"{file_name[:dot_index]}.{additional_suffix}{file_name[dot_index:]}"
+    return (plan_path.parent / new_name).resolve()
 
 
 def split_two_group_plan_paths(
@@ -1425,6 +1492,7 @@ def build_planned_request(
     record: dict[str, Any],
     index: int,
     configured_model: str,
+    model_override: str | None = None,
     tokenize_endpoint: str,
     request_timeout_s: float,
     delta_agent_action_after_s: float,
@@ -1434,16 +1502,20 @@ def build_planned_request(
         raise ValueError(f"Request body must be object at index={index}")
     request_body = copy.deepcopy(request_body)
 
-    record_model = record.get("model")
     model_for_tokenize: str | None = None
-    if isinstance(record_model, str) and record_model.strip():
-        model_for_tokenize = record_model.strip()
+    if model_override is not None:
+        model_for_tokenize = model_override
+        request_body["model"] = model_override
     else:
-        payload_model = request_body.get("model")
-        if isinstance(payload_model, str) and payload_model.strip():
-            model_for_tokenize = payload_model.strip()
-    if not model_for_tokenize:
-        model_for_tokenize = configured_model
+        record_model = record.get("model")
+        if isinstance(record_model, str) and record_model.strip():
+            model_for_tokenize = record_model.strip()
+        else:
+            payload_model = request_body.get("model")
+            if isinstance(payload_model, str) and payload_model.strip():
+                model_for_tokenize = payload_model.strip()
+        if not model_for_tokenize:
+            model_for_tokenize = configured_model
 
     method = record.get("http_method")
     path = record.get("http_path")
@@ -1637,6 +1709,26 @@ def cmd_compile(args: argparse.Namespace) -> int:
         ),
         field_name="--request-timeout-s",
     )
+    compile_model_override_value = parse_optional_str(
+        (
+            args.model
+            if getattr(args, "model", None) is not None
+            else compile_config.get("model")
+        ),
+        field_name="model",
+    )
+    compile_model_override = (
+        compile_model_override_value.strip()
+        if compile_model_override_value is not None
+        else None
+    )
+    compile_model_override_key: str | None = None
+    compile_model_override_resolved: str | None = None
+    if compile_model_override is not None:
+        (
+            compile_model_override_key,
+            compile_model_override_resolved,
+        ) = resolve_configured_compile_model_override(compile_model_override)
     split_two_group_plans = parse_optional_bool(
         (
             args.split_two_group_plans
@@ -1665,6 +1757,19 @@ def cmd_compile(args: argparse.Namespace) -> int:
             "split_two_group_metric must be one of: "
             f"{supported_values}. Got {split_two_group_metric!r}"
         )
+    additional_suffix_value = parse_optional_str(
+        (
+            args.additional_suffix
+            if getattr(args, "additional_suffix", None) is not None
+            else compile_config.get("additional_suffix")
+        ),
+        field_name="additional_suffix",
+    )
+    additional_suffix = (
+        additional_suffix_value.strip()
+        if additional_suffix_value is not None
+        else None
+    )
     exclude_unranked_trails_value = parse_optional_bool(
         (
             args.exclude_unranked_trails
@@ -1727,6 +1832,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
                         job_dir=discovered_job_dir,
                         port_profile_id=compile_port_profile_id,
                         request_timeout_s=request_timeout_s_override,
+                        model_override=compile_model_override,
                         split_two_group_plans=split_two_group_plans,
                         split_two_group_metric=split_two_group_metric,
                         exclude_unranked_trails=exclude_unranked_trails,
@@ -1776,6 +1882,9 @@ def cmd_compile(args: argparse.Namespace) -> int:
             "job_count_failed": failed_count,
             "parallel_max_workers": max_workers,
             "port_profile_id": compile_port_profile_id,
+            "model_override": compile_model_override,
+            "model_override_key": compile_model_override_key,
+            "model_override_resolved": compile_model_override_resolved,
             "split_two_group_plans": split_two_group_plans,
             "exclude_unranked_trails": exclude_unranked_trails,
             "jobs": job_summaries,
@@ -1812,6 +1921,15 @@ def cmd_compile(args: argparse.Namespace) -> int:
         metric=split_two_group_metric,
     )
 
+    # Apply additional suffix if specified
+    plan_path = apply_additional_suffix(plan_path, additional_suffix)
+    split_two_group_top_path = apply_additional_suffix(
+        split_two_group_top_path, additional_suffix
+    )
+    split_two_group_rest_path = apply_additional_suffix(
+        split_two_group_rest_path, additional_suffix
+    )
+
     existing_plan_payload: dict[str, Any] | None = None
     if not split_two_group_plans:
         if plan_path.exists():
@@ -1822,16 +1940,26 @@ def cmd_compile(args: argparse.Namespace) -> int:
                 if isinstance(loaded_payload, dict):
                     existing_plan_payload = loaded_payload
         existing_exclude_unranked = False
+        existing_model_override: str | None = None
         if existing_plan_payload is not None:
             existing_compile_options = existing_plan_payload.get("compile_options")
             if isinstance(existing_compile_options, dict):
                 existing_exclude_unranked = bool(
                     existing_compile_options.get("exclude_unranked_trails")
                 )
+            existing_model_override = extract_plan_compile_model_override(
+                existing_plan_payload
+            )
         if (
             existing_plan_payload is not None
             and is_replay_plan_compile_version_current(existing_plan_payload)
             and existing_exclude_unranked == exclude_unranked_trails
+            and existing_model_override == compile_model_override_resolved
+            and (
+                compile_model_override_resolved is None
+                or extract_plan_replay_model(existing_plan_payload)
+                == compile_model_override_resolved
+            )
         ):
             launch_policy_payload = existing_plan_payload.get("launch_policy")
             launch_strategy = (
@@ -1852,6 +1980,10 @@ def cmd_compile(args: argparse.Namespace) -> int:
                 "reused_existing_plan": True,
                 "exclude_unranked_trails": exclude_unranked_trails,
             }
+            if compile_model_override is not None:
+                summary["model_override"] = compile_model_override
+                summary["model_override_key"] = compile_model_override_key
+                summary["model_override_resolved"] = compile_model_override_resolved
             if config_file_path is not None:
                 summary["source_config"] = str(config_file_path.expanduser().resolve())
             print(json.dumps(summary, indent=2, ensure_ascii=True))
@@ -1885,6 +2017,19 @@ def cmd_compile(args: argparse.Namespace) -> int:
             and existing_rest_plan is not None
             and is_replay_plan_compile_version_current(existing_top_plan)
             and is_replay_plan_compile_version_current(existing_rest_plan)
+            and extract_plan_compile_model_override(existing_top_plan)
+            == compile_model_override_resolved
+            and extract_plan_compile_model_override(existing_rest_plan)
+            == compile_model_override_resolved
+            and (
+                compile_model_override_resolved is None
+                or (
+                    extract_plan_replay_model(existing_top_plan)
+                    == compile_model_override_resolved
+                    and extract_plan_replay_model(existing_rest_plan)
+                    == compile_model_override_resolved
+                )
+            )
             and split_plan_matches_requested_metric(
                 plan_payload=existing_top_plan,
                 metric=split_two_group_metric,
@@ -1926,6 +2071,10 @@ def cmd_compile(args: argparse.Namespace) -> int:
                 "split_two_group_plans": True,
                 "split_two_group_metric": split_two_group_metric,
             }
+            if compile_model_override is not None:
+                summary["model_override"] = compile_model_override
+                summary["model_override_key"] = compile_model_override_key
+                summary["model_override_resolved"] = compile_model_override_resolved
             if config_file_path is not None:
                 summary["source_config"] = str(config_file_path.expanduser().resolve())
             print(json.dumps(summary, indent=2, ensure_ascii=True))
@@ -1949,11 +2098,12 @@ def cmd_compile(args: argparse.Namespace) -> int:
     if backend_name != "harbor":
         raise ValueError(f"unsupported backend: {backend_name!r}")
 
-    configured_model, tokenize_endpoint = resolve_compile_target(
+    source_configured_model, tokenize_endpoint = resolve_compile_target(
         config=config,
         results_entries=results_entries,
         port_profile_id=compile_port_profile_id,
     )
+    configured_model = compile_model_override_resolved or source_configured_model
     request_timeout_s = (
         request_timeout_s_override
         if request_timeout_s_override is not None
@@ -2203,6 +2353,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
                         record=record,
                         index=index,
                         configured_model=configured_model,
+                        model_override=compile_model_override_resolved,
                         tokenize_endpoint=tokenize_endpoint,
                         request_timeout_s=request_timeout_s,
                         delta_agent_action_after_s=delta_agent_action_after[index],
@@ -2259,6 +2410,9 @@ def cmd_compile(args: argparse.Namespace) -> int:
                 "exclude_unranked_trails": exclude_unranked_trails,
             },
         }
+        if compile_model_override_resolved is not None:
+            payload["compile_options"]["model_override"] = compile_model_override_resolved
+            payload["compile_options"]["model_override_key"] = compile_model_override_key
         if exclude_unranked_trails:
             payload["compile_options"]["exclude_unranked_source_path"] = (
                 str(exclude_unranked_source_path)
@@ -2301,7 +2455,13 @@ def cmd_compile(args: argparse.Namespace) -> int:
             "compile_version": REPLAY_PLAN_COMPILE_VERSION,
             "reused_existing_plan": False,
             "exclude_unranked_trails": exclude_unranked_trails,
+            "model": configured_model,
         }
+        if compile_model_override is not None:
+            summary["model_override"] = compile_model_override
+            summary["model_override_key"] = compile_model_override_key
+            summary["model_override_resolved"] = compile_model_override_resolved
+            summary["source_model"] = source_configured_model
         if exclude_unranked_trails:
             summary["exclude_unranked_source_path"] = (
                 str(exclude_unranked_source_path)
@@ -2404,7 +2564,13 @@ def cmd_compile(args: argparse.Namespace) -> int:
         "split_two_group_source_path": (
             str(split_two_group_source_path) if split_two_group_source_path is not None else None
         ),
+        "model": configured_model,
     }
+    if compile_model_override is not None:
+        summary["model_override"] = compile_model_override
+        summary["model_override_key"] = compile_model_override_key
+        summary["model_override_resolved"] = compile_model_override_resolved
+        summary["source_model"] = source_configured_model
     if ignored_unranked_unmatched_trails:
         summary["split_two_group_note"] = (
             "ignored unmatched compiled trails that were listed in split summary "
@@ -3891,6 +4057,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     compile_parser.add_argument(
+        "--model",
+        default=None,
+        help=(
+            "Optional model override for compiled replay plans. "
+            "Must match a name configured in configs/model_config.toml "
+            "(model key, served_model_name, or vllm_model_name). "
+            "When set, compile rewrites replay_target.model and each request body model."
+        ),
+    )
+    compile_parser.add_argument(
         "--split-two-group-plans",
         action="store_true",
         default=None,
@@ -3917,6 +4093,15 @@ def build_parser() -> argparse.ArgumentParser:
             "Non-split mode only. Exclude trails listed under "
             "<job-dir>/original-analysis/split/top-p-usage-ratio-summary.json "
             "unranked_trails."
+        ),
+    )
+    compile_parser.add_argument(
+        "--additional-suffix",
+        default=None,
+        help=(
+            "Optional suffix to append before the final .json extension. "
+            "For example, with --additional-suffix v2, replay-plan.json "
+            "becomes replay-plan.v2.json. Applied after other suffixes."
         ),
     )
     compile_parser.set_defaults(func=cmd_compile)

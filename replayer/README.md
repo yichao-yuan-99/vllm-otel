@@ -29,11 +29,13 @@ python -m replayer --help
 - `--plan-out <path>`: output replay plan path (default: `<job-dir>/replay-plan.json`; with `--exclude-unranked-trails`, default: `<job-dir>/replay-plan.exclude-unranked.json`).
 - `--port-profile-id <int>`: required; resolve compile-time tokenizer endpoint from `configs/port_profiles.toml`.
 - `--request-timeout-s <float>`: optional HTTP timeout for compile-time tokenizer requests (default: `3600`).
+- `--model <string>`: optional compile-time model override. Must match a name in `configs/model_config.toml` (model key, served model name, or vLLM model name). When set, compile rewrites `replay_target.model` and each request body `model`.
 - `--split-two-group-plans`: optional; write two split plans based on precomputed grouping from `<job-dir>/original-analysis/split/`.
 - `--split-two-group-metric <token_usage|context_usage>`: grouping metric file for `--split-two-group-plans` (default: `token_usage`).
   - `token_usage` reads `top-p-token-usage-two-groups.json`
   - `context_usage` reads `top-p-context-usage-two-groups.json`
 - `--exclude-unranked-trails`: non-split compile only; exclude trails listed under `original-analysis/split/top-p-usage-ratio-summary.json` `unranked_trails`.
+- `--additional-suffix <string>`: optional; append a suffix before the final `.json` extension. For example, `replay-plan.json` with `--additional-suffix v2` becomes `replay-plan.v2.json`. Applied after other suffixes like `--exclude-unranked-trails` or `--split-two-group-plans`.
 - Naming/reuse details: `replayer/README.split-two-group-plans.md`
 
 `python -m replayer replay` options:
@@ -92,6 +94,15 @@ python -m replayer compile \
   --job-dir tests/output/con-driver/job-20260225T035758Z \
   --port-profile-id 1 \
   --plan-out tests/output/tmp-replay-plan-20260225T035758Z-v2.json
+```
+
+Compile with model override:
+
+```bash
+python -m replayer compile \
+  --job-dir tests/output/con-driver/job-20260225T035758Z \
+  --port-profile-id 1 \
+  --model qwen3_coder_30b_fp8
 ```
 
 Compile every profiled job under a root:

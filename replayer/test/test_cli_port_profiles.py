@@ -795,6 +795,115 @@ url = "http://127.0.0.1:9999"
     assert plan_payload["replay_target"]["model"] == "Test-Model"
 
 
+def test_cmd_compile_model_override_updates_replay_target_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    job_dir = tmp_path / "job"
+    _write_minimal_compile_job(job_dir)
+    plan_path = tmp_path / "plan-model-override.json"
+
+    monkeypatch.setattr(
+        "replayer.cli.resolve_compile_target",
+        lambda **_: (
+            "qwen3_coder_30b",
+            "http://127.0.0.1:9998/tokenize",
+        ),
+    )
+
+    exit_code = cmd_compile(
+        argparse.Namespace(
+            job_dir=str(job_dir),
+            plan_out=str(plan_path),
+            backend=None,
+            port_profile_id=1,
+            model="qwen3_coder_30b_fp8",
+        )
+    )
+
+    assert exit_code == 0
+    plan_payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert plan_payload["replay_target"]["model"] == "Qwen3-Coder-30B-A3B-Instruct-FP8"
+    assert (
+        plan_payload["compile_options"]["model_override"]
+        == "Qwen3-Coder-30B-A3B-Instruct-FP8"
+    )
+    assert plan_payload["compile_options"]["model_override_key"] == "qwen3_coder_30b_fp8"
+
+
+def test_cmd_compile_model_override_forces_recompile_instead_of_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    job_dir = tmp_path / "job"
+    _write_minimal_compile_job(job_dir)
+    plan_path = tmp_path / "replay-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "compile_version": REPLAY_PLAN_COMPILE_VERSION,
+                "backend": "harbor",
+                "replay_target": {"model": "qwen3_coder_30b"},
+                "launch_policy": {"strategy": "config_ordered"},
+                "workers": [],
+                "compile_options": {"exclude_unranked_trails": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "replayer.cli.resolve_compile_target",
+        lambda **_: (
+            "qwen3_coder_30b",
+            "http://127.0.0.1:9998/tokenize",
+        ),
+    )
+
+    exit_code = cmd_compile(
+        argparse.Namespace(
+            job_dir=str(job_dir),
+            plan_out=str(plan_path),
+            backend=None,
+            port_profile_id=1,
+            model="qwen3_coder_30b_fp8",
+        )
+    )
+
+    assert exit_code == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["reused_existing_plan"] is False
+    assert summary["model_override"] == "qwen3_coder_30b_fp8"
+    assert summary["model_override_key"] == "qwen3_coder_30b_fp8"
+    assert summary["model_override_resolved"] == "Qwen3-Coder-30B-A3B-Instruct-FP8"
+
+    plan_payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert plan_payload["replay_target"]["model"] == "Qwen3-Coder-30B-A3B-Instruct-FP8"
+
+
+def test_cmd_compile_model_override_rejects_unknown_config_model(
+    tmp_path: Path,
+) -> None:
+    job_dir = tmp_path / "job"
+    _write_minimal_compile_job(job_dir)
+    plan_path = tmp_path / "replay-plan.json"
+
+    with pytest.raises(
+        ValueError,
+        match="--model must match a name configured in configs/model_config.toml",
+    ):
+        cmd_compile(
+            argparse.Namespace(
+                job_dir=str(job_dir),
+                plan_out=str(plan_path),
+                backend=None,
+                port_profile_id=1,
+                model="not_a_configured_model",
+            )
+        )
+
+
 def test_cmd_compile_rejects_backend_override_in_config(tmp_path: Path) -> None:
     job_dir = tmp_path / "job"
     job_dir.mkdir(parents=True)
@@ -1312,6 +1421,52 @@ def test_build_planned_request_for_client_disconnected_record(
     assert "stop" not in planned["body"]
     assert "stop_token_ids" not in planned["body"]
     assert planned["body"]["vllm_xargs"] == {"temperature": 0.0}
+
+
+def test_build_planned_request_model_override_rewrites_body_and_tokenize_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    def fake_tokenize_response_text(
+        *,
+        tokenize_endpoint: str,
+        model_name: str,
+        text: str | None,
+        timeout_s: float,
+    ) -> list[int]:
+        observed["tokenize_endpoint"] = tokenize_endpoint
+        observed["model_name"] = model_name
+        observed["text"] = text
+        observed["timeout_s"] = timeout_s
+        return [1, 2, 3]
+
+    monkeypatch.setattr("replayer.cli.tokenize_response_text", fake_tokenize_response_text)
+
+    planned = build_planned_request(
+        record={
+            "request_id": "req-override-1",
+            "model": "source-model-record",
+            "http_method": "POST",
+            "http_path": "v1/chat/completions",
+            "request": {
+                "model": "source-model-body",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            "response": {"choices": [{"message": {"content": "ok"}}]},
+            "status_code": 200,
+        },
+        index=0,
+        configured_model="source-model-config",
+        model_override="target-model-override",
+        tokenize_endpoint="http://127.0.0.1:9998/tokenize",
+        request_timeout_s=5.0,
+        delta_agent_action_after_s=0.0,
+    )
+
+    assert planned["model_for_tokenize"] == "target-model-override"
+    assert planned["body"]["model"] == "target-model-override"
+    assert observed["model_name"] == "target-model-override"
 
 
 def test_cmd_replay_updates_progress_bar(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

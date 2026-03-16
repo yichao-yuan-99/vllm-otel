@@ -1,0 +1,143 @@
+# Using `--additional-suffix` for Multi-Model Variant Plans
+
+The `--additional-suffix` option allows you to compile multiple replay plans from the same source profiled job, distinguished by a suffix in the filename. This is useful when you need to replay the same workload against different model variants (e.g., full-precision vs FP8-quantized).
+
+## Use Case: Comparing Model Variants
+
+Suppose you have profiled a workload and want to replay it against two variants of the same model:
+- `qwen3_coder_30b` (full precision)
+- `qwen3_coder_30b_fp8` (FP8 quantized)
+
+Since both replays use the same source profiled job, you need to distinguish the compiled plans.
+
+## Example Workflow
+
+### 1. Profile the Source Workload (Once)
+
+Run your con-driver experiment to profile the workload:
+
+```bash
+# Profile with the default model
+python -m con_driver orchestrate \
+  --config configs/my-experiment.toml \
+  --dataset dabstep \
+  --agent mini-swe-agent
+```
+
+This produces a profiled job directory: `results/qwen3-coder-30b/dabstep/mini-swe-agent/dabstep-20260306T194929Z/`
+
+### 2. Compile Plans for Each Model Variant
+
+Use `--additional-suffix` to distinguish the compiled plans:
+
+```bash
+# Compile plan for full-precision model
+python -m replayer compile \
+  --job-dir results/qwen3-coder-30b/dabstep/mini-swe-agent/dabstep-20260306T194929Z \
+  --port-profile-id 1 \
+  --model qwen3_coder_30b \
+  --additional-suffix qwen3_fp16
+
+# Output: replay-plan.qwen3_fp16.json
+```
+
+```bash
+# Compile plan for FP8 model
+python -m replayer compile \
+  --job-dir results/qwen3-coder-30b/dabstep/mini-swe-agent/dabstep-20260306T194929Z \
+  --port-profile-id 2 \
+  --model qwen3_coder_30b_fp8 \
+  --additional-suffix qwen3_fp8
+
+# Output: replay-plan.qwen3_fp8.json
+```
+
+Both plans are derived from the same source job but are stored separately.
+
+### 3. Replay Against Each Model
+
+```bash
+# Replay against full-precision model
+python -m replayer replay \
+  --plan results/qwen3-coder-30b/dabstep/mini-swe-agent/dabstep-20260306T194929Z/replay-plan.qwen3_fp16.json \
+  --port-profile-id 1 \
+  --output-dir results/replay/dabstep-fp16-run
+
+# Replay against FP8 model
+python -m replayer replay \
+  --plan results/qwen3-coder-30b/dabstep/mini-swe-agent/dabstep-20260306T194929Z/replay-plan.qwen3_fp8.json \
+  --port-profile-id 2 \
+  --output-dir results/replay/dabstep-fp8-run
+```
+
+## Combining with Split Plans
+
+When using `--split-two-group-plans`, the suffix is applied after the split group identifier:
+
+```bash
+# Compile split plans for both model variants
+python -m replayer compile \
+  --job-dir results/qwen3-coder-30b/dabstep/mini-swe-agent/dabstep-20260306T194929Z \
+  --port-profile-id 1 \
+  --model qwen3_coder_30b \
+  --split-two-group-plans  \
+  --additional-suffix fp16
+
+# Outputs:
+# - replay-plan.token.top.fp16.json
+# - replay-plan.token.rest.fp16.json
+```
+
+## Using with Sweep Workflows
+
+### Sweep Concurrency
+
+```bash
+# Generate configs referencing the suffixed plans
+python experiments/sweep-concurrency/generate_replay_configs.py \
+  --plan results/.../replay-plan.qwen3_fp16.json \
+  --output-config-dir experiments/sweep-concurrency/generated/fp16
+```
+
+### Sweep QPS Local (Mix)
+
+When using `sweep-qps-local/mix` with suffixed plans:
+
+```bash
+python3 experiments/sweep-qps-local/mix/generate_replay_configs.py \
+  --source-run-dir results/qwen3-coder-30b/dabstep/mini-swe-agent/dabstep-20260306T194929Z \
+  --additional-suffix fp16 \
+  --qps 0.1 \
+  --top-percent-list 0,25,50,75,100 \
+  --poisson-seed 7 \
+  --randomize-seed 11 \
+  --time-constraint-s 1800 \
+  -p mi3001x \
+  -m qwen3_coder_30b
+```
+
+This will:
+- Read `replay-plan.token.top.fp16.json` and `replay-plan.token.rest.fp16.json`
+- Output mixed plans like `replay-plan.mix.p50.fp16.json`
+
+## Naming Convention Summary
+
+| Base Plan | Suffix | Output Plan Name |
+|-----------|--------|------------------|
+| `replay-plan.json` | `v2` | `replay-plan.v2.json` |
+| `replay-plan.json` | `fp16` | `replay-plan.fp16.json` |
+| `replay-plan.json` | `qwen3_fp8` | `replay-plan.qwen3_fp8.json` |
+
+With split plans:
+
+| Split Type | Suffix | Output Plan Names |
+|------------|--------|-------------------|
+| `token` | `v2` | `replay-plan.token.top.v2.json`, `replay-plan.token.rest.v2.json` |
+| `context` | `fp8` | `replay-plan.context.top.fp8.json`, `replay-plan.context.rest.fp8.json` |
+
+## Notes
+
+- `--model` must match a model name configured in `configs/model_config.toml`.
+- The suffix is inserted **before** the `.json` extension: `replay-plan.<suffix>.json`
+- When combined with other suffixes (like `--exclude-unranked-trails`), the order is: `replay-plan.exclude-unranked.<suffix>.json`
+- The suffix can be any valid filename string (alphanumeric, underscores, hyphens recommended)

@@ -30,7 +30,7 @@ DEFAULT_SERVER_CONFIG_PATH = (
     REPO_ROOT / "servers" / "servers-amdhpc" / "server_config.toml"
 )
 VALID_TOML_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-SPLIT_GROUPS = ("top", "rest")
+ALL_SPLIT_GROUPS = ("top", "rest")
 SPLIT_PLAN_METRIC_ALIASES = ("token", "context")
 
 
@@ -66,6 +66,23 @@ def parse_qps_list(raw: str) -> list[float]:
     if len(set(values)) != len(values):
         raise ValueError("--qps-list cannot contain duplicate values")
     return values
+
+
+def parse_split_groups(raw: str) -> tuple[str, ...]:
+    tokens = [token.strip().lower() for token in raw.split(",")]
+    if not tokens or any(not token for token in tokens):
+        raise ValueError("--split-groups must be a non-empty comma-separated list")
+
+    if len(set(tokens)) != len(tokens):
+        raise ValueError("--split-groups cannot contain duplicate values")
+
+    invalid = [token for token in tokens if token not in ALL_SPLIT_GROUPS]
+    if invalid:
+        allowed = ", ".join(ALL_SPLIT_GROUPS)
+        raise ValueError(
+            f"--split-groups contains unsupported value(s): {invalid}; supported: {allowed}"
+        )
+    return tuple(tokens)
 
 
 def parse_optional_object_json(raw: str | None, *, field_name: str) -> dict[str, Any]:
@@ -215,21 +232,157 @@ def derive_metric_split_plan_paths(
     }
 
 
-def derive_default_split_plan_paths(base_plan_path: Path) -> dict[str, Path]:
+def _extract_suffix_from_candidate(
+    *,
+    file_name: str,
+    prefix: str,
+    extension: str,
+) -> str | None:
+    if extension:
+        if not file_name.endswith(extension):
+            return None
+        base_name = file_name[: -len(extension)]
+    else:
+        base_name = file_name
+
+    if not base_name.startswith(prefix):
+        return None
+
+    suffix_part = base_name[len(prefix) :]
+    if not suffix_part:
+        return ""
+    if not suffix_part.startswith("."):
+        return None
+    return suffix_part[1:]
+
+
+def discover_split_plan_pair(
+    base_plan_path: Path,
+    *,
+    metric_alias: str | None,
+    preferred_suffix: str | None = None,
+) -> dict[str, Path] | None:
+    base_stem = base_plan_path.stem
+    extension = base_plan_path.suffix
+    if metric_alias is None:
+        top_prefix = f"{base_stem}.top"
+        rest_prefix = f"{base_stem}.rest"
+    else:
+        top_prefix = f"{base_stem}.{metric_alias}.top"
+        rest_prefix = f"{base_stem}.{metric_alias}.rest"
+
+    top_by_suffix: dict[str, Path] = {}
+    rest_by_suffix: dict[str, Path] = {}
+    for candidate_path in base_plan_path.parent.iterdir():
+        if not candidate_path.is_file():
+            continue
+        candidate_name = candidate_path.name
+        top_suffix = _extract_suffix_from_candidate(
+            file_name=candidate_name,
+            prefix=top_prefix,
+            extension=extension,
+        )
+        if top_suffix is not None:
+            top_by_suffix[top_suffix] = candidate_path.resolve()
+
+        rest_suffix = _extract_suffix_from_candidate(
+            file_name=candidate_name,
+            prefix=rest_prefix,
+            extension=extension,
+        )
+        if rest_suffix is not None:
+            rest_by_suffix[rest_suffix] = candidate_path.resolve()
+
+    common_suffixes = set(top_by_suffix).intersection(rest_by_suffix)
+    if not common_suffixes:
+        return None
+
+    if preferred_suffix is not None:
+        if preferred_suffix not in common_suffixes:
+            return None
+        selected_suffix = preferred_suffix
+    elif "" in common_suffixes:
+        selected_suffix = ""
+    else:
+        selected_suffix = max(
+            common_suffixes,
+            key=lambda suffix: (
+                max(
+                    top_by_suffix[suffix].stat().st_mtime_ns,
+                    rest_by_suffix[suffix].stat().st_mtime_ns,
+                ),
+                suffix,
+            ),
+        )
+    return {
+        "top": top_by_suffix[selected_suffix],
+        "rest": rest_by_suffix[selected_suffix],
+    }
+
+
+def maybe_strip_last_stem_component(base_plan_path: Path) -> tuple[Path, str] | None:
+    stem = base_plan_path.stem
+    dot_index = stem.rfind(".")
+    if dot_index <= 0:
+        return None
+    stripped_stem = stem[:dot_index]
+    inferred_suffix = stem[dot_index + 1 :]
+    if not stripped_stem or not inferred_suffix:
+        return None
+    stripped_path = (base_plan_path.parent / f"{stripped_stem}{base_plan_path.suffix}").resolve()
+    return stripped_path, inferred_suffix
+
+
+def discover_default_split_plan_paths(
+    *,
+    base_plan_path: Path,
+    preferred_suffix: str | None = None,
+) -> dict[str, Path] | None:
     for metric_alias in SPLIT_PLAN_METRIC_ALIASES:
-        candidate_paths = derive_metric_split_plan_paths(
+        discovered_paths = discover_split_plan_pair(
             base_plan_path,
             metric_alias=metric_alias,
+            preferred_suffix=preferred_suffix,
         )
-        if all(path.exists() and path.is_file() for path in candidate_paths.values()):
-            return candidate_paths
+        if discovered_paths is not None:
+            return discovered_paths
 
-    legacy_paths = {
-        "top": with_plan_name_suffix(base_plan_path, "top"),
-        "rest": with_plan_name_suffix(base_plan_path, "rest"),
-    }
-    if all(path.exists() and path.is_file() for path in legacy_paths.values()):
-        return legacy_paths
+    return discover_split_plan_pair(
+        base_plan_path,
+        metric_alias=None,
+        preferred_suffix=preferred_suffix,
+    )
+
+
+def derive_default_split_plan_paths(base_plan_path: Path) -> dict[str, Path]:
+    discovered_paths = discover_default_split_plan_paths(base_plan_path=base_plan_path)
+    if discovered_paths is not None:
+        return discovered_paths
+
+    stripped_candidate = maybe_strip_last_stem_component(base_plan_path)
+    if stripped_candidate is not None:
+        stripped_base_plan_path, inferred_suffix = stripped_candidate
+        discovered_paths = discover_default_split_plan_paths(
+            base_plan_path=stripped_base_plan_path,
+            preferred_suffix=inferred_suffix,
+        )
+        if discovered_paths is not None:
+            return discovered_paths
+
+        discovered_paths = discover_default_split_plan_paths(
+            base_plan_path=stripped_base_plan_path,
+        )
+        if discovered_paths is not None:
+            return discovered_paths
+
+        fallback_paths = derive_metric_split_plan_paths(
+            stripped_base_plan_path,
+            metric_alias="token",
+        )
+        return {
+            split_group_name: with_plan_name_suffix(path, inferred_suffix)
+            for split_group_name, path in fallback_paths.items()
+        }
 
     return derive_metric_split_plan_paths(base_plan_path, metric_alias="token")
 
@@ -536,6 +689,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma-separated Poisson rates (requests per second), e.g. '0.05,0.1,0.2'",
     )
     parser.add_argument(
+        "--split-groups",
+        default="top,rest",
+        help=(
+            "Comma-separated split groups to generate: top, rest, or top,rest "
+            "(default: top,rest)."
+        ),
+    )
+    parser.add_argument(
         "--poisson-seed",
         required=True,
         type=parse_non_negative_int,
@@ -688,6 +849,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(f"invalid --server-config: {server_config_path}")
 
         qps_values = parse_qps_list(args.qps_list)
+        selected_split_groups = parse_split_groups(args.split_groups)
         time_constraint_s = parse_positive_float(
             str(args.time_constraint_s),
             field_name="--time-constraint-s",
@@ -716,7 +878,8 @@ def main(argv: list[str] | None = None) -> int:
             "top": top_plan_path,
             "rest": rest_plan_path,
         }
-        for split_group_name, split_plan_path in split_plan_paths.items():
+        for split_group_name in selected_split_groups:
+            split_plan_path = split_plan_paths[split_group_name]
             if not split_plan_path.exists() or not split_plan_path.is_file():
                 raise ValueError(
                     f"{split_group_name} replay plan does not exist: {split_plan_path}"
@@ -763,11 +926,10 @@ def main(argv: list[str] | None = None) -> int:
 
         generated_experiments: list[dict[str, Any]] = []
         generated_experiments_by_group: dict[str, list[dict[str, Any]]] = {
-            "top": [],
-            "rest": [],
+            split_group_name: [] for split_group_name in selected_split_groups
         }
         generated_submit_paths: list[str] = []
-        for split_group_name in SPLIT_GROUPS:
+        for split_group_name in selected_split_groups:
             split_plan_path = split_plan_paths[split_group_name]
             group_dir = (batch_dir / split_group_name).resolve()
             group_dir.mkdir(parents=True, exist_ok=True)
@@ -865,8 +1027,8 @@ def main(argv: list[str] | None = None) -> int:
             "batch_timestamp": batch_timestamp,
             "source_run_dir": str(source_run_dir),
             "plan_paths": {
-                "top": str(top_plan_path),
-                "rest": str(rest_plan_path),
+                split_group_name: str(split_plan_paths[split_group_name])
+                for split_group_name in selected_split_groups
             },
             "server_config": str(server_config_path),
             "partition": args.partition,
@@ -886,7 +1048,7 @@ def main(argv: list[str] | None = None) -> int:
             "randomize_seed": args.randomize_seed,
             "time_constraint_s": time_constraint_s,
             "qps_list": qps_values,
-            "split_groups": list(SPLIT_GROUPS),
+            "split_groups": list(selected_split_groups),
             "generation_command_raw": generation_command_raw,
             "submit_all_script": str(submit_all_script_path),
             "submit_all_command": f"bash {path_for_config(submit_all_script_path)}",
