@@ -3,7 +3,7 @@ name: vllm-otel
 services:
   jaeger:
     image: ${JAEGER_IMAGE:?Set JAEGER_IMAGE via servers/servers-docker/service_images.toml}
-    container_name: jaeger
+    container_name: ${JAEGER_CONTAINER_NAME:-jaeger}
     restart: unless-stopped
     environment:
       COLLECTOR_ZIPKIN_HOST_PORT: ":9411"

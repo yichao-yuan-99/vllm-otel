@@ -7,6 +7,7 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -52,16 +53,27 @@ COMPOSE_ENV_FILE = RUNTIME_DIR / "compose.env"
 DEFAULT_WAIT_UP_TIMEOUT_SECONDS = 900
 DEFAULT_WAIT_UP_POLL_INTERVAL_SECONDS = 2.0
 DEFAULT_STARTUP_LOG_TAIL_LINES = 40
+GATEWAY_STARTUP_PROBE_SECONDS = 3.0
+DEFAULT_COMPOSE_PROJECT_NAME = "vllm-otel"
 DEFAULT_JAEGER_CONTAINER_NAME = "jaeger"
 DEFAULT_VLLM_CONTAINER_NAME = "vllm-openai-otel-lp"
 DEFAULT_OTEL_SERVICE_NAME = "vllm-server"
+DEFAULT_GATEWAY_CONFIG_PATH = REPO_ROOT / "gateway" / "config.toml"
+DEFAULT_GATEWAY_CONFIG_EXAMPLE_PATH = REPO_ROOT / "gateway" / "config.example.toml"
+DEFAULT_GATEWAY_VENV_DIR = REPO_ROOT / ".venv"
+DEFAULT_GATEWAY_HOST = "0.0.0.0"
+DEFAULT_GATEWAY_PID_FILE_PREFIX = "gateway_d"
+DEFAULT_GATEWAY_LOG_FILE_PREFIX = "gateway_d"
 VLLM_CRASH_LOOP_RESTART_THRESHOLD = 3
 COMPOSE_MANAGED_ENV_KEYS = frozenset(
     {
+        "COMPOSE_PROJECT_NAME",
         "JAEGER_IMAGE",
+        "JAEGER_CONTAINER_NAME",
         "JAEGER_API_PORT",
         "JAEGER_OTLP_PORT",
         "OTEL_SERVICE_NAME",
+        "PORT_PROFILE_ID",
         "VLLM_CONTAINER_NAME",
         "VLLM_MODEL_EXTRA_ARGS_B64",
         "VLLM_FORCE_SEQ_TRUST_REMOTE_CODE",
@@ -86,7 +98,7 @@ class ExecResult:
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
-    help="Docker control client (daemon + single active environment).",
+    help="Docker control client (daemon + managed environments).",
 )
 profiles_app = typer.Typer(add_completion=False, no_args_is_help=True, help="List configured profiles.")
 app.add_typer(profiles_app, name="profiles")
@@ -130,6 +142,77 @@ def _sanitize_path_token(value: str) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in value)
     cleaned = cleaned.strip("._-")
     return cleaned or "value"
+
+
+def _sanitize_runtime_token(value: str) -> str:
+    lowered = value.strip().lower()
+    cleaned = re.sub(r"[^a-z0-9]+", "-", lowered)
+    cleaned = cleaned.strip("-")
+    return cleaned or "value"
+
+
+def _bounded_runtime_name(prefix: str, suffix: str, *, max_length: int = 63) -> str:
+    candidate = f"{prefix}-{suffix}"
+    if len(candidate) <= max_length:
+        return candidate
+    digest = hashlib.sha1(candidate.encode("utf-8")).hexdigest()[:8]
+    keep = max(max_length - len(prefix) - len(digest) - 2, 8)
+    shortened_suffix = suffix[:keep].rstrip("-")
+    if not shortened_suffix:
+        shortened_suffix = "value"
+    return f"{prefix}-{shortened_suffix}-{digest}"
+
+
+def _runtime_names_for_selection(*, model_key: str, launch_profile_key: str) -> dict[str, str]:
+    model_token = _sanitize_runtime_token(model_key)
+    launch_token = _sanitize_runtime_token(launch_profile_key)
+    suffix = f"{model_token}-{launch_token}"
+    return {
+        "compose_project_name": _bounded_runtime_name(DEFAULT_COMPOSE_PROJECT_NAME, suffix),
+        "jaeger_container_name": _bounded_runtime_name(DEFAULT_JAEGER_CONTAINER_NAME, suffix, max_length=96),
+        "vllm_container_name": _bounded_runtime_name(DEFAULT_VLLM_CONTAINER_NAME, suffix, max_length=96),
+        "otel_service_name": _bounded_runtime_name(DEFAULT_OTEL_SERVICE_NAME, suffix, max_length=96),
+    }
+
+
+def _runtime_names_from_state(state: dict[str, Any]) -> dict[str, str]:
+    defaults = {
+        "compose_project_name": DEFAULT_COMPOSE_PROJECT_NAME,
+        "jaeger_container_name": DEFAULT_JAEGER_CONTAINER_NAME,
+        "vllm_container_name": DEFAULT_VLLM_CONTAINER_NAME,
+        "otel_service_name": DEFAULT_OTEL_SERVICE_NAME,
+    }
+    resolved = state.get("resolved")
+    if isinstance(resolved, dict):
+        runtime_names = resolved.get("runtime_names")
+        if isinstance(runtime_names, dict):
+            out = dict(defaults)
+            for key in out:
+                value = runtime_names.get(key)
+                if isinstance(value, str) and value.strip():
+                    out[key] = value.strip()
+            return out
+    env_values = _parse_compose_env_file(COMPOSE_ENV_FILE)
+    out = dict(defaults)
+    env_map = {
+        "compose_project_name": "COMPOSE_PROJECT_NAME",
+        "jaeger_container_name": "JAEGER_CONTAINER_NAME",
+        "vllm_container_name": "VLLM_CONTAINER_NAME",
+        "otel_service_name": "OTEL_SERVICE_NAME",
+    }
+    for out_key, env_key in env_map.items():
+        value = env_values.get(env_key)
+        if isinstance(value, str) and value.strip():
+            out[out_key] = value.strip()
+    return out
+
+
+def _compose_project_name() -> str:
+    env_values = _parse_compose_env_file(COMPOSE_ENV_FILE)
+    project_name = env_values.get("COMPOSE_PROJECT_NAME", "").strip()
+    if project_name:
+        return project_name
+    return DEFAULT_COMPOSE_PROJECT_NAME
 
 
 def _new_startup_log_path(*, model_key: str, port_profile_id: int, launch_profile_key: str) -> Path:
@@ -182,6 +265,8 @@ def _run_exec(
         proc = subprocess.run(
             cmd,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             timeout=timeout_seconds,
             check=False,
@@ -212,6 +297,8 @@ def _run_exec_streaming(
         proc = subprocess.Popen(
             cmd,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             env=env,
@@ -301,6 +388,281 @@ def _stop_pid(pid: int, *, timeout_seconds: float = 10.0) -> bool:
             return True
         time.sleep(0.1)
     return not _pid_is_running(pid)
+
+
+def _process_cmdline(pid: int) -> str:
+    cmdline_path = Path(f"/proc/{pid}/cmdline")
+    if not cmdline_path.exists():
+        return ""
+    try:
+        raw = cmdline_path.read_bytes()
+    except OSError:
+        return ""
+    parts = [part.decode("utf-8", errors="replace") for part in raw.split(b"\x00") if part]
+    return " ".join(parts)
+
+
+def _coerce_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+    return None
+
+
+def _current_port_profile_id(state: dict[str, Any], *, allow_env_fallback: bool = True) -> int | None:
+    selection = state.get("selection")
+    if isinstance(selection, dict):
+        profile_id = _coerce_int(selection.get("port_profile_id"))
+        if profile_id is not None:
+            return profile_id
+    if not allow_env_fallback:
+        return None
+    env_values = _parse_compose_env_file(COMPOSE_ENV_FILE)
+    return _coerce_int(env_values.get("PORT_PROFILE_ID"))
+
+
+def _gateway_runtime_files(*, port_profile_id: int) -> tuple[Path, Path]:
+    suffix = _sanitize_path_token(str(port_profile_id))
+    return (
+        RUNTIME_DIR / f"{DEFAULT_GATEWAY_PID_FILE_PREFIX}.{suffix}.pid",
+        RUNTIME_DIR / f"{DEFAULT_GATEWAY_LOG_FILE_PREFIX}.{suffix}.log",
+    )
+
+
+def _resolve_gateway_config_path() -> Path:
+    if DEFAULT_GATEWAY_CONFIG_PATH.exists():
+        return DEFAULT_GATEWAY_CONFIG_PATH
+    return DEFAULT_GATEWAY_CONFIG_EXAMPLE_PATH
+
+
+def _gateway_record_matches_running_process(record: dict[str, Any]) -> bool:
+    raw_pid = record.get("pid")
+    pid = _coerce_int(raw_pid)
+    if pid is None or not _pid_is_running(pid):
+        return False
+    cmdline = _process_cmdline(pid)
+    if not cmdline:
+        return True
+    normalized = cmdline.lower()
+    if "gateway" not in normalized or " start " not in f" {normalized} ":
+        return False
+    profile_id = _coerce_int(record.get("port_profile_id"))
+    if profile_id is not None:
+        token = f"--port-profile-id {profile_id}"
+        token_eq = f"--port-profile-id={profile_id}"
+        if token not in cmdline and token_eq not in cmdline:
+            return False
+    return True
+
+
+def _gateway_status_for_port_profile(port_profile_id: int) -> dict[str, Any]:
+    pid_file, log_file = _gateway_runtime_files(port_profile_id=port_profile_id)
+    record_raw = _read_json(pid_file, None)
+    record = record_raw if isinstance(record_raw, dict) else None
+    running = isinstance(record, dict) and _gateway_record_matches_running_process(record)
+    pid = _coerce_int(record.get("pid")) if isinstance(record, dict) else None
+    return {
+        "running": running,
+        "port_profile_id": port_profile_id,
+        "pid": pid,
+        "pid_file": str(pid_file),
+        "log_file": str(log_file),
+        "record": record,
+    }
+
+
+def _start_gateway_for_selection(selection: dict[str, Any]) -> dict[str, Any]:
+    profile_id = _coerce_int(selection.get("port_profile_id"))
+    ports = selection.get("ports")
+    if profile_id is None:
+        return _payload(
+            ok=False,
+            code=540,
+            message="cannot start gateway: missing port profile id in selection",
+        )
+    if not isinstance(ports, dict):
+        return _payload(
+            ok=False,
+            code=541,
+            message="cannot start gateway: missing resolved ports in selection",
+        )
+
+    config_path = _resolve_gateway_config_path()
+    if not config_path.exists():
+        return _payload(
+            ok=False,
+            code=542,
+            message=(
+                "cannot start gateway: config file not found "
+                f"(checked {DEFAULT_GATEWAY_CONFIG_PATH} and {DEFAULT_GATEWAY_CONFIG_EXAMPLE_PATH})"
+            ),
+        )
+
+    _ensure_runtime_dir()
+    pid_file, log_file = _gateway_runtime_files(port_profile_id=profile_id)
+    active_record = _read_json(pid_file, None)
+    if isinstance(active_record, dict):
+        if _gateway_record_matches_running_process(active_record):
+            return _payload(
+                ok=True,
+                code=0,
+                message="gateway already running",
+                data={"pid_file": str(pid_file), "record": active_record},
+            )
+        pid_file.unlink(missing_ok=True)
+
+    gateway_cmd = [
+        sys.executable,
+        "-m",
+        "gateway",
+        "start",
+        "--config",
+        str(config_path),
+        "--port-profile-id",
+        str(profile_id),
+        "--host",
+        DEFAULT_GATEWAY_HOST,
+        "--venv-dir",
+        str(DEFAULT_GATEWAY_VENV_DIR),
+        "--skip-install",
+    ]
+
+    env = dict(os.environ)
+    py_path = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{REPO_ROOT}{os.pathsep}{py_path}" if py_path else str(REPO_ROOT)
+    jaeger_api_port = _coerce_int(ports.get("jaeger_api_port"))
+    jaeger_otlp_port = _coerce_int(ports.get("jaeger_otlp_port"))
+    if jaeger_api_port is not None:
+        env["GATEWAY_JAEGER_API_BASE_URL_OVERRIDE"] = f"http://127.0.0.1:{jaeger_api_port}/api/traces"
+    if jaeger_otlp_port is not None:
+        env["GATEWAY_OTLP_TRACES_ENDPOINT_OVERRIDE"] = f"grpc://127.0.0.1:{jaeger_otlp_port}"
+
+    with log_file.open("a", encoding="utf-8") as handle:
+        handle.write(f"[{_utc_now_iso()}] starting gateway: {' '.join(gateway_cmd)}\n")
+        handle.flush()
+        proc = subprocess.Popen(
+            gateway_cmd,
+            cwd=str(REPO_ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+            env=env,
+        )
+
+    deadline = time.monotonic() + GATEWAY_STARTUP_PROBE_SECONDS
+    while time.monotonic() < deadline:
+        rc = proc.poll()
+        if rc is not None:
+            return _payload(
+                ok=False,
+                code=543,
+                message=f"failed to start gateway daemon (exit={rc})",
+                data={
+                    "port_profile_id": profile_id,
+                    "pid_file": str(pid_file),
+                    "log_file": str(log_file),
+                    "command": gateway_cmd,
+                    "log_tail": _tail_text(log_file),
+                },
+            )
+        time.sleep(0.1)
+
+    record = {
+        "pid": proc.pid,
+        "started_at": _utc_now_iso(),
+        "port_profile_id": profile_id,
+        "config_path": str(config_path),
+        "venv_dir": str(DEFAULT_GATEWAY_VENV_DIR),
+        "host": DEFAULT_GATEWAY_HOST,
+        "command": gateway_cmd,
+        "pid_file": str(pid_file),
+        "log_file": str(log_file),
+        "jaeger_api_port": jaeger_api_port,
+        "jaeger_otlp_port": jaeger_otlp_port,
+    }
+    _write_json(pid_file, record)
+    return _payload(ok=True, code=0, message="gateway started", data=record)
+
+
+def _stop_gateway_for_port_profile(port_profile_id: int) -> dict[str, Any]:
+    _ensure_runtime_dir()
+    pid_file, log_file = _gateway_runtime_files(port_profile_id=port_profile_id)
+    record_raw = _read_json(pid_file, None)
+    if not isinstance(record_raw, dict):
+        pid_file.unlink(missing_ok=True)
+        return _payload(
+            ok=True,
+            code=0,
+            message=f"gateway is not running for port profile {port_profile_id}",
+            data={
+                "port_profile_id": port_profile_id,
+                "pid_file": str(pid_file),
+                "log_file": str(log_file),
+            },
+        )
+
+    pid = _coerce_int(record_raw.get("pid"))
+    if pid is None:
+        pid_file.unlink(missing_ok=True)
+        return _payload(
+            ok=True,
+            code=0,
+            message="removed invalid gateway pid record",
+            data={"port_profile_id": port_profile_id, "pid_file": str(pid_file), "record": record_raw},
+        )
+
+    if not _gateway_record_matches_running_process(record_raw):
+        cmdline = _process_cmdline(pid) if _pid_is_running(pid) else ""
+        pid_file.unlink(missing_ok=True)
+        return _payload(
+            ok=True,
+            code=0,
+            message=f"gateway is not running for port profile {port_profile_id} (stale pid file removed)",
+            data={
+                "port_profile_id": port_profile_id,
+                "pid": pid,
+                "pid_file": str(pid_file),
+                "process_cmdline": cmdline,
+            },
+        )
+
+    _terminate_pid_or_group(pid, signal.SIGTERM)
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if not _pid_is_running(pid):
+            break
+        time.sleep(0.1)
+
+    forced = False
+    if _pid_is_running(pid):
+        forced = True
+        _terminate_pid_or_group(pid, signal.SIGKILL)
+
+    pid_file.unlink(missing_ok=True)
+    _append_text(log_file, f"[{_utc_now_iso()}] stopped gateway pid={pid} forced={forced}\n")
+    return _payload(
+        ok=True,
+        code=0,
+        message="gateway stopped",
+        data={
+            "port_profile_id": port_profile_id,
+            "pid": pid,
+            "forced": forced,
+            "pid_file": str(pid_file),
+            "log_file": str(log_file),
+        },
+    )
 
 
 def _load_daemon_record() -> dict[str, Any] | None:
@@ -429,11 +791,21 @@ def _load_port_profiles() -> tuple[str | None, dict[str, dict[str, Any]]]:
         if not isinstance(key, str) or not isinstance(value, dict):
             continue
         vllm_port = _parse_port(value.get("vllm_port"), f"profiles.{key}.vllm_port")
+        gateway_port_raw = value.get("gateway_port")
+        gateway_parse_port_raw = value.get("gateway_parse_port")
+        gateway_port = _parse_port(gateway_port_raw, f"profiles.{key}.gateway_port") if gateway_port_raw is not None else None
+        gateway_parse_port = (
+            _parse_port(gateway_parse_port_raw, f"profiles.{key}.gateway_parse_port")
+            if gateway_parse_port_raw is not None
+            else None
+        )
         jaeger_api_port = _parse_port(value.get("jaeger_api_port"), f"profiles.{key}.jaeger_api_port")
         jaeger_otlp_port = _parse_port(value.get("jaeger_otlp_port"), f"profiles.{key}.jaeger_otlp_port")
         out[key] = {
             "label": value.get("label"),
             "vllm_port": vllm_port,
+            "gateway_port": gateway_port,
+            "gateway_parse_port": gateway_parse_port,
             "jaeger_api_port": jaeger_api_port,
             "jaeger_otlp_port": jaeger_otlp_port,
         }
@@ -543,6 +915,7 @@ def _default_selection() -> dict[str, Any]:
         "model": models[model_key],
         "ports": port_profiles[port_key],
         "launch": launch_profiles[launch_key],
+        "runtime_names": _runtime_names_for_selection(model_key=model_key, launch_profile_key=launch_key),
     }
 
 
@@ -551,12 +924,22 @@ def _compose_env_values(selection: dict[str, Any]) -> dict[str, str]:
     model = selection["model"]
     ports = selection["ports"]
     launch = selection["launch"]
+    port_profile_id = selection.get("port_profile_id")
+    port_profile_id_text = str(port_profile_id) if port_profile_id is not None else ""
     model_extra_args = model.get("extra_args", [])
     trust_remote_code = _model_requests_trust_remote_code(model_extra_args)
+    runtime_names = selection.get("runtime_names")
+    if not isinstance(runtime_names, dict):
+        model_key = str(selection.get("model_key", "default-model"))
+        launch_profile_key = str(selection.get("launch_profile_key", "default-launch"))
+        runtime_names = _runtime_names_for_selection(model_key=model_key, launch_profile_key=launch_profile_key)
     return {
+        "COMPOSE_PROJECT_NAME": str(runtime_names["compose_project_name"]),
         "JAEGER_IMAGE": str(images["jaeger_image"]),
+        "JAEGER_CONTAINER_NAME": str(runtime_names["jaeger_container_name"]),
         "VLLM_IMAGE_NAME": str(images["vllm_image_name"]),
-        "VLLM_CONTAINER_NAME": DEFAULT_VLLM_CONTAINER_NAME,
+        "VLLM_CONTAINER_NAME": str(runtime_names["vllm_container_name"]),
+        "PORT_PROFILE_ID": port_profile_id_text,
         "VLLM_FORCE_SEQ_TRUST_REMOTE_CODE": "true" if trust_remote_code else "false",
         "VLLM_MODEL_EXTRA_ARGS_B64": _encode_model_extra_args(model_extra_args),
         "VLLM_MODEL_NAME": str(model["vllm_model_name"]),
@@ -565,7 +948,7 @@ def _compose_env_values(selection: dict[str, Any]) -> dict[str, str]:
         "VLLM_TENSOR_PARALLEL_SIZE": str(launch["tensor_parallel_size"]),
         "JAEGER_API_PORT": str(ports["jaeger_api_port"]),
         "JAEGER_OTLP_PORT": str(ports["jaeger_otlp_port"]),
-        "OTEL_SERVICE_NAME": DEFAULT_OTEL_SERVICE_NAME,
+        "OTEL_SERVICE_NAME": str(runtime_names["otel_service_name"]),
     }
 
 
@@ -659,9 +1042,12 @@ def _ensure_compose_env_file() -> tuple[bool, str]:
 
 
 def _compose_cmd(args: list[str]) -> list[str]:
+    project_name = _compose_project_name()
     return [
         "docker",
         "compose",
+        "--project-name",
+        project_name,
         "-f",
         str(COMPOSE_FILE),
         "-f",
@@ -710,12 +1096,19 @@ def _compose_running_services() -> tuple[bool, set[str], str]:
 
 
 def _service_urls_from_ports(ports: dict[str, Any]) -> dict[str, str]:
-    return {
+    urls = {
         "vllm": f"http://127.0.0.1:{ports['vllm_port']}",
         "jaeger_api": f"http://127.0.0.1:{ports['jaeger_api_port']}",
         "jaeger_ui": f"http://127.0.0.1:{ports['jaeger_api_port']}",
         "jaeger_otlp": f"grpc://127.0.0.1:{ports['jaeger_otlp_port']}",
     }
+    gateway_port = _coerce_int(ports.get("gateway_port"))
+    gateway_parse_port = _coerce_int(ports.get("gateway_parse_port"))
+    if gateway_port is not None:
+        urls["gateway"] = f"http://127.0.0.1:{gateway_port}"
+    if gateway_parse_port is not None:
+        urls["gateway_parse"] = f"http://127.0.0.1:{gateway_parse_port}"
+    return urls
 
 
 def _refresh_state_from_compose() -> dict[str, Any]:
@@ -939,7 +1332,7 @@ def _format_wait_progress(snapshot: dict[str, Any], *, attempts: int, elapsed_se
     parts = [f"wait-up attempt={attempts} elapsed={elapsed_seconds:.1f}s"]
 
     if isinstance(services, dict):
-        for name in ("jaeger_api", "jaeger_otlp", "vllm"):
+        for name in ("jaeger_api", "jaeger_otlp", "vllm", "gateway", "gateway_parse"):
             payload = services.get(name)
             if isinstance(payload, dict):
                 parts.append(_format_health_service_status(name, payload))
@@ -1019,6 +1412,8 @@ def _startup_failure_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any] |
 def _daemon_status_payload() -> dict[str, Any]:
     daemon_record = _daemon_running_record()
     state = _refresh_state_from_compose()
+    port_profile_id = _current_port_profile_id(state, allow_env_fallback=False)
+    gateway_status = _gateway_status_for_port_profile(port_profile_id) if port_profile_id is not None else None
     compose_ok, services, compose_error = _compose_running_services()
     return _payload(
         ok=True,
@@ -1032,6 +1427,7 @@ def _daemon_status_payload() -> dict[str, Any]:
                 "log_file": str(DAEMON_LOG_FILE),
             },
             "active_environment": state if state.get("active") else None,
+            "gateway": gateway_status,
             "compose": {
                 "ok": compose_ok,
                 "running_services": sorted(services) if compose_ok else [],
@@ -1158,6 +1554,8 @@ def _build_health_snapshot(state: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("state missing resolved.ports")
 
     vllm_port = _parse_port(ports.get("vllm_port"), "resolved.ports.vllm_port")
+    gateway_port = _coerce_int(ports.get("gateway_port"))
+    gateway_parse_port = _coerce_int(ports.get("gateway_parse_port"))
     jaeger_api_port = _parse_port(ports.get("jaeger_api_port"), "resolved.ports.jaeger_api_port")
     jaeger_otlp_port = _parse_port(ports.get("jaeger_otlp_port"), "resolved.ports.jaeger_otlp_port")
 
@@ -1167,16 +1565,26 @@ def _build_health_snapshot(state: dict[str, Any]) -> dict[str, Any]:
         "jaeger_ui": _http_get_health(f"http://127.0.0.1:{jaeger_api_port}/", allow_redirect=True),
         "jaeger_otlp": _tcp_health("127.0.0.1", jaeger_otlp_port),
     }
+    if gateway_port is not None:
+        checks["gateway"] = _http_get_health(f"http://127.0.0.1:{gateway_port}/healthz", allow_redirect=False)
+    if gateway_parse_port is not None:
+        checks["gateway_parse"] = _http_get_health(
+            f"http://127.0.0.1:{gateway_parse_port}/healthz",
+            allow_redirect=False,
+        )
+    runtime_names = _runtime_names_from_state(state)
     containers = {
-        "jaeger": _docker_container_snapshot(DEFAULT_JAEGER_CONTAINER_NAME),
-        "vllm": _docker_container_snapshot(DEFAULT_VLLM_CONTAINER_NAME),
+        "jaeger": _docker_container_snapshot(runtime_names["jaeger_container_name"]),
+        "vllm": _docker_container_snapshot(runtime_names["vllm_container_name"]),
     }
+    port_profile_id = _current_port_profile_id(state)
+    gateway_daemon = _gateway_status_for_port_profile(port_profile_id) if port_profile_id is not None else None
     diagnostics: dict[str, Any] = {}
 
     vllm_container = containers["vllm"]
     should_capture_vllm_logs = not checks["vllm"]["ok"] or bool(vllm_container.get("restart_count"))
     if should_capture_vllm_logs:
-        vllm_logs = _docker_logs_tail(DEFAULT_VLLM_CONTAINER_NAME)
+        vllm_logs = _docker_logs_tail(runtime_names["vllm_container_name"])
         vllm_diag = {
             "log_hint": _extract_log_hint(vllm_logs.get("logs", "")) if vllm_logs.get("ok") else None,
             "recent_logs": {
@@ -1190,6 +1598,8 @@ def _build_health_snapshot(state: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": all(bool(item.get("ok")) for item in checks.values()),
         "checked_at": _utc_now_iso(),
+        "runtime_names": runtime_names,
+        "gateway_daemon": gateway_daemon,
         "containers": containers,
         "diagnostics": diagnostics,
         "services": checks,
@@ -1330,6 +1740,7 @@ def _validate_start_selection(*, model_key: str, port_profile_id: int, launch_pr
         "ports": port_profile,
         "launch": launch_profile,
         "service_urls": _service_urls_from_ports(port_profile),
+        "runtime_names": _runtime_names_for_selection(model_key=model_key, launch_profile_key=launch_profile_key),
     }
     return True, _payload(ok=True, code=0, message="selection validated", data=resolved)
 
@@ -1377,8 +1788,21 @@ def _stop_environment_blocking_impl(
 ) -> dict[str, Any]:
     if show_progress:
         _emit_progress(f"stop begin reason={reason}", log_path=log_path)
-        _emit_progress("checking compose services before stop", log_path=log_path)
     state = _load_state()
+    port_profile_id = _current_port_profile_id(state)
+    if show_progress:
+        _emit_progress("stopping local gateway daemon", log_path=log_path)
+    if port_profile_id is None:
+        gateway_stop = _payload(
+            ok=True,
+            code=0,
+            message="gateway stop skipped: no active port profile id",
+        )
+    else:
+        gateway_stop = _stop_gateway_for_port_profile(port_profile_id)
+    if show_progress:
+        _emit_progress(f"gateway stop result: {gateway_stop.get('message')}", log_path=log_path)
+        _emit_progress("checking compose services before stop", log_path=log_path)
     compose_ok, running_before, compose_error = _compose_running_services()
     if compose_ok and not running_before and not state.get("active"):
         state["active"] = False
@@ -1387,7 +1811,12 @@ def _stop_environment_blocking_impl(
         _save_state(state)
         if show_progress:
             _emit_progress("stop skipped because no managed services are running", log_path=log_path)
-        return _payload(ok=True, code=0, message="environment already stopped", data={"reason": reason})
+        return _payload(
+            ok=bool(gateway_stop.get("ok", False)),
+            code=0 if gateway_stop.get("ok", False) else 522,
+            message="environment already stopped" if gateway_stop.get("ok", False) else "gateway stop failed",
+            data={"reason": reason, "gateway_stop": gateway_stop},
+        )
 
     if show_progress:
         running_text = ",".join(sorted(running_before)) if compose_ok and running_before else "none"
@@ -1415,6 +1844,7 @@ def _stop_environment_blocking_impl(
 
     data = {
         "reason": reason,
+        "gateway_stop": gateway_stop,
         "compose_down": {
             "returncode": down.returncode,
             "stdout": down.stdout,
@@ -1448,6 +1878,10 @@ def _stop_environment_blocking_impl(
             message="docker compose down failed or services still running",
             data=data,
         )
+    if not gateway_stop.get("ok"):
+        if show_progress:
+            _emit_progress(f"gateway stop failed: {gateway_stop.get('message')}", log_path=log_path)
+        return _payload(ok=False, code=522, message="gateway stop failed", data=data)
     if show_progress:
         _emit_progress("stop completed successfully", log_path=log_path)
     return _payload(ok=True, code=0, message="environment stopped", data=data)
@@ -1506,14 +1940,7 @@ def _start_impl(
     if not daemon_ok:
         return daemon_payload
 
-    state = _refresh_state_from_compose()
-    if state.get("active"):
-        return _payload(
-            ok=False,
-            code=409,
-            message="cannot start: another environment is active",
-            data={"active_environment": state},
-        )
+    _refresh_state_from_compose()
 
     valid, selection_payload = _validate_start_selection(
         model_key=model_key,
@@ -1570,6 +1997,31 @@ def _start_impl(
             data={"returncode": up.returncode, "stdout": up.stdout, "stderr": up.stderr},
         )
 
+    _emit_progress("starting local gateway daemon", log_path=startup_log_path)
+    gateway_start = _start_gateway_for_selection(selection)
+    if not gateway_start.get("ok"):
+        _emit_progress(
+            f"gateway startup failed: {gateway_start.get('message')}",
+            log_path=startup_log_path,
+        )
+        compose_cleanup = _compose_down(stream_output=True, output_path=startup_log_path)
+        return _payload(
+            ok=False,
+            code=544,
+            message="gateway startup failed",
+            data={
+                "gateway_start": gateway_start.get("data"),
+                "gateway_error": gateway_start.get("message"),
+                "compose_cleanup": {
+                    "returncode": compose_cleanup.returncode,
+                    "stdout": compose_cleanup.stdout,
+                    "stderr": compose_cleanup.stderr,
+                    "error": compose_cleanup.error,
+                },
+            },
+        )
+    _emit_progress("gateway daemon started", log_path=startup_log_path)
+
     new_state = {
         "active": True,
         "lifecycle_state": "starting" if block else "running",
@@ -1585,11 +2037,13 @@ def _start_impl(
             "ports": selection["ports"],
             "launch": selection["launch"],
             "service_urls": selection["service_urls"],
+            "runtime_names": selection["runtime_names"],
         },
         "compose": {
             "file": str(COMPOSE_FILE),
             "env_file": str(COMPOSE_ENV_FILE),
         },
+        "gateway": gateway_start.get("data"),
     }
     _save_state(new_state)
 
@@ -1598,6 +2052,7 @@ def _start_impl(
         "selection": new_state["selection"],
         "resolved": new_state["resolved"],
         "compose_up": {"returncode": up.returncode, "stdout": up.stdout, "stderr": up.stderr},
+        "gateway_start": gateway_start.get("data"),
         "env_file": materialized_msg,
         "startup_log_file": str(startup_log_path),
         "compose_log_file": str(compose_log_path),
@@ -1610,7 +2065,8 @@ def _start_impl(
         "waiting for health checks"
         f" timeout={timeout_seconds}s"
         f" vllm={selection['service_urls']['vllm']}/v1/models"
-        f" jaeger={selection['service_urls']['jaeger_api']}",
+        f" jaeger={selection['service_urls']['jaeger_api']}"
+        f" gateway={selection['service_urls'].get('gateway', 'n/a')}/healthz",
         log_path=startup_log_path,
     )
     wait_payload = _wait_up_impl(
@@ -1643,12 +2099,15 @@ def _start_impl(
 def _status_impl() -> dict[str, Any]:
     state = _refresh_state_from_compose()
     daemon = _daemon_running_record()
+    port_profile_id = _current_port_profile_id(state, allow_env_fallback=False)
+    gateway_status = _gateway_status_for_port_profile(port_profile_id) if port_profile_id is not None else None
     compose_ok, services, compose_error = _compose_running_services()
     data = {
         "daemon_running": daemon is not None,
         "daemon": daemon,
         "active_environment": state if state.get("active") else None,
         "lifecycle_state": state.get("lifecycle_state"),
+        "gateway": gateway_status,
         "compose": {
             "ok": compose_ok,
             "running_services": sorted(services) if compose_ok else [],
@@ -1674,11 +2133,23 @@ def _logs_impl(lines: int) -> dict[str, Any]:
             message="docker compose logs failed",
             data={"returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr},
         )
+    state = _load_state()
+    port_profile_id = _current_port_profile_id(state, allow_env_fallback=False)
+    gateway_logs = None
+    if port_profile_id is not None:
+        gateway_status = _gateway_status_for_port_profile(port_profile_id)
+        log_file_path = gateway_status.get("log_file")
+        if isinstance(log_file_path, str):
+            gateway_logs = {
+                "status": gateway_status,
+                "lines": lines,
+                "logs": _tail_text(Path(log_file_path), lines=lines),
+            }
     return _payload(
         ok=True,
         code=0,
         message="logs",
-        data={"lines": lines, "logs": result.stdout},
+        data={"lines": lines, "logs": result.stdout, "gateway": gateway_logs},
     )
 
 

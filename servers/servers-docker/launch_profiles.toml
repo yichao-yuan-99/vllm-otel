@@ -26,10 +26,34 @@ per_gpu_memory_gb = 80
 total_gpu_memory_gb = 320 
 tensor_parallel_size = 4
 
+[profiles.h100_nvl_gpu0_single]
+label = "H100 NVL GPU 0 only"
+gpu_type = "NVIDIA H100 NVL"
+visible_devices = "0"
+per_gpu_memory_gb = 80
+total_gpu_memory_gb = 80
+tensor_parallel_size = 1
+
+[profiles.h100_nvl_gpu1_single]
+label = "H100 NVL GPU 1 only"
+gpu_type = "NVIDIA H100 NVL"
+visible_devices = "1"
+per_gpu_memory_gb = 80
+total_gpu_memory_gb = 80
+tensor_parallel_size = 1
+
 [profiles.h100_nvl_gpu2_single]
 label = "H100 NVL GPU 2 only"
 gpu_type = "NVIDIA H100 NVL"
 visible_devices = "2"
+per_gpu_memory_gb = 80
+total_gpu_memory_gb = 80
+tensor_parallel_size = 1
+
+[profiles.h100_nvl_gpu3_single]
+label = "H100 NVL GPU 3 only"
+gpu_type = "NVIDIA H100 NVL"
+visible_devices = "3"
 per_gpu_memory_gb = 80
 total_gpu_memory_gb = 80
 tensor_parallel_size = 1

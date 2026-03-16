@@ -1,9 +1,10 @@
-# vLLM + Jaeger (Docker Package)
+# vLLM + Jaeger + Gateway (Docker Package)
 
 This package runs:
 
 - `jaeger` (trace backend + UI) in Docker
 - `vllm` (OpenAI-compatible server with OTEL packages) in Docker
+- `gateway` on host as a managed local daemon (`python -m gateway start ...`)
 
 Environment launch and operations are managed only through `servers/servers-docker/client.py`.
 Runtime compose uses pushed Docker Hub images only (no local Dockerfile build step).
@@ -23,6 +24,11 @@ export HF_TOKEN=your_hf_token
 
 `HF_TOKEN` can be unset for public models.
 
+Gateway config is resolved in this order:
+
+- `gateway/config.toml`
+- `gateway/config.example.toml`
+
 ## 2) Daemon CLI Package
 
 If your system `python3` does not have `typer`, use `./.venv/bin/python` instead.
@@ -40,6 +46,10 @@ Start one environment:
 ```bash
 python3 servers/servers-docker/client.py start -m qwen3_coder_30b -p 0 -l h100_nvl_gpu23 -b
 ```
+
+Runtime names are suffixed with `<model>-<launch-profile>` (from `-m` and `-l`),
+so different model/launch selections can run in parallel as separate Docker Compose projects when ports do not collide.
+Gateway is started automatically for the selected `-p` port profile and stopped by `stop`/`daemon-stop`.
 
 `start` materializes compose variables internally from:
 
@@ -65,11 +75,14 @@ python3 servers/servers-docker/client.py logs -n 200
 Direct Docker bypass for the vLLM container:
 
 ```bash
-docker logs --tail 200 vllm-openai-otel-lp
+docker logs --tail 200 vllm-openai-otel-lp-<model>-<launch-profile>
+# example:
+# docker logs --tail 200 vllm-openai-otel-lp-qwen3-coder-30b-h100-nvl-gpu23
 ```
 
 Use the package command above by default. The direct `docker logs` form is only
 for quick inspection when you explicitly want to bypass `client.py`.
+`client.py logs` now includes both Docker Compose logs and a tail of the gateway daemon log for the active port profile.
 
 Blocking startup also saves a repo-local startup log under `servers/servers-docker/logs/`.
 That startup log includes the stepwise client progress plus `docker compose up/down` output.
@@ -92,6 +105,8 @@ python3 servers/test/client.py --port-profile 0
 
 ```bash
 curl http://localhost:11451/v1/models
+curl http://localhost:11457/healthz
+curl http://localhost:18171/healthz
 ```
 
 Use ports from your selected port profile if changed.

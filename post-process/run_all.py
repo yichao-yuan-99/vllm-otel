@@ -92,6 +92,25 @@ def _run_command(command: list[str]) -> int:
     return completed.returncode
 
 
+def _run_pipeline(commands: list[list[str]]) -> int:
+    failures: list[tuple[list[str], int]] = []
+    for command in commands:
+        return_code = _run_command(command)
+        if return_code != 0:
+            failures.append((command, return_code))
+
+    if failures:
+        print(
+            f"[error] post-process pipeline completed with {len(failures)} failing step(s):"
+        )
+        for index, (command, return_code) in enumerate(failures, start=1):
+            print(f"  {index}. rc={return_code} cmd={_shell_join(command)}")
+        return failures[0][1]
+
+    print("[done] post-process pipeline completed")
+    return 0
+
+
 def _is_single_run_layout(run_dir: Path) -> bool:
     replay_summary = run_dir / "replay" / "summary.json"
     con_driver_results = run_dir / "meta" / "results.json"
@@ -255,13 +274,7 @@ def _main_run_dir(args: argparse.Namespace) -> int:
             skip_visualization=bool(args.skip_visualization),
         )
 
-    for command in commands:
-        return_code = _run_command(command)
-        if return_code != 0:
-            return return_code
-
-    print("[done] post-process pipeline completed")
-    return 0
+    return _run_pipeline(commands)
 
 
 def _main_root_dir(args: argparse.Namespace) -> int:
@@ -285,13 +298,7 @@ def _main_root_dir(args: argparse.Namespace) -> int:
         skip_aggregate_csv=bool(args.skip_aggregate_csv),
         aggregate_output=aggregate_output,
     )
-    for command in commands:
-        return_code = _run_command(command)
-        if return_code != 0:
-            return return_code
-
-    print("[done] post-process pipeline completed")
-    return 0
+    return _run_pipeline(commands)
 
 
 def main(argv: list[str] | None = None) -> int:

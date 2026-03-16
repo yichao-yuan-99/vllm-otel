@@ -19,32 +19,27 @@ python -m pip install -e ./gateway
 python -m pip install -e ./con-driver
 ```
 
-## 2) Start Docker runtime (vLLM + Jaeger)
+## 2) Start runtime (vLLM + Jaeger + gateway)
 
 ```bash
 cp -n gateway/config.example.toml gateway/config.toml
 python3 servers/servers-docker/client.py start -m qwen3_coder_30b -p 0 -l h100_nvl_gpu23 -b
 ```
 
-## 3) Start gateway on host (inside `.venv`)
-
-```bash
-python -m gateway start --config gateway/config.toml --port-profile-id 0
-```
-
-This starts both:
+`servers/servers-docker/client.py start` also starts the local gateway daemon for the selected port profile.
+Gateway serves both:
 
 - raw gateway on `gateway_port`
 - parsed gateway on `gateway_parse_port`
 
-## 4) Run con-driver (inside `.venv`)
+## 3) Run con-driver (inside `.venv`)
 
 ```bash
 mkdir -p tests/output
 con-driver --config con-driver/tests/config.gateway.toml
 ```
 
-## 5) Expected output
+## 4) Expected output
 
 - con-driver run dir: `tests/output/con-driver/job-<timestamp>/`
 - gateway artifacts for that run: `tests/output/con-driver/job-<timestamp>/gateway-output/`

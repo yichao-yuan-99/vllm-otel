@@ -137,7 +137,7 @@ def test_main_root_dir_dry_run_skips_aggregate(monkeypatch, tmp_path: Path) -> N
         assert command[-1] == "--dry-run"
 
 
-def test_main_stops_when_a_step_fails(monkeypatch, tmp_path: Path) -> None:
+def test_main_reports_failures_but_continues(monkeypatch, tmp_path: Path, capsys) -> None:
     run_dir = tmp_path / "job"
     run_dir.mkdir(parents=True)
 
@@ -147,13 +147,19 @@ def test_main_stops_when_a_step_fails(monkeypatch, tmp_path: Path) -> None:
         commands.append(command)
         if _script_tail(command) == "gateway/usage/extract_run.py":
             return 3
+        if _script_tail(command) == "visualization/gateway-stack/generate_all_figures.py":
+            return 7
         return 0
 
     monkeypatch.setattr(run_all, "_run_command", fake_run_command)
 
     exit_code = run_all.main(["--run-dir", str(run_dir)])
+    captured = capsys.readouterr()
 
     assert exit_code == 3
+    assert "[error] post-process pipeline completed with 2 failing step(s):" in captured.out
+    assert "gateway/usage/extract_run.py" in captured.out
+    assert "visualization/gateway-stack/generate_all_figures.py" in captured.out
     assert [_script_tail(command) for command in commands] == [
         "service-failure/extract_run.py",
         "global/extract_run.py",
@@ -163,6 +169,13 @@ def test_main_stops_when_a_step_fails(monkeypatch, tmp_path: Path) -> None:
         "gateway/llm-requests/extract_run.py",
         "gateway/stack/extract_run.py",
         "gateway/usage/extract_run.py",
+        "split/duration/extract_run.py",
+        "vllm-metrics/extract_run.py",
+        "vllm-metrics/summarize_timeseries.py",
+        "visualization/job-throughput/generate_all_figures.py",
+        "visualization/job-concurrency/generate_all_figures.py",
+        "visualization/gateway-stack/generate_all_figures.py",
+        "visualization/vllm-metrics/generate_all_figures.py",
     ]
 
 

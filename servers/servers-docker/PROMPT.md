@@ -1,14 +1,14 @@
 # Docker Daemon Frontend (Typer) - Concise Command List
 
-the goal here is to make the servers/servers-docker/ a package that setup docker vllm + jaeger in a local environment
+the goal here is to make the servers/servers-docker/ a package that setup docker vllm + jaeger and local gateway in a local environment
 
-the top level aim of vllm + jaeger setup is to expose valid service through three ports in the localhost
+the top level aim of vllm + jaeger + gateway setup is to expose valid service through configured localhost ports
 
 It needs two set of information
 - the model information. the user provide the model name, the details of the model for vllm serving is in the top level configs/model_config.toml. only the configured model can be served
 - the port information. the user provide an index which specify the port combination configured in the top level configs/port_profiles.toml
 
-The package is a deamon front end like architecture, each machine can only have one deamon. each deamon only allows one environment to be active.
+The package is a deamon front end like architecture, each machine can only have one deamon.
 
 The frontend provide a CLI based on typer. it starts the deamon if not exists. it also has a command to close the deamon
 The package should not expose or document a manual runtime operation path; launch/operate/stop must go through this CLI only.
@@ -18,7 +18,7 @@ The config includes GPU type, which GPUs to use, per gpu memory, total gpu memor
 E.g. by default we are using NVIDIA H100 NVL, GPU 2/3, 80GB each gpu, total 160GB, tp size is 2.
 
 
-Goal: one local daemon per machine, one active environment per daemon.
+Goal: one local daemon per machine, managing compose projects selected by model/port/launch and their matching gateway daemons.
 Each environment is selected by:
 - `model` key from `configs/model_config.toml`
 - `port-profile` ID from `configs/port_profiles.toml`
@@ -64,13 +64,13 @@ python3 servers/servers-docker/client.py stop-poll
 - `profiles ports`: list allowed port-profile IDs and resolved ports from `configs/port_profiles.toml`.
 - `profiles launches`: list allowed launch-profile keys from `servers/servers-docker/launch_profiles.toml` (GPU selection, per-GPU memory, total memory, TP size).
 
-- `start -m <model> -p <profile-id> -l <launch-profile>`: validate all keys, enforce single-active-environment constraint, reject if `weight_vram_gb > 0.75 * total_gpu_memory_gb`, materialize internal compose env file under daemon runtime cache, then start vLLM + Jaeger for that selection.
-- `start ... -b`: same as `start`, but block until all target localhost endpoints are healthy (`vllm`, `jaeger API/UI`, `jaeger OTLP`) or timeout/failure.
+- `start -m <model> -p <profile-id> -l <launch-profile>`: validate all keys, reject if `weight_vram_gb > 0.75 * total_gpu_memory_gb`, materialize internal compose env file under daemon runtime cache, then start vLLM + Jaeger + gateway for that selection.
+- `start ... -b`: same as `start`, but block until target localhost endpoints are healthy (`vllm`, `jaeger API/UI`, `jaeger OTLP`, `gateway` when configured) or timeout/failure.
 
 - `status`: return full active environment state (selected model/profile/launch, effective ports, service URLs, and lifecycle state).
 - `up`: perform immediate health checks against expected endpoints and return pass/fail with per-service detail.
 - `wait-up --timeout-seconds N`: poll `up` until success or timeout `N`, then return final result.
-- `logs -n N`: tail last `N` lines from vLLM/Jaeger compose logs.
+- `logs -n N`: tail last `N` lines from vLLM/Jaeger compose logs plus gateway daemon log tail.
 - `servers/test/client.py --port-profile <id>`: run smoke checks for functional serving/tracing against ports from that profile.
 
 - `stop`: trigger asynchronous environment teardown and return immediately.
@@ -83,9 +83,8 @@ python3 servers/servers-docker/client.py stop-poll
 - Reject unknown port profile IDs (must exist in `configs/port_profiles.toml`).
 - Reject unknown launch profile keys (must exist in `servers/servers-docker/launch_profiles.toml`).
 - Reject `start` if selected model `weight_vram_gb` exceeds `75%` of selected launch profile `total_gpu_memory_gb`.
-- Reject `start` when another environment is active.
 - Materialize/refresh internal compose env file from selected model + port profile.
-- Bring up `vllm` + `jaeger` via Docker Compose using pushed images only (no local Dockerfile build).
+- Bring up `vllm` + `jaeger` via Docker Compose using pushed images only (no local Dockerfile build), then start local gateway daemon for the same port profile.
 - Expose localhost ports from selected profile:
   - `vllm_port`
   - `jaeger_api_port`
