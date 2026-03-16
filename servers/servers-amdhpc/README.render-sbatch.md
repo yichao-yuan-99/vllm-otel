@@ -78,7 +78,31 @@ You can override runtime behavior at job runtime via environment variables:
 
 If `GATEWAY_CONFIG` is unset, the script uses `gateway/config.toml` when present, otherwise `gateway/config.example.toml`.
 
+## Grouped local mode (entrypoint injection)
+
+Grouped renders (`start-group`) also support `--local-mode <script>`.
+
+This injects a grouped workload script that runs after grouped vLLM workers are ready.
+Use it to inject the sbatch orchestrator entrypoint directly into the rendered grouped sbatch:
+
+```bash
+python3 servers/servers-amdhpc/render-sbatch.py start-group \
+  -g bench_orch \
+  -L 0,1,2,3,4,5,6,7 \
+  -p mi3008x \
+  -m qwen3_coder_30b \
+  --local-mode ./sbatch-orchestrator/entrypoint.sh
+```
+
+At runtime, set the orchestrator job list before `sbatch`:
+
+```bash
+SBATCH_ORCHESTRATOR_JOB_LIST=/abs/path/to/jobs.txt \
+sbatch /abs/path/to/rendered-group-sbatch.sh
+```
+
+See `sbatch-orchestrator/README.md` for job-list format and optional env vars.
+
 ## Current limitation
 
-- `--local-mode` is currently supported on `start` only.
-- `start-group --local-mode ...` is intentionally rejected.
+- Grouped local mode runs after grouped vLLM workers are up; it does not start gateway processes automatically.

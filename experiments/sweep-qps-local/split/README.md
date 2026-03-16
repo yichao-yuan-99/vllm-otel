@@ -45,7 +45,6 @@ python3 experiments/sweep-qps-local/split/generate_replay_configs.py \
   --qps-list 0.05,0.1,0.2,0.4 \
   --time-constraint-s 1800 \
   --lmcache 100 \
-  --no-async-scheduling \
   -p mi3001x \
   -m qwen3_coder_30b
 ```

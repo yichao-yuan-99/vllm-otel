@@ -5,6 +5,7 @@ from contextlib import suppress
 import hashlib
 import json
 import logging
+import os
 import shutil
 import tarfile
 import tempfile
@@ -187,10 +188,18 @@ class GatewayConfig:
         settings = runtime_settings or load_runtime_settings()
         selected_profile_id = profile_id if profile_id is not None else settings.port_profile_id
         profile = load_port_profile(selected_profile_id)
+        default_jaeger_api_base_url = f"http://localhost:{profile.jaeger_api_port}/api/traces"
+        default_otlp_traces_endpoint = f"grpc://localhost:{profile.jaeger_otlp_port}"
+        jaeger_api_base_url_override = (
+            os.environ.get("GATEWAY_JAEGER_API_BASE_URL_OVERRIDE", "").strip()
+        )
+        otlp_traces_endpoint_override = (
+            os.environ.get("GATEWAY_OTLP_TRACES_ENDPOINT_OVERRIDE", "").strip()
+        )
         return cls(
             vllm_base_url=f"http://localhost:{profile.vllm_port}",
-            jaeger_api_base_url=f"http://localhost:{profile.jaeger_api_port}/api/traces",
-            otlp_traces_endpoint=f"grpc://localhost:{profile.jaeger_otlp_port}",
+            jaeger_api_base_url=jaeger_api_base_url_override or default_jaeger_api_base_url,
+            otlp_traces_endpoint=otlp_traces_endpoint_override or default_otlp_traces_endpoint,
             service_name=settings.service_name,
             otlp_traces_insecure=settings.otlp_traces_insecure,
             artifact_compression=settings.artifact_compression,

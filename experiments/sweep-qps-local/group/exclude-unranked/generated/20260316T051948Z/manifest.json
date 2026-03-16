@@ -1,0 +1,91 @@
+{
+  "status": "ok",
+  "batch_timestamp": "20260316T051948Z",
+  "source_run_dir": "/work1/talati/yichaoy/vllm-otel/results/qwen3-coder-30b/dabstep/mini-swe-agent/dabstep-20260306T194929Z",
+  "plan_path": "/work1/talati/yichaoy/vllm-otel/results/qwen3-coder-30b/dabstep/mini-swe-agent/dabstep-20260306T194929Z/replay-plan.exclude-unranked.json",
+  "plan_variant": "exclude-unranked",
+  "exclude_unranked_plan": true,
+  "default_port_profile": 0,
+  "output_config_root_dir": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated",
+  "output_batch_dir": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z",
+  "replay_root_dir": null,
+  "replay_output_batch_dir": "results/replay/20260316T051948Z/qwen3-coder-30b/dabstep/mini-swe-agent/sweep-qps-local/group/exclude-unranked",
+  "generated_batch_copy_dir": "results/replay/20260316T051948Z/generated",
+  "poisson_seed": 7,
+  "randomize_seed": 11,
+  "time_constraint_s": 12600.0,
+  "qps_list": [
+    0.02,
+    0.04,
+    0.06,
+    0.08,
+    0.12,
+    0.2
+  ],
+  "generation_command_raw": "python3 experiments/sweep-qps-local/group/exclude-unranked/generate_replay_configs.py --source-run-dir results/qwen3-coder-30b/dabstep/mini-swe-agent/dabstep-20260306T194929Z --poisson-seed 7 --randomize-seed 11 --qps-list 0.02,0.04,0.06,0.08,0.12,0.2 --time-constraint-s 12600",
+  "job_list": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/job-list.txt",
+  "orchestrator_summary_default": "sbatch-orchestrator/logs/<utc-timestamp>/orchestrator-summary.json",
+  "submit_command": "bash sbatch-orchestrator/submit-start-group.sh --job-list experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/job-list.txt",
+  "generated_experiments": [
+    {
+      "plan_path": "/work1/talati/yichaoy/vllm-otel/results/qwen3-coder-30b/dabstep/mini-swe-agent/dabstep-20260306T194929Z/replay-plan.exclude-unranked.json",
+      "qps": 0.02,
+      "qps_slug": "qps0_02",
+      "experiment_dir": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_02",
+      "replay_config": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_02/replay.toml",
+      "job_script": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_02/run_orchestrated_replay.sh",
+      "job_list_entry": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_02/run_orchestrated_replay.sh",
+      "replay_output_dir": "results/replay/20260316T051948Z/qwen3-coder-30b/dabstep/mini-swe-agent/sweep-qps-local/group/exclude-unranked/qps0_02"
+    },
+    {
+      "plan_path": "/work1/talati/yichaoy/vllm-otel/results/qwen3-coder-30b/dabstep/mini-swe-agent/dabstep-20260306T194929Z/replay-plan.exclude-unranked.json",
+      "qps": 0.04,
+      "qps_slug": "qps0_04",
+      "experiment_dir": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_04",
+      "replay_config": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_04/replay.toml",
+      "job_script": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_04/run_orchestrated_replay.sh",
+      "job_list_entry": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_04/run_orchestrated_replay.sh",
+      "replay_output_dir": "results/replay/20260316T051948Z/qwen3-coder-30b/dabstep/mini-swe-agent/sweep-qps-local/group/exclude-unranked/qps0_04"
+    },
+    {
+      "plan_path": "/work1/talati/yichaoy/vllm-otel/results/qwen3-coder-30b/dabstep/mini-swe-agent/dabstep-20260306T194929Z/replay-plan.exclude-unranked.json",
+      "qps": 0.06,
+      "qps_slug": "qps0_06",
+      "experiment_dir": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_06",
+      "replay_config": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_06/replay.toml",
+      "job_script": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_06/run_orchestrated_replay.sh",
+      "job_list_entry": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_06/run_orchestrated_replay.sh",
+      "replay_output_dir": "results/replay/20260316T051948Z/qwen3-coder-30b/dabstep/mini-swe-agent/sweep-qps-local/group/exclude-unranked/qps0_06"
+    },
+    {
+      "plan_path": "/work1/talati/yichaoy/vllm-otel/results/qwen3-coder-30b/dabstep/mini-swe-agent/dabstep-20260306T194929Z/replay-plan.exclude-unranked.json",
+      "qps": 0.08,
+      "qps_slug": "qps0_08",
+      "experiment_dir": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_08",
+      "replay_config": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_08/replay.toml",
+      "job_script": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_08/run_orchestrated_replay.sh",
+      "job_list_entry": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_08/run_orchestrated_replay.sh",
+      "replay_output_dir": "results/replay/20260316T051948Z/qwen3-coder-30b/dabstep/mini-swe-agent/sweep-qps-local/group/exclude-unranked/qps0_08"
+    },
+    {
+      "plan_path": "/work1/talati/yichaoy/vllm-otel/results/qwen3-coder-30b/dabstep/mini-swe-agent/dabstep-20260306T194929Z/replay-plan.exclude-unranked.json",
+      "qps": 0.12,
+      "qps_slug": "qps0_12",
+      "experiment_dir": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_12",
+      "replay_config": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_12/replay.toml",
+      "job_script": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_12/run_orchestrated_replay.sh",
+      "job_list_entry": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_12/run_orchestrated_replay.sh",
+      "replay_output_dir": "results/replay/20260316T051948Z/qwen3-coder-30b/dabstep/mini-swe-agent/sweep-qps-local/group/exclude-unranked/qps0_12"
+    },
+    {
+      "plan_path": "/work1/talati/yichaoy/vllm-otel/results/qwen3-coder-30b/dabstep/mini-swe-agent/dabstep-20260306T194929Z/replay-plan.exclude-unranked.json",
+      "qps": 0.2,
+      "qps_slug": "qps0_2",
+      "experiment_dir": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_2",
+      "replay_config": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_2/replay.toml",
+      "job_script": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_2/run_orchestrated_replay.sh",
+      "job_list_entry": "/work1/talati/yichaoy/vllm-otel/experiments/sweep-qps-local/group/exclude-unranked/generated/20260316T051948Z/qps0_2/run_orchestrated_replay.sh",
+      "replay_output_dir": "results/replay/20260316T051948Z/qwen3-coder-30b/dabstep/mini-swe-agent/sweep-qps-local/group/exclude-unranked/qps0_2"
+    }
+  ]
+}

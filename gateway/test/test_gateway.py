@@ -609,6 +609,24 @@ def test_gateway_config_uses_default_profile_when_unspecified() -> None:
     assert cfg.otlp_traces_endpoint == f"grpc://localhost:{profile.jaeger_otlp_port}"
 
 
+def test_gateway_config_respects_jaeger_endpoint_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "GATEWAY_JAEGER_API_BASE_URL_OVERRIDE",
+        "http://localhost:16686/api/traces",
+    )
+    monkeypatch.setenv(
+        "GATEWAY_OTLP_TRACES_ENDPOINT_OVERRIDE",
+        "grpc://localhost:4317",
+    )
+
+    cfg = GatewayConfig.from_port_profile(2)
+    assert cfg.vllm_base_url == "http://localhost:31987"
+    assert cfg.jaeger_api_base_url == "http://localhost:16686/api/traces"
+    assert cfg.otlp_traces_endpoint == "grpc://localhost:4317"
+
+
 def test_port_profile_exposes_gateway_parse_port() -> None:
     profile = load_port_profile(1)
     assert profile.gateway_port == 24157

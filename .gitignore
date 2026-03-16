@@ -26,6 +26,7 @@ servers/servers-docker/logs
 # Logs and runtime artifacts
 *.log
 *.pid
+sbatch-orchestrator/logs/
 
 # Project-generated outputs
 tests/output/
@@ -33,7 +34,8 @@ experiments/results/
 results/
 experiments/sweep-qps-local/single/generated/
 experiments/sweep-qps-local/split/generated/
-experiments/sweep-qps-local/split/generated/
+experiments/sweep-qps-local/group/split/generated/
+experiments/sweep-qps-local/exclude-unranked/generated/
 experiments/sweep-qps/generated/
 con-driver/.cache/
 con-driver-test*/

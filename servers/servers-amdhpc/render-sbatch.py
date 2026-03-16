@@ -291,8 +291,8 @@ def start_group(
         None,
         "--local-mode",
         help=(
-            "Reserved for single-profile local execution mode. "
-            "Grouped local-mode rendering is not supported yet."
+            "Path to a script to execute on the allocated node after grouped vLLM workers "
+            "are ready. Useful for injecting sbatch-orchestrator entrypoints."
         ),
     ),
 ) -> None:
@@ -305,17 +305,16 @@ def start_group(
         extra_env = _parse_extra_env_list(env)
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--env") from exc
+    try:
+        local_mode_script = _resolve_local_mode_script(local_mode)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--local-mode") from exc
     if lmcache is not None and lmcache <= 0:
         raise typer.BadParameter("--lmcache must be a positive integer", param_hint="--lmcache")
     if lmcache is not None and "LMCACHE_MAX_LOCAL_CPU_SIZE" in extra_env:
         raise typer.BadParameter(
             "cannot combine --lmcache with --env LMCACHE_MAX_LOCAL_CPU_SIZE=...",
             param_hint="--lmcache",
-        )
-    if local_mode is not None:
-        raise typer.BadParameter(
-            "--local-mode is only supported with `render-sbatch.py start` right now",
-            param_hint="--local-mode",
         )
 
     try:
@@ -328,6 +327,7 @@ def start_group(
             extra_env=extra_env,
             lmcache_max_local_cpu_size=str(lmcache) if lmcache is not None else None,
             no_async_scheduling=bool(no_async_scheduling),
+            local_mode_script=local_mode_script,
             check_port_availability=_check_port_availability_from_ctx(ctx),
         )
     except ControlPlaneError as exc:
