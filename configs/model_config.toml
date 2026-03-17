@@ -17,6 +17,13 @@ weight_vram_gb = 35
 context_window = 262144
 extra_args = []
 
+[models.qwen3_235b_fp8]
+vllm_model_name = "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"
+served_model_name = "Qwen3-235B-A22B-Instruct-2507-FP8"
+weight_vram_gb = 240
+context_window = 262144
+extra_args = []
+
 [models.qwen3_coder_next_fp8]
 vllm_model_name = "Qwen/Qwen3-Coder-Next-FP8"
 served_model_name = "Qwen3-Coder-Next-FP8"
