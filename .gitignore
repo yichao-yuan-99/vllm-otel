@@ -37,6 +37,7 @@ experiments/sweep-qps-local/split/generated/
 experiments/sweep-qps-local/group/split/generated/
 experiments/sweep-qps-local/exclude-unranked/generated/
 experiments/sweep-qps/generated/
+experiments/single-qps/local/generated/
 con-driver/.cache/
 con-driver-test*/
 gateway-output/

@@ -2665,10 +2665,11 @@ def test_cmd_replay_gateway_calls_have_no_timeout(
 
     monkeypatch.setattr("replayer.cli.http_json", fake_http_json)
 
+    output_dir = tmp_path / "replay-output"
     exit_code = cmd_replay(
         argparse.Namespace(
             plan=str(plan_path),
-            output_dir=str(tmp_path / "replay-output"),
+            output_dir=str(output_dir),
             port_profile_id=1,
             launch_policy_override_json=None,
             vllm_log=None,
@@ -2684,6 +2685,9 @@ def test_cmd_replay_gateway_calls_have_no_timeout(
         ("POST", "http://127.0.0.1:24157/agent/end", None),
         ("POST", "http://127.0.0.1:24157/job/end", None),
     ]
+    summary = json.loads((output_dir / "replay" / "summary.json").read_text(encoding="utf-8"))
+    worker_result = summary["worker_results"]["worker-1"]
+    assert worker_result["api_token"] == "token-1"
 
 
 def test_cmd_replay_randomize_seed_shuffles_launch_order(

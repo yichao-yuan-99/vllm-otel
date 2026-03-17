@@ -3384,6 +3384,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
         api_token = worker.get("api_token")
         if not isinstance(api_token, str) or not api_token:
             api_token = None
+        record["api_token"] = api_token
         agent_started = False
 
         def _status_from_stop_reason() -> str:

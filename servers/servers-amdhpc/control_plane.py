@@ -3096,7 +3096,10 @@ class ControlPlane:
             VLLM_APPTAINER_HOME={shlex.quote(self._cfg.env.get('VLLM_APPTAINER_HOME', ''))}
             HF_HOME={shlex.quote(self._cfg.env.get('HF_HOME', ''))}
             HF_HUB_CACHE={shlex.quote(self._cfg.env.get('HF_HUB_CACHE', ''))}
+            HF_HUB_OFFLINE=1
+            TRANSFORMERS_OFFLINE=1
             HF_TOKEN="${{HF_TOKEN:-}}"
+            export HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
 
             AITER_JIT_DIR={shlex.quote(aiter_jit_dir)}
             XDG_CACHE_HOME={shlex.quote(xdg_cache_home)}
@@ -3286,6 +3289,8 @@ class ControlPlane:
                 --env VLLM_CACHE_ROOT="${{VLLM_CACHE_ROOT}}" \
                 --env HF_HOME="${{HF_HOME}}" \
                 --env HF_HUB_CACHE="${{HF_HUB_CACHE}}" \
+                --env HF_HUB_OFFLINE="${{HF_HUB_OFFLINE}}" \
+                --env TRANSFORMERS_OFFLINE="${{TRANSFORMERS_OFFLINE}}" \
                 --env HF_TOKEN="${{HF_TOKEN}}" \
                 --env OTEL_SERVICE_NAME="${{OTEL_SERVICE_NAME_WORKER}}" \
                 --env OTEL_EXPORTER_OTLP_TRACES_INSECURE="${{OTEL_EXPORTER_OTLP_TRACES_INSECURE}}" \
@@ -3457,7 +3462,7 @@ class ControlPlane:
             export GROUP_VLLM_VISIBLE_DEVICES_SEMICOLON GROUP_VLLM_TENSOR_PARALLEL_SIZE
             export JAEGER_OTLP_LOCAL_PORT JAEGER_UI_LOCAL_PORT JAEGER_SIF VLLM_SIF
             export VLLM_MODEL_NAME VLLM_SERVED_MODEL_NAME
-            export VLLM_APPTAINER_HOME HF_HOME HF_HUB_CACHE HF_TOKEN
+            export VLLM_APPTAINER_HOME HF_HOME HF_HUB_CACHE HF_HUB_OFFLINE TRANSFORMERS_OFFLINE HF_TOKEN
             export AITER_JIT_DIR XDG_CACHE_HOME VLLM_CACHE_ROOT
             export OTEL_SERVICE_NAME OTEL_EXPORTER_OTLP_TRACES_INSECURE OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
             export VLLM_COLLECT_DETAILED_TRACES VLLM_LOGITS_PROCESSORS
@@ -3619,7 +3624,10 @@ class ControlPlane:
             VLLM_APPTAINER_HOME={shlex.quote(self._cfg.env.get('VLLM_APPTAINER_HOME', ''))}
             HF_HOME={shlex.quote(self._cfg.env.get('HF_HOME', ''))}
             HF_HUB_CACHE={shlex.quote(self._cfg.env.get('HF_HUB_CACHE', ''))}
+            HF_HUB_OFFLINE=1
+            TRANSFORMERS_OFFLINE=1
             HF_TOKEN="${{HF_TOKEN:-}}"
+            export HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
 
             AITER_JIT_DIR={shlex.quote(aiter_jit_dir)}
             XDG_CACHE_HOME={shlex.quote(xdg_cache_home)}
@@ -3735,6 +3743,8 @@ class ControlPlane:
               --env VLLM_CACHE_ROOT="${{VLLM_CACHE_ROOT}}" \
               --env HF_HOME="${{HF_HOME}}" \
               --env HF_HUB_CACHE="${{HF_HUB_CACHE}}" \
+              --env HF_HUB_OFFLINE="${{HF_HUB_OFFLINE}}" \
+              --env TRANSFORMERS_OFFLINE="${{TRANSFORMERS_OFFLINE}}" \
               --env HF_TOKEN="${{HF_TOKEN}}" \
               --env OTEL_SERVICE_NAME="${{OTEL_SERVICE_NAME}}" \
               --env OTEL_EXPORTER_OTLP_TRACES_INSECURE="${{OTEL_EXPORTER_OTLP_TRACES_INSECURE}}" \
@@ -3864,7 +3874,10 @@ class ControlPlane:
             VLLM_APPTAINER_HOME={shlex.quote(self._cfg.env.get('VLLM_APPTAINER_HOME', ''))}
             HF_HOME={shlex.quote(self._cfg.env.get('HF_HOME', ''))}
             HF_HUB_CACHE={shlex.quote(self._cfg.env.get('HF_HUB_CACHE', ''))}
+            HF_HUB_OFFLINE=1
+            TRANSFORMERS_OFFLINE=1
             HF_TOKEN="${{HF_TOKEN:-}}"
+            export HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
 
             AITER_JIT_DIR={shlex.quote(aiter_jit_dir)}
             XDG_CACHE_HOME={shlex.quote(xdg_cache_home)}
@@ -4063,6 +4076,8 @@ class ControlPlane:
               --env VLLM_CACHE_ROOT="${{VLLM_CACHE_ROOT}}" \
               --env HF_HOME="${{HF_HOME}}" \
               --env HF_HUB_CACHE="${{HF_HUB_CACHE}}" \
+              --env HF_HUB_OFFLINE="${{HF_HUB_OFFLINE}}" \
+              --env TRANSFORMERS_OFFLINE="${{TRANSFORMERS_OFFLINE}}" \
               --env HF_TOKEN="${{HF_TOKEN}}" \
               --env OTEL_SERVICE_NAME="${{OTEL_SERVICE_NAME}}" \
               --env OTEL_EXPORTER_OTLP_TRACES_INSECURE="${{OTEL_EXPORTER_OTLP_TRACES_INSECURE}}" \

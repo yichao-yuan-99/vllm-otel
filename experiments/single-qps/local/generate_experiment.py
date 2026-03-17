@@ -2,9 +2,9 @@
 """Generate one local single-QPS replay experiment bundle.
 
 This helper does three things:
-1) Compile (or reuse cached) replay plan artifacts for the requested split mode.
-2) Materialize one replay config TOML for a single Poisson QPS target.
-3) Emit one runnable script entrypoint that accepts a port profile override.
+1) Looks up existing replay plans for the requested split mode.
+2) Validates selected plans match the requested target model.
+3) Materializes replay config + runnable script for one Poisson QPS target.
 """
 
 from __future__ import annotations
@@ -12,11 +12,10 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import hashlib
 import json
+import re
 import shlex
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -50,13 +49,19 @@ SPLIT_METRIC_ALIASES = {
 
 
 @dataclass
-class CompileCacheResult:
-    cache_key: str
-    cache_dir: Path
-    cache_hit: bool
-    compile_command: list[str]
+class LookupPlanResult:
     selected_plan_path: Path
     related_plan_paths: dict[str, str]
+
+
+@dataclass(frozen=True)
+class TargetModelSpec:
+    key: str
+    served_model_name: str
+    vllm_model_name: str
+
+
+PLAN_MODEL_LINE_RE = re.compile(r'"model"\s*:\s*"((?:\\.|[^"\\])*)"')
 
 
 def build_utc_timestamp_slug() -> str:
@@ -121,21 +126,156 @@ def path_for_config(path: Path) -> str:
         return str(path.resolve())
 
 
-def _load_target_model_keys() -> set[str]:
+def _load_target_model_specs() -> dict[str, TargetModelSpec]:
     if not MODEL_CONFIG_PATH.exists():
         raise ValueError(f"missing model config: {MODEL_CONFIG_PATH}")
     payload = tomllib.loads(MODEL_CONFIG_PATH.read_text(encoding="utf-8"))
     raw_models = payload.get("models")
     if not isinstance(raw_models, dict):
         raise ValueError("configs/model_config.toml must include [models]")
-    out: set[str] = set()
+    out: dict[str, TargetModelSpec] = {}
     for key, value in raw_models.items():
-        if not isinstance(key, str) or not isinstance(value, dict):
+        if (
+            not isinstance(key, str)
+            or not isinstance(value, dict)
+            or not isinstance(value.get("served_model_name"), str)
+            or not isinstance(value.get("vllm_model_name"), str)
+        ):
             continue
-        out.add(key)
+        served_model_name = value["served_model_name"].strip()
+        vllm_model_name = value["vllm_model_name"].strip()
+        if not key.strip() or not served_model_name or not vllm_model_name:
+            continue
+        out[key] = TargetModelSpec(
+            key=key,
+            served_model_name=served_model_name,
+            vllm_model_name=vllm_model_name,
+        )
     if not out:
         raise ValueError("configs/model_config.toml contains no valid model keys")
     return out
+
+
+def _with_optional_plan_suffix(plan_path: Path, additional_suffix: str | None) -> Path:
+    if additional_suffix is None:
+        return plan_path.resolve()
+    return with_plan_name_suffix(plan_path.resolve(), additional_suffix)
+
+
+def _resolve_lookup_plan_paths(
+    *,
+    source_run_dir: Path,
+    split: str,
+    split_two_group_metric: str,
+    additional_suffix: str | None,
+) -> LookupPlanResult:
+    if split == "full":
+        selected = _with_optional_plan_suffix(
+            source_run_dir / "replay-plan.json",
+            additional_suffix,
+        )
+        related_paths = {"selected": str(selected)}
+    elif split == "exclude-unranked":
+        selected = _with_optional_plan_suffix(
+            source_run_dir / "replay-plan.exclude-unranked.json",
+            additional_suffix,
+        )
+        related_paths = {"selected": str(selected)}
+    else:
+        metric_alias = SPLIT_METRIC_ALIASES.get(split_two_group_metric)
+        if metric_alias is None:
+            raise ValueError(
+                f"unsupported --split-two-group-metric {split_two_group_metric!r}; "
+                f"supported: {sorted(SPLIT_METRIC_ALIASES)}"
+            )
+
+        base_plan_path = (source_run_dir / "replay-plan.json").resolve()
+        top_path = with_plan_name_suffix(base_plan_path, f"{metric_alias}.top")
+        rest_path = with_plan_name_suffix(base_plan_path, f"{metric_alias}.rest")
+        top_path = _with_optional_plan_suffix(top_path, additional_suffix)
+        rest_path = _with_optional_plan_suffix(rest_path, additional_suffix)
+        selected = top_path if split == "top" else rest_path
+        related_paths = {
+            "selected": str(selected),
+            "top": str(top_path),
+            "rest": str(rest_path),
+        }
+
+    missing_paths = sorted(
+        {
+            str(Path(path_text))
+            for path_text in related_paths.values()
+            if not Path(path_text).is_file()
+        }
+    )
+    if missing_paths:
+        missing_text = ", ".join(missing_paths)
+        suffix_hint = (
+            f" --additional-suffix {additional_suffix}"
+            if additional_suffix
+            else " (if plans were compiled with suffix, pass --additional-suffix)"
+        )
+        raise ValueError(
+            "missing required precompiled replay plans: "
+            f"{missing_text}. This script only looks up existing plans.{suffix_hint}"
+        )
+    return LookupPlanResult(
+        selected_plan_path=selected,
+        related_plan_paths=related_paths,
+    )
+
+
+def _extract_replay_target_model_from_plan(plan_path: Path) -> str:
+    in_replay_target = False
+    replay_target_brace_depth = 0
+    with plan_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not in_replay_target:
+                replay_target_index = line.find('"replay_target"')
+                if replay_target_index < 0:
+                    continue
+                in_replay_target = True
+                replay_target_open_brace = line.find("{", replay_target_index)
+                if replay_target_open_brace >= 0:
+                    replay_target_section = line[replay_target_open_brace:]
+                    replay_target_brace_depth = (
+                        replay_target_section.count("{") - replay_target_section.count("}")
+                    )
+                else:
+                    replay_target_brace_depth = 0
+            else:
+                replay_target_brace_depth += line.count("{") - line.count("}")
+
+            model_match = PLAN_MODEL_LINE_RE.search(line)
+            if model_match is not None:
+                raw_model_value = model_match.group(1)
+                return json.loads(f"\"{raw_model_value}\"")
+
+            if in_replay_target and replay_target_brace_depth <= 0:
+                break
+
+    raise ValueError(f"unable to read replay_target.model from plan: {plan_path}")
+
+
+def _validate_plan_model_matches_target(
+    *,
+    plan_path: Path,
+    target_model_spec: TargetModelSpec,
+) -> str:
+    plan_model = _extract_replay_target_model_from_plan(plan_path)
+    allowed_models = {
+        target_model_spec.key,
+        target_model_spec.served_model_name,
+        target_model_spec.vllm_model_name,
+    }
+    if plan_model not in allowed_models:
+        allowed_text = ", ".join(sorted(allowed_models))
+        raise ValueError(
+            "selected plan model does not match --target-model: "
+            f"plan={plan_path}, replay_target.model={plan_model!r}, "
+            f"--target-model={target_model_spec.key!r}, expected one of: {allowed_text}"
+        )
+    return plan_model
 
 
 def _format_toml_scalar(value: Any) -> str:
@@ -166,218 +306,6 @@ def _append_toml_table(lines: list[str], table_name: str, payload: dict[str, Any
     for key, nested in nested_items:
         lines.append("")
         _append_toml_table(lines, f"{table_name}.{key}", nested)
-
-
-def _build_compile_request_payload(
-    *,
-    source_run_dir: Path,
-    target_model: str,
-    port_profile: int,
-    split: str,
-    split_two_group_metric: str,
-) -> dict[str, Any]:
-    if split in {"top", "rest"}:
-        compile_variant = f"split-two-group:{split_two_group_metric}"
-    elif split == "exclude-unranked":
-        compile_variant = "exclude-unranked"
-    else:
-        compile_variant = "full"
-    return {
-        "source_run_dir": str(source_run_dir.resolve()),
-        "target_model": target_model,
-        "port_profile": int(port_profile),
-        "split": split,
-        "compile_variant": compile_variant,
-    }
-
-
-def _build_compile_command(
-    *,
-    python_bin: str,
-    source_run_dir: Path,
-    port_profile: int,
-    split: str,
-    split_two_group_metric: str,
-    plan_out_path: Path,
-    request_timeout_s: float | None,
-) -> list[str]:
-    cmd = [
-        python_bin,
-        "-m",
-        "replayer",
-        "compile",
-        "--job-dir",
-        str(source_run_dir.resolve()),
-        "--port-profile-id",
-        str(port_profile),
-        "--plan-out",
-        str(plan_out_path.resolve()),
-    ]
-    if request_timeout_s is not None:
-        cmd.extend(["--request-timeout-s", str(request_timeout_s)])
-    if split == "exclude-unranked":
-        cmd.append("--exclude-unranked-trails")
-    elif split in {"top", "rest"}:
-        cmd.append("--split-two-group-plans")
-        cmd.extend(["--split-two-group-metric", split_two_group_metric])
-    return cmd
-
-
-def _resolve_compile_paths(
-    *,
-    cache_dir: Path,
-    split: str,
-    split_two_group_metric: str,
-) -> tuple[Path, Path, dict[str, str]]:
-    if split == "full":
-        plan_out = (cache_dir / "replay-plan.full.json").resolve()
-        selected = plan_out
-        related = {"selected": str(selected)}
-        return plan_out, selected, related
-    if split == "exclude-unranked":
-        plan_out = (cache_dir / "replay-plan.exclude-unranked.json").resolve()
-        selected = plan_out
-        related = {"selected": str(selected)}
-        return plan_out, selected, related
-
-    metric_alias = SPLIT_METRIC_ALIASES.get(split_two_group_metric)
-    if metric_alias is None:
-        raise ValueError(
-            f"unsupported --split-two-group-metric {split_two_group_metric!r}; "
-            f"supported: {sorted(SPLIT_METRIC_ALIASES)}"
-        )
-
-    plan_out = (cache_dir / "replay-plan.json").resolve()
-    top_path = with_plan_name_suffix(plan_out, f"{metric_alias}.top")
-    rest_path = with_plan_name_suffix(plan_out, f"{metric_alias}.rest")
-    selected = top_path if split == "top" else rest_path
-    related = {
-        "selected": str(selected),
-        "top": str(top_path),
-        "rest": str(rest_path),
-    }
-    return plan_out, selected, related
-
-
-def _write_compile_logs(cache_dir: Path, *, stdout: str, stderr: str) -> tuple[Path, Path]:
-    stdout_path = (cache_dir / "compile.stdout.log").resolve()
-    stderr_path = (cache_dir / "compile.stderr.log").resolve()
-    stdout_path.write_text(stdout, encoding="utf-8")
-    stderr_path.write_text(stderr, encoding="utf-8")
-    return stdout_path, stderr_path
-
-
-def compile_plan_with_cache(
-    *,
-    source_run_dir: Path,
-    target_model: str,
-    port_profile: int,
-    split: str,
-    split_two_group_metric: str,
-    request_timeout_s: float | None,
-    cache_root: Path,
-    python_bin: str,
-) -> CompileCacheResult:
-    compile_request = _build_compile_request_payload(
-        source_run_dir=source_run_dir,
-        target_model=target_model,
-        port_profile=port_profile,
-        split=split,
-        split_two_group_metric=split_two_group_metric,
-    )
-    key_text = json.dumps(compile_request, sort_keys=True, separators=(",", ":"))
-    cache_key = hashlib.sha256(key_text.encode("utf-8")).hexdigest()
-    cache_dir = (cache_root / cache_key).resolve()
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
-    compile_meta_path = (cache_dir / "compile.meta.json").resolve()
-    plan_out_path, selected_plan_path, related_plan_paths = _resolve_compile_paths(
-        cache_dir=cache_dir,
-        split=split,
-        split_two_group_metric=split_two_group_metric,
-    )
-    compile_command = _build_compile_command(
-        python_bin=python_bin,
-        source_run_dir=source_run_dir,
-        port_profile=port_profile,
-        split=split,
-        split_two_group_metric=split_two_group_metric,
-        plan_out_path=plan_out_path,
-        request_timeout_s=request_timeout_s,
-    )
-
-    existing_meta_raw = None
-    if compile_meta_path.exists():
-        try:
-            existing_meta_raw = json.loads(compile_meta_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            existing_meta_raw = None
-
-    expected_paths = [Path(path_text) for path_text in related_plan_paths.values()]
-    paths_exist = all(path.is_file() for path in expected_paths)
-    meta_matches = isinstance(existing_meta_raw, dict) and existing_meta_raw.get("compile_request") == compile_request
-    if paths_exist and meta_matches:
-        return CompileCacheResult(
-            cache_key=cache_key,
-            cache_dir=cache_dir,
-            cache_hit=True,
-            compile_command=compile_command,
-            selected_plan_path=selected_plan_path,
-            related_plan_paths=related_plan_paths,
-        )
-
-    result = subprocess.run(
-        compile_command,
-        cwd=str(REPO_ROOT),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    stdout_path, stderr_path = _write_compile_logs(
-        cache_dir,
-        stdout=result.stdout,
-        stderr=result.stderr,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            "replayer compile failed"
-            f" (rc={result.returncode}).\n"
-            f"command: {shlex.join(compile_command)}\n"
-            f"stdout log: {stdout_path}\n"
-            f"stderr log: {stderr_path}"
-        )
-
-    missing_paths = [path for path in expected_paths if not path.is_file()]
-    if missing_paths:
-        missing_text = ", ".join(str(path) for path in missing_paths)
-        raise RuntimeError(
-            "replayer compile succeeded but expected plan files were not found: "
-            f"{missing_text}"
-        )
-
-    compile_meta = {
-        "compiled_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "compile_request": compile_request,
-        "compile_command": compile_command,
-        "cache_key": cache_key,
-        "plan_out_path": str(plan_out_path),
-        "related_plan_paths": related_plan_paths,
-        "stdout_log": str(stdout_path),
-        "stderr_log": str(stderr_path),
-    }
-    compile_meta_path.write_text(
-        json.dumps(compile_meta, indent=2, ensure_ascii=True) + "\n",
-        encoding="utf-8",
-    )
-
-    return CompileCacheResult(
-        cache_key=cache_key,
-        cache_dir=cache_dir,
-        cache_hit=False,
-        compile_command=compile_command,
-        selected_plan_path=selected_plan_path,
-        related_plan_paths=related_plan_paths,
-    )
 
 
 def write_replay_config(path: Path, *, replay_payload: dict[str, Any]) -> None:
@@ -419,8 +347,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="generate_experiment.py",
         description=(
-            "Generate a local single-QPS replay bundle with cached compile artifacts "
-            "and a one-command replay entrypoint script."
+            "Generate a local single-QPS replay bundle by looking up an existing "
+            "compiled plan and emitting a one-command replay entrypoint script."
         ),
     )
     parser.add_argument("--source-run-dir", required=True, help="Profiled source run directory under results/.")
@@ -429,7 +357,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--qps", required=True, type=float, help="Poisson launch rate (requests per second).")
     parser.add_argument("--time-constraint-s", required=True, type=float, help="Replay time limit in seconds.")
     parser.add_argument("--target-model", required=True, help="Target model key from configs/model_config.toml.")
-    parser.add_argument("--port-profile", "-P", required=True, type=int, help="Port profile ID for compile/replay.")
+    parser.add_argument("--port-profile", "-P", required=True, type=int, help="Port profile ID for replay.")
     parser.add_argument(
         "--split",
         required=True,
@@ -439,13 +367,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--split-two-group-metric",
         choices=sorted(SPLIT_METRIC_ALIASES),
         default="token_usage",
-        help="Split grouping metric used for top/rest plan compile (default: token_usage).",
-    )
-    parser.add_argument(
-        "--request-timeout-s",
-        type=float,
-        default=None,
-        help="Optional compile tokenizer timeout passed to replayer compile.",
+        help="Split grouping metric used for top/rest plan lookup (default: token_usage).",
     )
     parser.add_argument(
         "--output-config-dir",
@@ -453,9 +375,12 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Generated bundle root (default: {DEFAULT_OUTPUT_CONFIG_DIR}).",
     )
     parser.add_argument(
-        "--cache-dir",
+        "--additional-suffix",
         default=None,
-        help="Compile cache root (default: <output-config-dir>/cache).",
+        help=(
+            "Optional replay plan suffix for lookup. Example: with suffix fp8 and split rest, "
+            "looks for replay-plan.token.rest.fp8.json."
+        ),
     )
     parser.add_argument(
         "--replay-output-root",
@@ -464,11 +389,6 @@ def build_parser() -> argparse.ArgumentParser:
             "Replay output root. Default appends "
             "<split>/<qps>/<timestamp> under results/replay/single-qps/split/."
         ),
-    )
-    parser.add_argument(
-        "--python-bin",
-        default=sys.executable,
-        help="Python executable used for `-m replayer compile` (default: current python).",
     )
     return parser
 
@@ -495,25 +415,24 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.port_profile < 0:
             raise ValueError("--port-profile must be >= 0")
-        if args.request_timeout_s is not None and args.request_timeout_s <= 0:
-            raise ValueError("--request-timeout-s must be > 0")
 
         target_model = str(args.target_model).strip()
         if not target_model:
             raise ValueError("--target-model cannot be empty")
-        valid_model_keys = _load_target_model_keys()
-        if target_model not in valid_model_keys:
-            available = ", ".join(sorted(valid_model_keys))
+        target_model_specs = _load_target_model_specs()
+        target_model_spec = target_model_specs.get(target_model)
+        if target_model_spec is None:
+            available = ", ".join(sorted(target_model_specs.keys()))
             raise ValueError(
                 f"unknown --target-model {target_model!r}; available keys: {available}"
             )
+        additional_suffix = (
+            str(args.additional_suffix).strip()
+            if args.additional_suffix is not None and str(args.additional_suffix).strip()
+            else None
+        )
 
         output_config_root = Path(args.output_config_dir).expanduser().resolve()
-        cache_root = (
-            Path(args.cache_dir).expanduser().resolve()
-            if args.cache_dir is not None
-            else (output_config_root / "cache").resolve()
-        )
         replay_output_root = Path(args.replay_output_root).expanduser()
         if not replay_output_root.is_absolute():
             replay_output_root = (REPO_ROOT / replay_output_root).resolve()
@@ -524,21 +443,24 @@ def main(argv: list[str] | None = None) -> int:
         qps_slug = format_qps_slug(qps)
         batch_dir = (output_config_root / batch_timestamp).resolve()
 
-        compile_result = compile_plan_with_cache(
+        lookup_result = _resolve_lookup_plan_paths(
             source_run_dir=source_run_dir,
-            target_model=target_model,
-            port_profile=args.port_profile,
             split=split,
             split_two_group_metric=str(args.split_two_group_metric),
-            request_timeout_s=args.request_timeout_s,
-            cache_root=cache_root,
-            python_bin=str(args.python_bin),
+            additional_suffix=additional_suffix,
         )
+        related_plan_models: dict[str, str] = {}
+        for plan_key, plan_path_text in lookup_result.related_plan_paths.items():
+            plan_model = _validate_plan_model_matches_target(
+                plan_path=Path(plan_path_text),
+                target_model_spec=target_model_spec,
+            )
+            related_plan_models[plan_key] = plan_model
 
         plan_copy_dir = (batch_dir / "plan").resolve()
         plan_copy_dir.mkdir(parents=True, exist_ok=True)
-        selected_plan_copy_path = (plan_copy_dir / compile_result.selected_plan_path.name).resolve()
-        shutil.copy2(compile_result.selected_plan_path, selected_plan_copy_path)
+        selected_plan_copy_path = (plan_copy_dir / lookup_result.selected_plan_path.name).resolve()
+        shutil.copy2(lookup_result.selected_plan_path, selected_plan_copy_path)
 
         replay_output_dir = (
             replay_output_root / split / qps_slug / batch_timestamp
@@ -580,16 +502,14 @@ def main(argv: list[str] | None = None) -> int:
             "qps_slug": qps_slug,
             "time_constraint_s": time_constraint_s,
             "port_profile": int(args.port_profile),
-            "request_timeout_s": args.request_timeout_s,
+            "additional_suffix": additional_suffix,
             "output_config_root_dir": str(output_config_root),
             "output_batch_dir": str(batch_dir),
-            "cache_root_dir": str(cache_root),
-            "cache_key": compile_result.cache_key,
-            "cache_dir": str(compile_result.cache_dir),
-            "cache_hit": compile_result.cache_hit,
-            "compile_command": compile_result.compile_command,
-            "selected_cached_plan": str(compile_result.selected_plan_path),
-            "related_cached_plans": compile_result.related_plan_paths,
+            "plan_lookup_only": True,
+            "selected_source_plan": str(lookup_result.selected_plan_path),
+            "related_source_plans": lookup_result.related_plan_paths,
+            "selected_plan_model": related_plan_models.get("selected"),
+            "related_plan_models": related_plan_models,
             "selected_plan_copy": str(selected_plan_copy_path),
             "replay_output_dir": path_for_config(replay_output_dir),
             "replay_config": str(replay_config_path),
