@@ -32,6 +32,23 @@ from replayer.cli import timed_cancel_http_json
 from replayer.validate import extract_response_text as extract_validate_response_text
 
 
+def _load_last_json_from_output(output: str) -> dict[str, object]:
+    lines = output.splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        if not lines[index].lstrip().startswith("{"):
+            continue
+        candidate = "\n".join(lines[index:]).strip()
+        if not candidate:
+            continue
+        try:
+            payload = json.loads(candidate)
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(payload, dict):
+            return payload
+    raise AssertionError(f"No trailing JSON object found in output:\n{output}")
+
+
 def test_resolve_compile_target_extracts_model_and_profile_tokenize_endpoint() -> None:
     config = {
         "backend": {
@@ -872,7 +889,7 @@ def test_cmd_compile_model_override_forces_recompile_instead_of_reuse(
     )
 
     assert exit_code == 0
-    summary = json.loads(capsys.readouterr().out)
+    summary = _load_last_json_from_output(capsys.readouterr().out)
     assert summary["reused_existing_plan"] is False
     assert summary["model_override"] == "qwen3_coder_30b_fp8"
     assert summary["model_override_key"] == "qwen3_coder_30b_fp8"
@@ -1025,7 +1042,7 @@ def test_cmd_compile_job_root_compiles_all_discovered_jobs(
     )
 
     assert exit_code == 0
-    summary = json.loads(capsys.readouterr().out)
+    summary = _load_last_json_from_output(capsys.readouterr().out)
     assert summary["mode"] == "job_root"
     assert summary["job_count_total"] == 2
     assert summary["job_count_succeeded"] == 2
@@ -1162,7 +1179,7 @@ max_concurrent = 2
     )
 
 
-def test_cmd_compile_split_two_group_plans_writes_top_and_rest(
+def test_cmd_compile_split_two_group_plans_default_writes_token_and_context(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -1182,28 +1199,82 @@ def test_cmd_compile_split_two_group_plans_writes_top_and_rest(
     )
 
     assert exit_code == 0
-    summary = json.loads(capsys.readouterr().out)
+    summary = _load_last_json_from_output(capsys.readouterr().out)
     assert summary["split_two_group_plans"] is True
-    assert summary["split_two_group_metric"] == "token_usage"
+    assert summary["split_two_group_metrics"] == ["token_usage", "context_usage"]
+    assert summary["status"] == "ok"
 
-    top_path = tmp_path / "replay-plan.token.top.json"
-    rest_path = tmp_path / "replay-plan.token.rest.json"
-    assert summary["plan_paths"]["top"] == str(top_path.resolve())
-    assert summary["plan_paths"]["rest"] == str(rest_path.resolve())
-    assert top_path.is_file()
-    assert rest_path.is_file()
+    token_result = summary["metric_results"]["token_usage"]
+    context_result = summary["metric_results"]["context_usage"]
+    assert token_result["status"] == "ok"
+    assert context_result["status"] == "ok"
+
+    token_summary = token_result["summary"]
+    context_summary = context_result["summary"]
+    assert token_summary["split_two_group_metric"] == "token_usage"
+    assert context_summary["split_two_group_metric"] == "context_usage"
+    assert token_summary["worker_count_exclude_unranked"] == 2
+    assert context_summary["worker_count_exclude_unranked"] == 2
+    assert token_summary["request_count_exclude_unranked"] == 0
+    assert context_summary["request_count_exclude_unranked"] == 0
+
+    token_top_path = tmp_path / "replay-plan.token.top.json"
+    token_rest_path = tmp_path / "replay-plan.token.rest.json"
+    token_exclude_unranked_path = tmp_path / "replay-plan.token.exclude-unranked.json"
+    assert token_summary["plan_paths"]["top"] == str(token_top_path.resolve())
+    assert token_summary["plan_paths"]["rest"] == str(token_rest_path.resolve())
+    assert token_summary["plan_paths"]["exclude_unranked"] == str(
+        token_exclude_unranked_path.resolve()
+    )
+    assert token_top_path.is_file()
+    assert token_rest_path.is_file()
+    assert token_exclude_unranked_path.is_file()
     assert not plan_path.exists()
 
-    top_payload = json.loads(top_path.read_text(encoding="utf-8"))
-    rest_payload = json.loads(rest_path.read_text(encoding="utf-8"))
-    assert len(top_payload["workers"]) == 1
-    assert len(rest_payload["workers"]) == 1
-    assert top_payload["workers"][0]["source_trail_name"] == "run_alpha"
-    assert rest_payload["workers"][0]["source_trail_name"] == "profile-2/run_beta"
-    assert top_payload["workers"][0]["launch_priority"] == 0
-    assert rest_payload["workers"][0]["launch_priority"] == 0
-    assert top_payload["split_two_group"]["group"] == "top"
-    assert rest_payload["split_two_group"]["group"] == "rest"
+    context_top_path = tmp_path / "replay-plan.context.top.json"
+    context_rest_path = tmp_path / "replay-plan.context.rest.json"
+    context_exclude_unranked_path = tmp_path / "replay-plan.context.exclude-unranked.json"
+    assert context_summary["plan_paths"]["top"] == str(context_top_path.resolve())
+    assert context_summary["plan_paths"]["rest"] == str(context_rest_path.resolve())
+    assert context_summary["plan_paths"]["exclude_unranked"] == str(
+        context_exclude_unranked_path.resolve()
+    )
+    assert context_top_path.is_file()
+    assert context_rest_path.is_file()
+    assert context_exclude_unranked_path.is_file()
+
+    token_top_payload = json.loads(token_top_path.read_text(encoding="utf-8"))
+    token_rest_payload = json.loads(token_rest_path.read_text(encoding="utf-8"))
+    token_exclude_unranked_payload = json.loads(
+        token_exclude_unranked_path.read_text(encoding="utf-8")
+    )
+    assert len(token_top_payload["workers"]) == 1
+    assert len(token_rest_payload["workers"]) == 1
+    assert len(token_exclude_unranked_payload["workers"]) == 2
+    assert token_top_payload["workers"][0]["source_trail_name"] == "run_alpha"
+    assert token_rest_payload["workers"][0]["source_trail_name"] == "profile-2/run_beta"
+    assert [
+        worker["source_trail_name"] for worker in token_exclude_unranked_payload["workers"]
+    ] == ["run_alpha", "profile-2/run_beta"]
+    assert token_top_payload["workers"][0]["launch_priority"] == 0
+    assert token_rest_payload["workers"][0]["launch_priority"] == 0
+    assert [
+        worker["launch_priority"] for worker in token_exclude_unranked_payload["workers"]
+    ] == [0, 1]
+    assert token_top_payload["split_two_group"]["group"] == "top"
+    assert token_rest_payload["split_two_group"]["group"] == "rest"
+    assert token_exclude_unranked_payload["split_two_group"]["group"] == "exclude-unranked"
+
+    context_top_payload = json.loads(context_top_path.read_text(encoding="utf-8"))
+    context_rest_payload = json.loads(context_rest_path.read_text(encoding="utf-8"))
+    context_exclude_unranked_payload = json.loads(
+        context_exclude_unranked_path.read_text(encoding="utf-8")
+    )
+    assert context_top_payload["workers"][0]["source_trail_name"] == "profile-2/run_beta"
+    assert context_rest_payload["workers"][0]["source_trail_name"] == "run_alpha"
+    assert [
+        worker["source_trail_name"] for worker in context_exclude_unranked_payload["workers"]
+    ] == ["run_alpha", "profile-2/run_beta"]
 
 
 def test_cmd_compile_split_two_group_plans_uses_context_metric(
@@ -1232,9 +1303,194 @@ def test_cmd_compile_split_two_group_plans_uses_context_metric(
     rest_payload = json.loads(
         (tmp_path / "replay-plan.context.rest.json").read_text(encoding="utf-8")
     )
+    exclude_unranked_payload = json.loads(
+        (tmp_path / "replay-plan.context.exclude-unranked.json").read_text(encoding="utf-8")
+    )
     assert top_payload["workers"][0]["source_trail_name"] == "profile-2/run_beta"
     assert rest_payload["workers"][0]["source_trail_name"] == "run_alpha"
+    assert [
+        worker["source_trail_name"] for worker in exclude_unranked_payload["workers"]
+    ] == ["run_alpha", "profile-2/run_beta"]
 
+
+def test_cmd_compile_clean_requires_split_two_group_plans(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job"
+    _write_minimal_compile_job(job_dir)
+    with pytest.raises(
+        ValueError,
+        match="--clean can only be combined with --split-two-group-plans",
+    ):
+        cmd_compile(
+            argparse.Namespace(
+                job_dir=str(job_dir),
+                port_profile_id=1,
+                clean=True,
+            )
+        )
+
+
+def test_cmd_compile_split_two_group_clean_suffix_order_with_additional_suffix(
+    tmp_path: Path,
+) -> None:
+    job_dir = tmp_path / "job"
+    _write_split_two_group_compile_job(job_dir)
+    plan_path = tmp_path / "replay-plan.json"
+
+    exit_code = cmd_compile(
+        argparse.Namespace(
+            job_dir=str(job_dir),
+            plan_out=str(plan_path),
+            port_profile_id=1,
+            split_two_group_plans=True,
+            split_two_group_metric="token_usage",
+            clean=True,
+            additional_suffix="qwen3_fp8",
+        )
+    )
+
+    assert exit_code == 0
+    top_path = tmp_path / "replay-plan.clean.token.top.qwen3_fp8.json"
+    rest_path = tmp_path / "replay-plan.clean.token.rest.qwen3_fp8.json"
+    exclude_unranked_path = (
+        tmp_path / "replay-plan.clean.token.exclude-unranked.qwen3_fp8.json"
+    )
+    clean_stats_path = tmp_path / "replay-plan.clean.token.removal-stats.qwen3_fp8.json"
+    clean_details_path = tmp_path / "replay-plan.clean.token.removal-details.qwen3_fp8.json"
+    assert top_path.is_file()
+    assert rest_path.is_file()
+    assert exclude_unranked_path.is_file()
+    assert clean_stats_path.is_file()
+    assert clean_details_path.is_file()
+
+
+def test_cmd_compile_split_two_group_clean_removes_499_and_collapses_timing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    job_dir = tmp_path / "job"
+    _write_split_two_group_compile_job(job_dir)
+
+    run_alpha = job_dir / "gateway-output" / "run_alpha"
+    run_alpha_manifest = run_alpha / "manifest.json"
+    run_alpha_manifest.write_text(
+        json.dumps(
+            {
+                **json.loads(run_alpha_manifest.read_text(encoding="utf-8")),
+                "request_count": 4,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    request_records = [
+        {
+            "request_id": "alpha-1",
+            "request_start_time": "2026-03-01T00:00:04Z",
+            "request_end_time": "2026-03-01T00:00:05Z",
+            "request": {
+                "model": "Test-Model",
+                "messages": [{"role": "user", "content": "r1"}],
+            },
+            "response": {"choices": [{"message": {"content": "resp-1"}}]},
+            "status_code": 200,
+        },
+        {
+            "request_id": "alpha-2",
+            "request_start_time": "2026-03-01T00:00:06Z",
+            "request_end_time": "2026-03-01T00:00:07Z",
+            "request_duration_ms": 1000,
+            "request": {
+                "model": "Test-Model",
+                "messages": [{"role": "user", "content": "r2"}],
+            },
+            "response": {"error": "client_disconnected"},
+            "status_code": 499,
+        },
+        {
+            "request_id": "alpha-3",
+            "request_start_time": "2026-03-01T00:00:08Z",
+            "request_end_time": "2026-03-01T00:00:09Z",
+            "request_duration_ms": 1000,
+            "request": {
+                "model": "Test-Model",
+                "messages": [{"role": "user", "content": "r3"}],
+            },
+            "response": {"error": "client_disconnected"},
+            "status_code": 499,
+        },
+        {
+            "request_id": "alpha-4",
+            "request_start_time": "2026-03-01T00:00:10Z",
+            "request_end_time": "2026-03-01T00:00:11Z",
+            "request": {
+                "model": "Test-Model",
+                "messages": [{"role": "user", "content": "r4"}],
+            },
+            "response": {"choices": [{"message": {"content": "resp-4"}}]},
+            "status_code": 200,
+        },
+    ]
+    (run_alpha / "requests" / "model_inference.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in request_records),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("replayer.cli.tokenize_response_text", lambda **_: [1, 2, 3])
+
+    plan_path = tmp_path / "replay-plan.json"
+    exit_code = cmd_compile(
+        argparse.Namespace(
+            job_dir=str(job_dir),
+            plan_out=str(plan_path),
+            port_profile_id=1,
+            split_two_group_plans=True,
+            split_two_group_metric="token_usage",
+            clean=True,
+        )
+    )
+
+    assert exit_code == 0
+    summary = _load_last_json_from_output(capsys.readouterr().out)
+    assert summary["clean"] is True
+    assert summary["clean_removed_499_request_count"] == 2
+    assert summary["worker_count_exclude_unranked"] == 2
+    clean_stats_path = tmp_path / "replay-plan.clean.token.removal-stats.json"
+    clean_details_path = tmp_path / "replay-plan.clean.token.removal-details.json"
+    assert summary["clean_removal_stats_path"] == str(clean_stats_path.resolve())
+    assert summary["clean_removal_details_path"] == str(clean_details_path.resolve())
+
+    top_payload = json.loads(
+        (tmp_path / "replay-plan.clean.token.top.json").read_text(encoding="utf-8")
+    )
+    exclude_unranked_payload = json.loads(
+        (tmp_path / "replay-plan.clean.token.exclude-unranked.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    clean_stats_payload = json.loads(clean_stats_path.read_text(encoding="utf-8"))
+    clean_details_payload = json.loads(clean_details_path.read_text(encoding="utf-8"))
+    top_worker = top_payload["workers"][0]
+    kept_requests = top_worker["requests"]
+    assert [req["request_id"] for req in kept_requests] == ["alpha-1", "alpha-4"]
+    assert [req["index"] for req in kept_requests] == [0, 3]
+    assert kept_requests[0]["delta_agent_action_after_s"] == 1.0
+    assert kept_requests[1]["delta_agent_action_after_s"] == 0.0
+    assert top_payload["compile_options"]["clean"] is True
+    assert top_payload["compile_options"]["clean_removed_499_request_count"] == 2
+    assert len(exclude_unranked_payload["workers"]) == 2
+    assert clean_stats_payload["removed_request_count"] == 2
+    assert clean_stats_payload["removed_count_by_trail"] == [
+        {"source_trail_name": "run_alpha", "removed_request_count": 2}
+    ]
+    assert clean_stats_payload["removed_count_by_worker"] == [
+        {"worker_id": "trial-alpha", "removed_request_count": 2}
+    ]
+    assert clean_details_payload["removed_request_count"] == 2
+    assert [item["request_id"] for item in clean_details_payload["removed_requests"]] == [
+        "alpha-2",
+        "alpha-3",
+    ]
 
 def test_cmd_compile_reuses_existing_plan_when_compile_version_matches(
     tmp_path: Path,
@@ -1265,7 +1521,7 @@ def test_cmd_compile_reuses_existing_plan_when_compile_version_matches(
     )
 
     assert exit_code == 0
-    summary = json.loads(capsys.readouterr().out)
+    summary = _load_last_json_from_output(capsys.readouterr().out)
     assert summary["reused_existing_plan"] is True
     assert summary["compile_version"] == REPLAY_PLAN_COMPILE_VERSION
     assert summary["worker_count"] == 1
@@ -1300,7 +1556,7 @@ def test_cmd_compile_reuses_existing_plan_when_compile_version_missing(
     )
 
     assert exit_code == 0
-    summary = json.loads(capsys.readouterr().out)
+    summary = _load_last_json_from_output(capsys.readouterr().out)
     assert summary["reused_existing_plan"] is True
     assert summary["compile_version"] == REPLAY_PLAN_COMPILE_VERSION
 
@@ -1334,7 +1590,7 @@ def test_cmd_compile_reuses_existing_plan_when_compile_version_empty(
     )
 
     assert exit_code == 0
-    summary = json.loads(capsys.readouterr().out)
+    summary = _load_last_json_from_output(capsys.readouterr().out)
     assert summary["reused_existing_plan"] is True
     assert summary["compile_version"] == REPLAY_PLAN_COMPILE_VERSION
 

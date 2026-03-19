@@ -112,6 +112,16 @@ def test_extract_run_generates_request_list_and_stats(tmp_path: Path) -> None:
                                         "value": 0.1,
                                     },
                                     {
+                                        "key": "gen_ai.latency.time_in_model_prefill",
+                                        "type": "float64",
+                                        "value": 0.25,
+                                    },
+                                    {
+                                        "key": "gen_ai.latency.time_in_model_decode",
+                                        "type": "float64",
+                                        "value": 0.5,
+                                    },
+                                    {
                                         "key": "gen_ai.request.id",
                                         "type": "string",
                                         "value": "chatcmpl-1",
@@ -136,6 +146,16 @@ def test_extract_run_generates_request_list_and_stats(tmp_path: Path) -> None:
                                         "value": 0.2,
                                     },
                                     {
+                                        "key": "gen_ai.latency.time_in_model_prefill",
+                                        "type": "float64",
+                                        "value": 1.0,
+                                    },
+                                    {
+                                        "key": "gen_ai.latency.time_in_model_decode",
+                                        "type": "float64",
+                                        "value": 2.0,
+                                    },
+                                    {
                                         "key": "gen_ai.request.id",
                                         "type": "string",
                                         "value": "chatcmpl-2",
@@ -156,6 +176,9 @@ def test_extract_run_generates_request_list_and_stats(tmp_path: Path) -> None:
     output_dir = run_dir / "post-processed" / "gateway" / "llm-requests"
     requests_payload = json.loads((output_dir / "llm-requests.json").read_text(encoding="utf-8"))
     stats_payload = json.loads((output_dir / "llm-request-stats.json").read_text(encoding="utf-8"))
+    speed_stats_payload = json.loads(
+        (output_dir / "llm-request-speed-stats.json").read_text(encoding="utf-8")
+    )
     longest_payload = json.loads((output_dir / "llm-requests-longest-10.json").read_text(encoding="utf-8"))
     shortest_payload = json.loads((output_dir / "llm-requests-shortest-10.json").read_text(encoding="utf-8"))
     stats_200_payload = json.loads((output_dir / "llm-requests-stats.200.json").read_text(encoding="utf-8"))
@@ -183,6 +206,27 @@ def test_extract_run_generates_request_list_and_stats(tmp_path: Path) -> None:
     assert ttft_metric["min"] == 0.1
     assert ttft_metric["max"] == 0.2
     assert ttft_metric["avg"] == 0.15000000000000002
+    assert stats_payload["average_stage_speed_tokens_per_s"] == {
+        "request_status_code": 200,
+        "request_count_200": 1,
+        "prefill": {
+            "eligible_request_count": 1,
+            "excluded_request_count": 0,
+            "avg_tokens_per_s": 40.0,
+            "min_tokens_per_s": 40.0,
+            "max_tokens_per_s": 40.0,
+        },
+        "decode": {
+            "eligible_request_count": 1,
+            "excluded_request_count": 0,
+            "avg_tokens_per_s": 4.0,
+            "min_tokens_per_s": 4.0,
+            "max_tokens_per_s": 4.0,
+        },
+    }
+    assert speed_stats_payload["average_stage_speed_tokens_per_s"] == (
+        stats_payload["average_stage_speed_tokens_per_s"]
+    )
 
     assert longest_payload["selection"] == "longest"
     assert shortest_payload["selection"] == "shortest"
@@ -348,6 +392,54 @@ def test_build_stats_by_status_code() -> None:
     assert payloads["200"]["metrics"]["request_duration_ms"]["avg"] == 150.0
     assert payloads["499"]["request_count"] == 1
     assert payloads["499"]["metrics"]["request_duration_ms"]["avg"] == 300.0
+
+
+def test_build_average_stage_speed_tokens_per_s_uses_only_200_requests() -> None:
+    records = [
+        {
+            "request_id": "req-1",
+            "status_code": 200,
+            "prompt_tokens": 100,
+            "completion_tokens": 40,
+            "gen_ai.latency.time_in_model_prefill": 2.0,
+            "gen_ai.latency.time_in_model_decode": 4.0,
+        },
+        {
+            "request_id": "req-2",
+            "status_code": 200,
+            "prompt_tokens": 50,
+            "completion_tokens": 20,
+            "gen_ai.latency.time_in_model_prefill": 1.0,
+            "gen_ai.latency.time_in_model_decode": 2.0,
+        },
+        {
+            "request_id": "req-3",
+            "status_code": 499,
+            "prompt_tokens": 1000,
+            "completion_tokens": 500,
+            "gen_ai.latency.time_in_model_prefill": 0.5,
+            "gen_ai.latency.time_in_model_decode": 0.5,
+        },
+        {
+            "request_id": "req-4",
+            "status_code": 200,
+            "prompt_tokens": 30,
+            "completion_tokens": 10,
+            "gen_ai.latency.time_in_model_prefill": 0.0,
+            "gen_ai.latency.time_in_model_decode": None,
+        },
+    ]
+
+    payload = extract_run.build_average_stage_speed_tokens_per_s(records)
+
+    assert payload["request_status_code"] == 200
+    assert payload["request_count_200"] == 3
+    assert payload["prefill"]["eligible_request_count"] == 2
+    assert payload["prefill"]["excluded_request_count"] == 1
+    assert payload["prefill"]["avg_tokens_per_s"] == 50.0
+    assert payload["decode"]["eligible_request_count"] == 2
+    assert payload["decode"]["excluded_request_count"] == 1
+    assert payload["decode"]["avg_tokens_per_s"] == 10.0
 
 
 def test_discover_run_dirs_with_gateway_output_scans_recursively(tmp_path: Path) -> None:

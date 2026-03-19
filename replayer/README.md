@@ -10,6 +10,7 @@ Detailed reference for compile input requirements and replay timing drivers:
 
 - `replayer/README.replay-plan-inputs-and-timing.md`
 - `replayer/README.split-two-group-plans.md`
+- `replayer/README.clean-499.md`
 
 ## CLI
 
@@ -30,10 +31,11 @@ python -m replayer --help
 - `--port-profile-id <int>`: required; resolve compile-time tokenizer endpoint from `configs/port_profiles.toml`.
 - `--request-timeout-s <float>`: optional HTTP timeout for compile-time tokenizer requests (default: `3600`).
 - `--model <string>`: optional compile-time model override. Must match a name in `configs/model_config.toml` (model key, served model name, or vLLM model name). When set, compile rewrites `replay_target.model` and each request body `model`.
-- `--split-two-group-plans`: optional; write two split plans based on precomputed grouping from `<job-dir>/original-analysis/split/`.
-- `--split-two-group-metric <token_usage|context_usage>`: grouping metric file for `--split-two-group-plans` (default: `token_usage`).
+- `--split-two-group-plans`: optional; write three split plans (`top`, `rest`, and `exclude-unranked` union) based on precomputed grouping from `<job-dir>/original-analysis/split/`.
+- `--split-two-group-metric <token_usage|context_usage>`: grouping metric file for `--split-two-group-plans`. If omitted, compile generates both metric variants.
   - `token_usage` reads `top-p-token-usage-two-groups.json`
   - `context_usage` reads `top-p-context-usage-two-groups.json`
+- `--clean`: split mode only; drop source requests with `status_code=499` and collapse their request-time windows. Output plans add a `.clean` suffix immediately after `replay-plan` (for example `replay-plan.clean.token.top.json`).
 - `--exclude-unranked-trails`: non-split compile only; exclude trails listed under `original-analysis/split/top-p-usage-ratio-summary.json` `unranked_trails`.
 - `--additional-suffix <string>`: optional; append a suffix before the final `.json` extension. For example, `replay-plan.json` with `--additional-suffix v2` becomes `replay-plan.v2.json`. Applied after other suffixes like `--exclude-unranked-trails` or `--split-two-group-plans`.
 - Naming/reuse details: `replayer/README.split-two-group-plans.md`
@@ -160,6 +162,11 @@ connection after the recorded request duration. If the gateway returns an error
 after the request has already been running for at least `60s`, replay treats
 that as acceptable equivalent behavior for this mode instead of failing the
 worker.
+
+When `--clean` is used with split mode, source `status_code=499` requests are
+removed instead, and replay timing is collapsed so those requests are treated as
+never having happened. Clean mode also writes removal report files (stats and
+per-request details). See `replayer/README.clean-499.md`.
 
 If you want to drop split-unranked trails from a non-split plan, use
 `--exclude-unranked-trails`.

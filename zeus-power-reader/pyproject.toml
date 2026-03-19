@@ -1,0 +1,29 @@
+[project]
+name = "zeus-power-reader"
+version = "0.1.0"
+description = "Stream power readings from zeusd to JSONL file with ISO timestamps and GPU frequency control utilities"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "zeus",
+]
+
+[project.scripts]
+zeus-power-reader = "zeus_power_reader:main"
+set-gpu-core-freq = "set_gpu_core_freq:main"
+set-gpu-mem-freq = "set_gpu_mem_freq:main"
+reset-gpu-core-freq = "reset_gpu_core_freq:main"
+reset-gpu-mem-freq = "reset_gpu_mem_freq:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = [
+    "zeus_power_reader",
+    "set_gpu_core_freq",
+    "set_gpu_mem_freq",
+    "reset_gpu_core_freq",
+    "reset_gpu_mem_freq",
+]

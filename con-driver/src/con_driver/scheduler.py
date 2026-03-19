@@ -1186,7 +1186,8 @@ class ConcurrentDriver:
         return wrapped
 
     def _make_agent_api_token(self, *, launch_index: int, trial_id: str) -> str:
-        return f"condrv_{self._run_id}_{launch_index:04d}_{trial_id}"
+        agent_id = f"condrv_{self._run_id}_{launch_index:04d}_{trial_id}"
+        return agent_id
 
     def _build_launch_plan(
         self,

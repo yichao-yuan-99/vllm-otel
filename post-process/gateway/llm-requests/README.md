@@ -30,6 +30,7 @@ Files written:
 
 - `llm-requests.json`
 - `llm-request-stats.json`
+- `llm-request-speed-stats.json`
 - `llm-requests-longest-10.json`
 - `llm-requests-shortest-10.json`
 - `llm-requests-stats.<status_code>.json` (for each observed return code, e.g. `200`, `499`)
@@ -94,6 +95,19 @@ Contains aggregated numeric stats across all flattened request records:
 
 Stats are generated for every numeric field found in `llm-requests.json`
 (durations, token counts, latency tags, offsets, etc.).
+
+This file also includes:
+
+- `average_stage_speed_tokens_per_s`
+  - computed only from status-code `200` requests
+  - per-request prefill speed: `prompt_tokens / gen_ai.latency.time_in_model_prefill`
+  - per-request decode speed: `completion_tokens / gen_ai.latency.time_in_model_decode`
+  - aggregated with avg/min/max and eligibility counts
+
+## llm-request-speed-stats.json
+
+Contains the same `average_stage_speed_tokens_per_s` payload as
+`llm-request-stats.json`, split into its own standalone file for quick access.
 
 ## llm-requests-stats.<status_code>.json
 

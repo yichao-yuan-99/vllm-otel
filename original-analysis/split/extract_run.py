@@ -18,6 +18,22 @@ TOKEN_TWO_GROUP_OUTPUT_NAME = "top-p-token-usage-two-groups.json"
 CONTEXT_TWO_GROUP_OUTPUT_NAME = "top-p-context-usage-two-groups.json"
 ROOT_TOKEN_TABLE_NAME = "split-top-p-token-usage-two-group-table.csv"
 ROOT_CONTEXT_TABLE_NAME = "split-top-p-context-usage-two-group-table.csv"
+STRICT_499_SUFFIX = "strict-499"
+STRICT_OUTPUT_NAME = f"top-p-usage-ratio-summary.{STRICT_499_SUFFIX}.json"
+STRICT_TOKEN_TWO_GROUP_OUTPUT_NAME = (
+    f"top-p-token-usage-two-groups.{STRICT_499_SUFFIX}.json"
+)
+STRICT_CONTEXT_TWO_GROUP_OUTPUT_NAME = (
+    f"top-p-context-usage-two-groups.{STRICT_499_SUFFIX}.json"
+)
+ROOT_STRICT_TOKEN_TABLE_NAME = (
+    f"split-top-p-token-usage-two-group-table.{STRICT_499_SUFFIX}.csv"
+)
+ROOT_STRICT_CONTEXT_TABLE_NAME = (
+    f"split-top-p-context-usage-two-group-table.{STRICT_499_SUFFIX}.csv"
+)
+UNRANKED_MODE_NORMAL = "normal"
+UNRANKED_MODE_STRICT_499 = "strict_499"
 DEFAULT_P_MIN = 1
 DEFAULT_P_MAX = 99
 
@@ -176,6 +192,16 @@ def _extract_usage_tokens(record: dict[str, Any]) -> tuple[int | None, int | Non
     return prompt_tokens, decode_tokens, cached_tokens
 
 
+def _extract_status_code(record: dict[str, Any]) -> int | None:
+    status_code = _int_or_none(record.get("status_code"))
+    if status_code is not None:
+        return status_code
+    response_summary = record.get("response_summary")
+    if isinstance(response_summary, dict):
+        return _int_or_none(response_summary.get("status_code"))
+    return None
+
+
 def _extract_trail_stats(
     gateway_run_dir: Path,
     *,
@@ -190,9 +216,15 @@ def _extract_trail_stats(
     trail_token_usage_total = 0
     requests_with_length = 0
     requests_with_token_usage = 0
+    requests_with_status_499 = 0
+    has_status_499 = False
 
     for record in _iter_jsonl_dict_records(requests_path):
         request_count += 1
+        status_code = _extract_status_code(record)
+        if status_code == 499:
+            has_status_499 = True
+            requests_with_status_499 += 1
         prompt_tokens, decode_tokens, cached_tokens = _extract_usage_tokens(record)
         if prompt_tokens is not None and decode_tokens is not None:
             request_length = prompt_tokens + decode_tokens
@@ -214,6 +246,8 @@ def _extract_trail_stats(
         "token_usage": trail_token_usage_total,
         "requests_with_length": requests_with_length,
         "requests_with_token_usage": requests_with_token_usage,
+        "has_status_499": has_status_499,
+        "requests_with_status_499": requests_with_status_499,
     }
 
 
@@ -391,7 +425,7 @@ def _build_two_group_payload(
     }
 
 
-def extract_split_from_run_dir(run_dir: Path) -> dict[str, Any]:
+def _load_trails_from_run_dir(run_dir: Path) -> tuple[Path, Path, list[dict[str, Any]]]:
     resolved_run_dir = run_dir.expanduser().resolve()
     gateway_output_dir = resolved_run_dir / "gateway-output"
     if not gateway_output_dir.is_dir():
@@ -407,14 +441,61 @@ def extract_split_from_run_dir(run_dir: Path) -> dict[str, Any]:
     trails: list[dict[str, Any]] = []
     for gateway_run_dir, profile_id in discovered_run_dirs:
         trails.append(_extract_trail_stats(gateway_run_dir, profile_id=profile_id))
+    return resolved_run_dir, gateway_output_dir.resolve(), trails
 
+
+def _is_trail_unranked(
+    trail: dict[str, Any],
+    *,
+    unranked_mode: str,
+) -> bool:
+    if not isinstance(trail.get("context_length"), int):
+        return True
+    if unranked_mode == UNRANKED_MODE_NORMAL:
+        return False
+    if unranked_mode == UNRANKED_MODE_STRICT_499:
+        return bool(trail.get("has_status_499"))
+    raise ValueError(f"Unsupported unranked mode: {unranked_mode}")
+
+
+def _split_ranked_and_unranked_trails(
+    trails: list[dict[str, Any]],
+    *,
+    unranked_mode: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     ranked_trails: list[dict[str, Any]] = []
     unranked_trails: list[dict[str, Any]] = []
     for trail in trails:
-        if isinstance(trail.get("context_length"), int):
-            ranked_trails.append(trail)
+        trail_copy = dict(trail)
+        if _is_trail_unranked(trail_copy, unranked_mode=unranked_mode):
+            unranked_trails.append(trail_copy)
         else:
-            unranked_trails.append(trail)
+            ranked_trails.append(trail_copy)
+    return ranked_trails, unranked_trails
+
+
+def _unranked_criteria_description(unranked_mode: str) -> str:
+    if unranked_mode == UNRANKED_MODE_NORMAL:
+        return "trails without any valid request length (prompt_tokens + completion_tokens)"
+    if unranked_mode == UNRANKED_MODE_STRICT_499:
+        return (
+            "trails without valid request length OR trails containing any request with "
+            "status_code=499"
+        )
+    raise ValueError(f"Unsupported unranked mode: {unranked_mode}")
+
+
+def _build_split_payload_from_trails(
+    *,
+    resolved_run_dir: Path,
+    gateway_output_dir: Path,
+    trails: list[dict[str, Any]],
+    unranked_mode: str,
+) -> dict[str, Any]:
+    ranked_trails, unranked_trails = _split_ranked_and_unranked_trails(
+        trails,
+        unranked_mode=unranked_mode,
+    )
 
     ranked_trails.sort(
         key=lambda trail: (
@@ -446,12 +527,17 @@ def extract_split_from_run_dir(run_dir: Path) -> dict[str, Any]:
         metric_name="context_usage",
     )
 
+    trail_count_with_status_499 = sum(1 for trail in trails if bool(trail.get("has_status_499")))
+
     return {
         "source_run_dir": str(resolved_run_dir),
-        "source_gateway_output_dir": str(gateway_output_dir.resolve()),
+        "source_gateway_output_dir": str(gateway_output_dir),
         "trail_count_total": len(trails),
         "trail_count_ranked": len(ranked_trails),
         "trail_count_unranked": len(unranked_trails),
+        "trail_count_with_status_499": trail_count_with_status_499,
+        "unranked_mode": unranked_mode,
+        "unranked_criteria": _unranked_criteria_description(unranked_mode),
         "ratio_definition": "top/rest",
         "share_definition": "top/total",
         "percentiles": list(range(DEFAULT_P_MIN, DEFAULT_P_MAX + 1)),
@@ -471,32 +557,115 @@ def extract_split_from_run_dir(run_dir: Path) -> dict[str, Any]:
     }
 
 
+def extract_split_from_run_dir(run_dir: Path) -> dict[str, Any]:
+    resolved_run_dir, gateway_output_dir, trails = _load_trails_from_run_dir(run_dir)
+    return _build_split_payload_from_trails(
+        resolved_run_dir=resolved_run_dir,
+        gateway_output_dir=gateway_output_dir,
+        trails=trails,
+        unranked_mode=UNRANKED_MODE_NORMAL,
+    )
+
+
+def extract_split_strict_from_run_dir(run_dir: Path) -> dict[str, Any]:
+    resolved_run_dir, gateway_output_dir, trails = _load_trails_from_run_dir(run_dir)
+    return _build_split_payload_from_trails(
+        resolved_run_dir=resolved_run_dir,
+        gateway_output_dir=gateway_output_dir,
+        trails=trails,
+        unranked_mode=UNRANKED_MODE_STRICT_499,
+    )
+
+
 def _default_output_path_for_run(run_dir: Path) -> Path:
     return (run_dir / "original-analysis" / "split" / DEFAULT_OUTPUT_NAME).resolve()
 
 
+def _strict_output_path_for_run(run_dir: Path) -> Path:
+    return (run_dir / "original-analysis" / "split" / STRICT_OUTPUT_NAME).resolve()
+
+
+def _two_group_output_paths(output_dir: Path, *, strict_499: bool) -> tuple[Path, Path]:
+    if strict_499:
+        token_name = STRICT_TOKEN_TWO_GROUP_OUTPUT_NAME
+        context_name = STRICT_CONTEXT_TWO_GROUP_OUTPUT_NAME
+    else:
+        token_name = TOKEN_TWO_GROUP_OUTPUT_NAME
+        context_name = CONTEXT_TWO_GROUP_OUTPUT_NAME
+    return (output_dir / token_name).resolve(), (output_dir / context_name).resolve()
+
+
 def extract_run_dir(run_dir: Path, *, output_path: Path | None = None) -> Path:
     resolved_output_path = (output_path or _default_output_path_for_run(run_dir)).expanduser().resolve()
-    result = extract_split_from_run_dir(run_dir)
-    token_output_path = (resolved_output_path.parent / TOKEN_TWO_GROUP_OUTPUT_NAME).resolve()
-    context_output_path = (resolved_output_path.parent / CONTEXT_TWO_GROUP_OUTPUT_NAME).resolve()
+    output_dir = resolved_output_path.parent
+    if output_path is None:
+        strict_output_path = _strict_output_path_for_run(run_dir)
+    else:
+        strict_output_path = (output_dir / STRICT_OUTPUT_NAME).resolve()
+    token_output_path, context_output_path = _two_group_output_paths(
+        output_dir,
+        strict_499=False,
+    )
+    strict_token_output_path, strict_context_output_path = _two_group_output_paths(
+        output_dir,
+        strict_499=True,
+    )
+
+    resolved_run_dir, gateway_output_dir, trails = _load_trails_from_run_dir(run_dir)
+    result = _build_split_payload_from_trails(
+        resolved_run_dir=resolved_run_dir,
+        gateway_output_dir=gateway_output_dir,
+        trails=trails,
+        unranked_mode=UNRANKED_MODE_NORMAL,
+    )
+    strict_result = _build_split_payload_from_trails(
+        resolved_run_dir=resolved_run_dir,
+        gateway_output_dir=gateway_output_dir,
+        trails=trails,
+        unranked_mode=UNRANKED_MODE_STRICT_499,
+    )
+
     result["additional_outputs"] = {
         "token_usage_two_groups": str(token_output_path),
         "context_usage_two_groups": str(context_output_path),
+        "strict_499_summary": str(strict_output_path),
+        "strict_499_token_usage_two_groups": str(strict_token_output_path),
+        "strict_499_context_usage_two_groups": str(strict_context_output_path),
     }
-    resolved_output_path.parent.mkdir(parents=True, exist_ok=True)
+    strict_result["additional_outputs"] = {
+        "token_usage_two_groups": str(strict_token_output_path),
+        "context_usage_two_groups": str(strict_context_output_path),
+        "normal_summary": str(resolved_output_path),
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
     resolved_output_path.write_text(
         json.dumps(result, ensure_ascii=True, indent=2) + "\n",
         encoding="utf-8",
     )
+    strict_output_path.write_text(
+        json.dumps(strict_result, ensure_ascii=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
     token_payload = result.get("two_group_summaries", {}).get("token_usage")
     context_payload = result.get("two_group_summaries", {}).get("context_usage")
+    strict_token_payload = strict_result.get("two_group_summaries", {}).get("token_usage")
+    strict_context_payload = strict_result.get("two_group_summaries", {}).get(
+        "context_usage"
+    )
     token_output_path.write_text(
         json.dumps(token_payload, ensure_ascii=True, indent=2) + "\n",
         encoding="utf-8",
     )
     context_output_path.write_text(
         json.dumps(context_payload, ensure_ascii=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    strict_token_output_path.write_text(
+        json.dumps(strict_token_payload, ensure_ascii=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    strict_context_output_path.write_text(
+        json.dumps(strict_context_payload, ensure_ascii=True, indent=2) + "\n",
         encoding="utf-8",
     )
     return resolved_output_path
@@ -542,8 +711,9 @@ def _build_two_group_table_row(
     run_dir: Path,
     *,
     metric_key: str,
+    summary_output_name: str = DEFAULT_OUTPUT_NAME,
 ) -> dict[str, str] | None:
-    summary_path = _default_output_path_for_run(run_dir)
+    summary_path = (run_dir / "original-analysis" / "split" / summary_output_name).resolve()
     if not summary_path.is_file():
         print(f"[warn] Missing summary file for table row: {summary_path}", file=sys.stderr)
         return None
@@ -591,10 +761,15 @@ def _write_root_two_group_table(
     run_dirs: list[Path],
     metric_key: str,
     output_name: str,
+    summary_output_name: str = DEFAULT_OUTPUT_NAME,
 ) -> Path:
     rows: list[dict[str, str]] = []
     for run_dir in run_dirs:
-        row = _build_two_group_table_row(run_dir, metric_key=metric_key)
+        row = _build_two_group_table_row(
+            run_dir,
+            metric_key=metric_key,
+            summary_output_name=summary_output_name,
+        )
         if row is not None:
             rows.append(row)
 
@@ -629,6 +804,20 @@ def _write_root_two_group_tables(root_dir: Path, run_dirs: list[Path]) -> tuple[
         run_dirs=run_dirs,
         metric_key="context_usage",
         output_name=ROOT_CONTEXT_TABLE_NAME,
+    )
+    _write_root_two_group_table(
+        root_dir=root_dir,
+        run_dirs=run_dirs,
+        metric_key="token_usage",
+        output_name=ROOT_STRICT_TOKEN_TABLE_NAME,
+        summary_output_name=STRICT_OUTPUT_NAME,
+    )
+    _write_root_two_group_table(
+        root_dir=root_dir,
+        run_dirs=run_dirs,
+        metric_key="context_usage",
+        output_name=ROOT_STRICT_CONTEXT_TABLE_NAME,
+        summary_output_name=STRICT_OUTPUT_NAME,
     )
     return token_table_path, context_table_path
 
@@ -682,8 +871,12 @@ def _main_root_dir(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     token_table_path, context_table_path = _write_root_two_group_tables(root_dir, run_dirs)
+    strict_token_table_path = (root_dir / ROOT_STRICT_TOKEN_TABLE_NAME).resolve()
+    strict_context_table_path = (root_dir / ROOT_STRICT_CONTEXT_TABLE_NAME).resolve()
     print(f"Wrote token split table: {token_table_path}")
     print(f"Wrote context split table: {context_table_path}")
+    print(f"Wrote strict token split table: {strict_token_table_path}")
+    print(f"Wrote strict context split table: {strict_context_table_path}")
     if failure_count:
         return 1
     print(f"Completed extraction for {len(run_dirs)} run directories.")

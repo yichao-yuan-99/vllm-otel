@@ -55,6 +55,9 @@ _OPTIONS_WITH_VALUE = {
     "--gateway-url",
     "--gateway-job-output-root",
     "--gateway-timeout-s",
+    # Removed option; keep here so main parser routes it to Typer and returns
+    # an explicit unknown-option error instead of forwarding to Harbor.
+    "--gateway-api-key",
     "--task-subset-start",
     "--task-subset-end",
 }
@@ -837,6 +840,11 @@ def run(
             option_name="--gateway-timeout-s",
             config_key="gateway_timeout_s",
         )
+        if "gateway_api_key" in config_values:
+            raise ValueError(
+                "Config key 'gateway_api_key' has been removed. "
+                "Configure upstream API key in gateway-lite instead."
+            )
 
         configured_vllm_log_value = _coerce_bool(
             vllm_log if vllm_log is not None else config_values.get("vllm_log"),

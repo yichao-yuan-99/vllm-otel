@@ -28,6 +28,7 @@ def _write_gateway_job(
     profile_id: int | None,
     gateway_run_id: str,
     requests: list[tuple[int, int, int]],
+    status_codes: list[int] | None = None,
 ) -> None:
     if profile_id is None:
         gateway_run_dir = run_dir / "gateway-output" / gateway_run_id
@@ -40,9 +41,11 @@ def _write_gateway_job(
         )
 
     records: list[dict[str, object]] = []
-    for prompt_tokens, completion_tokens, cached_tokens in requests:
+    for index, (prompt_tokens, completion_tokens, cached_tokens) in enumerate(requests):
+        status_code = 200 if status_codes is None else status_codes[index]
         records.append(
             {
+                "status_code": status_code,
                 "response": {
                     "usage": {
                         "prompt_tokens": prompt_tokens,
@@ -101,14 +104,51 @@ def test_extract_run_generates_expected_top_p_series(tmp_path: Path) -> None:
         / "split"
         / "top-p-context-usage-two-groups.json"
     )
+    strict_output_path = (
+        run_dir
+        / "original-analysis"
+        / "split"
+        / "top-p-usage-ratio-summary.strict-499.json"
+    )
+    strict_token_groups_path = (
+        run_dir
+        / "original-analysis"
+        / "split"
+        / "top-p-token-usage-two-groups.strict-499.json"
+    )
+    strict_context_groups_path = (
+        run_dir
+        / "original-analysis"
+        / "split"
+        / "top-p-context-usage-two-groups.strict-499.json"
+    )
     token_groups = json.loads(token_groups_path.read_text(encoding="utf-8"))
     context_groups = json.loads(context_groups_path.read_text(encoding="utf-8"))
+    strict_payload = json.loads(strict_output_path.read_text(encoding="utf-8"))
+    strict_token_groups = json.loads(strict_token_groups_path.read_text(encoding="utf-8"))
+    strict_context_groups = json.loads(strict_context_groups_path.read_text(encoding="utf-8"))
 
     assert payload["trail_count_total"] == 3
     assert payload["trail_count_ranked"] == 3
     assert payload["trail_count_unranked"] == 0
+    assert payload["trail_count_with_status_499"] == 0
+    assert payload["unranked_mode"] == "normal"
     assert payload["additional_outputs"]["token_usage_two_groups"] == str(token_groups_path.resolve())
     assert payload["additional_outputs"]["context_usage_two_groups"] == str(context_groups_path.resolve())
+    assert payload["additional_outputs"]["strict_499_summary"] == str(strict_output_path.resolve())
+    assert payload["additional_outputs"]["strict_499_token_usage_two_groups"] == str(
+        strict_token_groups_path.resolve()
+    )
+    assert payload["additional_outputs"]["strict_499_context_usage_two_groups"] == str(
+        strict_context_groups_path.resolve()
+    )
+    assert strict_payload["trail_count_total"] == 3
+    assert strict_payload["trail_count_ranked"] == 3
+    assert strict_payload["trail_count_unranked"] == 0
+    assert strict_payload["trail_count_with_status_499"] == 0
+    assert strict_payload["unranked_mode"] == "strict_499"
+    assert strict_payload["two_group_summaries"]["token_usage"] == strict_token_groups
+    assert strict_payload["two_group_summaries"]["context_usage"] == strict_context_groups
 
     ranked_ids = [trail["gateway_run_id"] for trail in payload["ranked_trails"]]
     assert ranked_ids == ["run_high", "run_mid", "run_low"]
@@ -211,6 +251,7 @@ def test_extract_run_keeps_missing_context_trails_unranked(tmp_path: Path) -> No
     assert payload["trail_count_total"] == 2
     assert payload["trail_count_ranked"] == 1
     assert payload["trail_count_unranked"] == 1
+    assert payload["unranked_mode"] == "normal"
     assert payload["ranked_trails"][0]["gateway_run_id"] == "run_ranked"
     assert payload["unranked_trails"][0]["gateway_run_id"] == "run_unranked"
     token_groups = payload["two_group_summaries"]["token_usage"]
@@ -219,6 +260,73 @@ def test_extract_run_keeps_missing_context_trails_unranked(tmp_path: Path) -> No
     assert token_groups["group_rest"]["trail_names"] == []
     assert context_groups["group_top"]["trail_names"] == ["run_ranked"]
     assert context_groups["group_rest"]["trail_names"] == []
+
+
+def test_extract_run_strict_mode_unranks_trails_with_any_499(tmp_path: Path) -> None:
+    run_dir = tmp_path / "job"
+    _write_gateway_job(
+        run_dir,
+        profile_id=None,
+        gateway_run_id="run_clean",
+        requests=[(14, 6, 0)],
+        status_codes=[200],
+    )
+    _write_gateway_job(
+        run_dir,
+        profile_id=None,
+        gateway_run_id="run_mixed",
+        requests=[(10, 3, 0), (8, 1, 0)],
+        status_codes=[200, 499],
+    )
+
+    extract_run_path = extract_run.extract_run_dir(run_dir)
+    assert extract_run_path.is_file()
+
+    normal_payload = json.loads(
+        (
+            run_dir
+            / "original-analysis"
+            / "split"
+            / "top-p-usage-ratio-summary.json"
+        ).read_text(encoding="utf-8")
+    )
+    strict_payload = json.loads(
+        (
+            run_dir
+            / "original-analysis"
+            / "split"
+            / "top-p-usage-ratio-summary.strict-499.json"
+        ).read_text(encoding="utf-8")
+    )
+    strict_token_groups = json.loads(
+        (
+            run_dir
+            / "original-analysis"
+            / "split"
+            / "top-p-token-usage-two-groups.strict-499.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert normal_payload["trail_count_ranked"] == 2
+    assert normal_payload["trail_count_unranked"] == 0
+    assert normal_payload["trail_count_with_status_499"] == 1
+    assert [trail["gateway_run_id"] for trail in normal_payload["ranked_trails"]] == [
+        "run_clean",
+        "run_mixed",
+    ]
+
+    assert strict_payload["unranked_mode"] == "strict_499"
+    assert strict_payload["trail_count_ranked"] == 1
+    assert strict_payload["trail_count_unranked"] == 1
+    assert strict_payload["trail_count_with_status_499"] == 1
+    assert [trail["gateway_run_id"] for trail in strict_payload["ranked_trails"]] == [
+        "run_clean"
+    ]
+    assert [trail["gateway_run_id"] for trail in strict_payload["unranked_trails"]] == [
+        "run_mixed"
+    ]
+    assert strict_token_groups["group_top"]["trail_names"] == ["run_clean"]
+    assert strict_token_groups["group_rest"]["trail_names"] == []
 
 
 def test_discover_run_dirs_with_gateway_output_scans_recursively(tmp_path: Path) -> None:
@@ -308,18 +416,32 @@ def test_extract_run_root_dir_writes_two_group_tables(tmp_path: Path) -> None:
 
     token_table_path = root_dir / "split-top-p-token-usage-two-group-table.csv"
     context_table_path = root_dir / "split-top-p-context-usage-two-group-table.csv"
+    strict_token_table_path = (
+        root_dir / "split-top-p-token-usage-two-group-table.strict-499.csv"
+    )
+    strict_context_table_path = (
+        root_dir / "split-top-p-context-usage-two-group-table.strict-499.csv"
+    )
     assert token_table_path.is_file()
     assert context_table_path.is_file()
+    assert strict_token_table_path.is_file()
+    assert strict_context_table_path.is_file()
 
     token_lines = token_table_path.read_text(encoding="utf-8").splitlines()
     context_lines = context_table_path.read_text(encoding="utf-8").splitlines()
+    strict_token_lines = strict_token_table_path.read_text(encoding="utf-8").splitlines()
+    strict_context_lines = strict_context_table_path.read_text(encoding="utf-8").splitlines()
     assert token_lines[0] == (
         "run_path,group_top_trail_count,group_top_trail_percentage,"
         "group_rest_trail_count,group_rest_trail_percentage"
     )
     assert context_lines[0] == token_lines[0]
+    assert strict_token_lines[0] == token_lines[0]
+    assert strict_context_lines[0] == token_lines[0]
     assert len(token_lines) == 3
     assert len(context_lines) == 3
+    assert len(strict_token_lines) == 3
+    assert len(strict_context_lines) == 3
     assert str(run_a.resolve()) in token_lines[1]
     assert str(run_b.resolve()) in token_lines[2]
 

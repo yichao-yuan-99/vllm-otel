@@ -31,6 +31,21 @@ python3 experiments/single-qps/local/generate_experiment.py \
   --additional-suffix qwen3_fp8
 ```
 
+or
+
+```bash
+python3 experiments/single-qps/local/generate_experiment.py \
+  --source-run-dir results/qwen3-coder-30b/dabstep/mini-swe-agent/dabstep-20260306T194929Z \
+  --poisson-seed 7 \
+  --randomize-seed 11 \
+  --qps 0.02 \
+  --time-constraint-s 12600 \
+  --target-model qwen3_coder_30b_fp8 \
+  --port-profile 12 \
+  --split top \
+  --additional-suffix qwen3_fp8
+```
+
 Supported split values:
 
 - `full`

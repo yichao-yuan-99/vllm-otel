@@ -262,6 +262,32 @@ def test_manifest_records_cluster_vllm_log_endpoints(tmp_path: Path) -> None:
     ]
 
 
+def test_gateway_agent_token_does_not_append_real_key(tmp_path: Path) -> None:
+    backend = _FakeBackend(size=1, task_root=tmp_path / "tasks")
+    driver = ConcurrentDriver(
+        backend=backend,
+        arrival_pattern=EagerArrivalPattern(),
+        rng=Random(7),
+        config=SchedulerConfig(
+            max_concurrent=1,
+            n_task=1,
+            results_dir=tmp_path / "out",
+            dry_run=True,
+            sample_with_replacement=False,
+            gateway=GatewayModeConfig(
+                base_url="http://127.0.0.1:18171",
+                job_output_root="gateway-output",
+                timeout_s=3600.0,
+            ),
+        ),
+    )
+
+    token = driver._make_agent_api_token(launch_index=0, trial_id="trial-abc")
+    assert token.startswith("condrv_run-")
+    assert token.endswith("_0000_trial-abc")
+    assert "@@" not in token
+
+
 def test_cluster_mode_starts_one_vllm_monitor_per_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

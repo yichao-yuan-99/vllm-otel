@@ -1,0 +1,14 @@
+schema_version = 1
+
+[run]
+# Optional. If omitted, gateway-lite uses configs/port_profiles.toml default_profile.
+port_profile_id = 0
+output_root = "./tests/output/gateway-lite-artifacts"
+
+[gateway]
+artifact_compression = "none"
+
+# Optional fixed API key for upstream forwarding.
+# When set, gateway-lite rewrites incoming Authorization/x-api-key values to
+# this key before sending upstream.
+# upstream_api_key = "sk-your-real-openai-key"

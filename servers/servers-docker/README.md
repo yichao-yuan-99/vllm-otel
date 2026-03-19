@@ -92,8 +92,12 @@ Stop environment:
 
 ```bash
 python3 servers/servers-docker/client.py stop -b
+python3 servers/servers-docker/client.py stop -b -m qwen3_coder_30b -p 0 -l h100_nvl_gpu23
 python3 servers/servers-docker/client.py daemon-stop
 ```
+
+Use `stop -b -m/-p/-l` to stop one specific environment selection. All three
+selection flags must be provided together for targeted stop.
 
 Run smoke tests from the separate test package:
 

@@ -7,8 +7,9 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import copy
 import http.client
 import hashlib
+import io
 import json
-from contextlib import AbstractContextManager, suppress
+from contextlib import AbstractContextManager, redirect_stdout, suppress
 from dataclasses import dataclass
 from random import Random
 import os
@@ -92,10 +93,13 @@ REPLAY_PLAN_COMPILE_VERSION = "1"
 REPLAY_PLAN_COMPILE_VERSION_V1 = "1"
 SPLIT_TWO_GROUP_METRICS = {"token_usage", "context_usage"}
 DEFAULT_SPLIT_TWO_GROUP_METRIC = "token_usage"
+DEFAULT_SPLIT_TWO_GROUP_METRICS = ("token_usage", "context_usage")
 SPLIT_TWO_GROUP_PLAN_METRIC_ALIASES = {
     "token_usage": "token",
     "context_usage": "context",
 }
+COMPILE_CLEAN_PLAN_SUFFIX = "clean"
+CLEANABLE_REQUEST_STATUS_CODE = 499
 
 DEFAULT_VLLM_LOG_INTERVAL_S = 1.0
 DEFAULT_VLLM_LOG_TIMEOUT_S = 3600.0
@@ -143,6 +147,22 @@ class _NullProgress(AbstractContextManager["_NullProgress"]):
 
     def update(self, task_id: int, *, advance: int = 0, **fields: Any) -> None:
         return None
+
+
+class _TeeTextIO(io.TextIOBase):
+    def __init__(self, *streams: Any) -> None:
+        super().__init__()
+        self._streams = streams
+
+    def write(self, text: str) -> int:
+        for stream in self._streams:
+            stream.write(text)
+        return len(text)
+
+    def flush(self) -> None:
+        for stream in self._streams:
+            with suppress(Exception):
+                stream.flush()
 
 
 def create_replay_progress() -> Any:
@@ -542,6 +562,13 @@ def extract_plan_compile_model_override(plan_payload: dict[str, Any]) -> str | N
         return None
     stripped = model_override.strip()
     return stripped or None
+
+
+def extract_plan_compile_clean(plan_payload: dict[str, Any]) -> bool:
+    compile_options = plan_payload.get("compile_options")
+    if not isinstance(compile_options, dict):
+        return False
+    return bool(compile_options.get("clean"))
 
 
 def extract_plan_replay_model(plan_payload: dict[str, Any]) -> str | None:
@@ -1000,6 +1027,7 @@ def _build_job_root_child_compile_command(
     split_two_group_plans: bool,
     split_two_group_metric: str,
     exclude_unranked_trails: bool,
+    clean: bool,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -1020,6 +1048,8 @@ def _build_job_root_child_compile_command(
         command.extend(["--split-two-group-metric", split_two_group_metric])
     if exclude_unranked_trails:
         command.append("--exclude-unranked-trails")
+    if clean:
+        command.append("--clean")
     return command
 
 
@@ -1032,6 +1062,7 @@ def _run_job_root_child_compile(
     split_two_group_plans: bool,
     split_two_group_metric: str,
     exclude_unranked_trails: bool,
+    clean: bool,
 ) -> dict[str, Any]:
     command = _build_job_root_child_compile_command(
         job_dir=job_dir,
@@ -1041,6 +1072,7 @@ def _run_job_root_child_compile(
         split_two_group_plans=split_two_group_plans,
         split_two_group_metric=split_two_group_metric,
         exclude_unranked_trails=exclude_unranked_trails,
+        clean=clean,
     )
     env = os.environ.copy()
     env["REPLAYER_NO_PROGRESS"] = "1"
@@ -1251,7 +1283,7 @@ def split_two_group_plan_paths(
     *,
     plan_path: Path,
     metric: str,
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path, Path]:
     metric_alias = SPLIT_TWO_GROUP_PLAN_METRIC_ALIASES.get(metric)
     if metric_alias is None:
         raise ValueError(
@@ -1260,7 +1292,27 @@ def split_two_group_plan_paths(
         )
     top_path = with_plan_name_suffix(plan_path, f"{metric_alias}.top")
     rest_path = with_plan_name_suffix(plan_path, f"{metric_alias}.rest")
-    return top_path, rest_path
+    exclude_unranked_path = with_plan_name_suffix(
+        plan_path,
+        f"{metric_alias}.exclude-unranked",
+    )
+    return top_path, rest_path, exclude_unranked_path
+
+
+def split_two_group_clean_report_paths(
+    *,
+    plan_path: Path,
+    metric: str,
+) -> tuple[Path, Path]:
+    metric_alias = SPLIT_TWO_GROUP_PLAN_METRIC_ALIASES.get(metric)
+    if metric_alias is None:
+        raise ValueError(
+            f"Unsupported split two-group metric {metric!r}; "
+            f"supported metrics: {sorted(SPLIT_TWO_GROUP_METRICS)}"
+        )
+    stats_path = with_plan_name_suffix(plan_path, f"{metric_alias}.removal-stats")
+    details_path = with_plan_name_suffix(plan_path, f"{metric_alias}.removal-details")
+    return stats_path, details_path
 
 
 def clone_workers_with_reindexed_launch_priority(
@@ -1369,7 +1421,23 @@ def is_client_disconnected_record(record: dict[str, Any]) -> bool:
     error_name = response_payload.get("error")
     if error_name != "client_disconnected":
         return False
-    return status_code in {None, 499}
+    return status_code in {None, CLEANABLE_REQUEST_STATUS_CODE}
+
+
+def extract_record_status_code(record: dict[str, Any]) -> int | None:
+    status_code = record.get("status_code")
+    if isinstance(status_code, bool):
+        return None
+    if isinstance(status_code, int):
+        return status_code
+    if isinstance(status_code, str) and status_code.strip():
+        with suppress(ValueError):
+            return int(status_code.strip())
+    return None
+
+
+def is_cleanable_499_record(record: dict[str, Any]) -> bool:
+    return extract_record_status_code(record) == CLEANABLE_REQUEST_STATUS_CODE
 
 
 def request_duration_seconds(record: dict[str, Any]) -> float:
@@ -1649,6 +1717,78 @@ def compute_agent_action_deltas(
     return deltas
 
 
+def _parse_trailing_json_object(text: str) -> dict[str, Any] | None:
+    lines = text.splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        line = lines[index].lstrip()
+        if not line.startswith("{"):
+            continue
+        candidate = "\n".join(lines[index:]).strip()
+        if not candidate:
+            continue
+        with suppress(Exception):
+            payload = json.loads(candidate)
+            if isinstance(payload, dict):
+                return payload
+    return None
+
+
+def _run_compile_for_default_split_two_group_metrics(args: argparse.Namespace) -> int:
+    metric_results: dict[str, dict[str, Any]] = {}
+    failed_metrics: list[str] = []
+    total_metrics = len(DEFAULT_SPLIT_TWO_GROUP_METRICS)
+
+    for metric_index, metric in enumerate(DEFAULT_SPLIT_TWO_GROUP_METRICS, start=1):
+        print(
+            f"[compile] split-two-group metric {metric_index}/{total_metrics}: {metric}",
+            file=sys.stderr,
+        )
+        metric_args = argparse.Namespace(**vars(args))
+        setattr(metric_args, "split_two_group_metric", metric)
+
+        captured_stdout = io.StringIO()
+        tee_stdout = _TeeTextIO(sys.stdout, captured_stdout)
+        try:
+            with redirect_stdout(tee_stdout):
+                exit_code = cmd_compile(metric_args)
+        except Exception as exc:  # noqa: BLE001
+            metric_results[metric] = {
+                "status": "failed",
+                "exit_code": 2,
+                "error": str(exc),
+            }
+            failed_metrics.append(metric)
+            continue
+
+        summary_payload: dict[str, Any] | None = None
+        summary_stdout = captured_stdout.getvalue().strip()
+        if summary_stdout:
+            summary_payload = _parse_trailing_json_object(summary_stdout)
+        metric_result: dict[str, Any] = {
+            "status": "ok" if exit_code == 0 else "failed",
+            "exit_code": exit_code,
+        }
+        if summary_payload is not None:
+            metric_result["summary"] = summary_payload
+        elif summary_stdout:
+            metric_result["stdout"] = summary_stdout
+        metric_results[metric] = metric_result
+        if exit_code != 0:
+            failed_metrics.append(metric)
+
+    status = "ok" if not failed_metrics else "failed"
+    output_payload = {
+        "status": status,
+        "split_two_group_plans": True,
+        "split_two_group_metrics": list(DEFAULT_SPLIT_TWO_GROUP_METRICS),
+        "metric_results": metric_results,
+    }
+    if failed_metrics:
+        output_payload["failed_metrics"] = failed_metrics
+    print(json.dumps(output_payload, indent=2, ensure_ascii=True))
+    return 0 if status == "ok" else 2
+
+
 def cmd_compile(args: argparse.Namespace) -> int:
     config_file_path = parse_optional_path(
         getattr(args, "config", None),
@@ -1746,6 +1886,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
         ),
         field_name="split_two_group_metric",
     )
+    split_two_group_metric_explicit = split_two_group_metric_value is not None
     split_two_group_metric = (
         split_two_group_metric_value.strip().lower()
         if split_two_group_metric_value is not None
@@ -1783,11 +1924,24 @@ def cmd_compile(args: argparse.Namespace) -> int:
         if exclude_unranked_trails_value is not None
         else False
     )
+    compile_clean_value = parse_optional_bool(
+        (
+            args.clean
+            if getattr(args, "clean", None) is not None
+            else compile_config.get("clean")
+        ),
+        field_name="clean",
+    )
+    compile_clean = bool(compile_clean_value) if compile_clean_value is not None else False
     if exclude_unranked_trails and split_two_group_plans:
         raise ValueError(
             "--exclude-unranked-trails cannot be combined with "
             "--split-two-group-plans"
         )
+    if compile_clean and not split_two_group_plans:
+        raise ValueError("--clean can only be combined with --split-two-group-plans")
+    if split_two_group_plans and not split_two_group_metric_explicit:
+        return _run_compile_for_default_split_two_group_metrics(args)
     plan_out_override = parse_optional_path(
         (
             args.plan_out
@@ -1836,6 +1990,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
                         split_two_group_plans=split_two_group_plans,
                         split_two_group_metric=split_two_group_metric,
                         exclude_unranked_trails=exclude_unranked_trails,
+                        clean=compile_clean,
                     )
                     future_to_job_dir[future] = discovered_job_dir
 
@@ -1887,6 +2042,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
             "model_override_resolved": compile_model_override_resolved,
             "split_two_group_plans": split_two_group_plans,
             "exclude_unranked_trails": exclude_unranked_trails,
+            "clean": compile_clean,
             "jobs": job_summaries,
         }
         if split_two_group_plans:
@@ -1916,10 +2072,27 @@ def cmd_compile(args: argparse.Namespace) -> int:
         else:
             plan_path = default_plan_path
 
-    split_two_group_top_path, split_two_group_rest_path = split_two_group_plan_paths(
+    if compile_clean:
+        plan_path = with_plan_name_suffix(plan_path, COMPILE_CLEAN_PLAN_SUFFIX)
+
+    (
+        split_two_group_top_path,
+        split_two_group_rest_path,
+        split_two_group_exclude_unranked_path,
+    ) = split_two_group_plan_paths(
         plan_path=plan_path,
         metric=split_two_group_metric,
     )
+    split_two_group_clean_stats_path: Path | None = None
+    split_two_group_clean_details_path: Path | None = None
+    if split_two_group_plans and compile_clean:
+        (
+            split_two_group_clean_stats_path,
+            split_two_group_clean_details_path,
+        ) = split_two_group_clean_report_paths(
+            plan_path=plan_path,
+            metric=split_two_group_metric,
+        )
 
     # Apply additional suffix if specified
     plan_path = apply_additional_suffix(plan_path, additional_suffix)
@@ -1929,6 +2102,17 @@ def cmd_compile(args: argparse.Namespace) -> int:
     split_two_group_rest_path = apply_additional_suffix(
         split_two_group_rest_path, additional_suffix
     )
+    split_two_group_exclude_unranked_path = apply_additional_suffix(
+        split_two_group_exclude_unranked_path, additional_suffix
+    )
+    if split_two_group_clean_stats_path is not None:
+        split_two_group_clean_stats_path = apply_additional_suffix(
+            split_two_group_clean_stats_path, additional_suffix
+        )
+    if split_two_group_clean_details_path is not None:
+        split_two_group_clean_details_path = apply_additional_suffix(
+            split_two_group_clean_details_path, additional_suffix
+        )
 
     existing_plan_payload: dict[str, Any] | None = None
     if not split_two_group_plans:
@@ -1941,6 +2125,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
                     existing_plan_payload = loaded_payload
         existing_exclude_unranked = False
         existing_model_override: str | None = None
+        existing_clean = False
         if existing_plan_payload is not None:
             existing_compile_options = existing_plan_payload.get("compile_options")
             if isinstance(existing_compile_options, dict):
@@ -1950,10 +2135,12 @@ def cmd_compile(args: argparse.Namespace) -> int:
             existing_model_override = extract_plan_compile_model_override(
                 existing_plan_payload
             )
+            existing_clean = extract_plan_compile_clean(existing_plan_payload)
         if (
             existing_plan_payload is not None
             and is_replay_plan_compile_version_current(existing_plan_payload)
             and existing_exclude_unranked == exclude_unranked_trails
+            and existing_clean == compile_clean
             and existing_model_override == compile_model_override_resolved
             and (
                 compile_model_override_resolved is None
@@ -1979,6 +2166,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
                 "compile_version": REPLAY_PLAN_COMPILE_VERSION,
                 "reused_existing_plan": True,
                 "exclude_unranked_trails": exclude_unranked_trails,
+                "clean": compile_clean,
             }
             if compile_model_override is not None:
                 summary["model_override"] = compile_model_override
@@ -1991,6 +2179,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
     else:
         existing_top_plan: dict[str, Any] | None = None
         existing_rest_plan: dict[str, Any] | None = None
+        existing_exclude_unranked_plan: dict[str, Any] | None = None
         if split_two_group_top_path.exists():
             if not split_two_group_top_path.is_file():
                 raise ValueError(
@@ -2011,15 +2200,53 @@ def cmd_compile(args: argparse.Namespace) -> int:
                 loaded_rest_payload = read_json(split_two_group_rest_path)
                 if isinstance(loaded_rest_payload, dict):
                     existing_rest_plan = loaded_rest_payload
+        if split_two_group_exclude_unranked_path.exists():
+            if not split_two_group_exclude_unranked_path.is_file():
+                raise ValueError(
+                    "Invalid replay plan path (not a file): "
+                    f"{split_two_group_exclude_unranked_path}"
+                )
+            with suppress(Exception):
+                loaded_exclude_unranked_payload = read_json(
+                    split_two_group_exclude_unranked_path
+                )
+                if isinstance(loaded_exclude_unranked_payload, dict):
+                    existing_exclude_unranked_plan = loaded_exclude_unranked_payload
+        existing_clean_stats_payload: dict[str, Any] | None = None
+        clean_report_files_ready = True
+        if compile_clean:
+            clean_report_files_ready = bool(
+                split_two_group_clean_stats_path is not None
+                and split_two_group_clean_details_path is not None
+                and split_two_group_clean_stats_path.is_file()
+                and split_two_group_clean_details_path.is_file()
+            )
+            if (
+                split_two_group_clean_stats_path is not None
+                and split_two_group_clean_stats_path.is_file()
+            ):
+                with suppress(Exception):
+                    loaded_clean_stats_payload = read_json(split_two_group_clean_stats_path)
+                    if isinstance(loaded_clean_stats_payload, dict):
+                        existing_clean_stats_payload = loaded_clean_stats_payload
 
         if (
             existing_top_plan is not None
             and existing_rest_plan is not None
+            and existing_exclude_unranked_plan is not None
+            and clean_report_files_ready
             and is_replay_plan_compile_version_current(existing_top_plan)
             and is_replay_plan_compile_version_current(existing_rest_plan)
+            and is_replay_plan_compile_version_current(existing_exclude_unranked_plan)
+            and extract_plan_compile_clean(existing_top_plan) == compile_clean
+            and extract_plan_compile_clean(existing_rest_plan) == compile_clean
+            and extract_plan_compile_clean(existing_exclude_unranked_plan)
+            == compile_clean
             and extract_plan_compile_model_override(existing_top_plan)
             == compile_model_override_resolved
             and extract_plan_compile_model_override(existing_rest_plan)
+            == compile_model_override_resolved
+            and extract_plan_compile_model_override(existing_exclude_unranked_plan)
             == compile_model_override_resolved
             and (
                 compile_model_override_resolved is None
@@ -2027,6 +2254,8 @@ def cmd_compile(args: argparse.Namespace) -> int:
                     extract_plan_replay_model(existing_top_plan)
                     == compile_model_override_resolved
                     and extract_plan_replay_model(existing_rest_plan)
+                    == compile_model_override_resolved
+                    and extract_plan_replay_model(existing_exclude_unranked_plan)
                     == compile_model_override_resolved
                 )
             )
@@ -2039,6 +2268,11 @@ def cmd_compile(args: argparse.Namespace) -> int:
                 plan_payload=existing_rest_plan,
                 metric=split_two_group_metric,
                 group="rest",
+            )
+            and split_plan_matches_requested_metric(
+                plan_payload=existing_exclude_unranked_plan,
+                metric=split_two_group_metric,
+                group="exclude-unranked",
             )
         ):
             top_launch_policy = existing_top_plan.get("launch_policy")
@@ -2053,24 +2287,48 @@ def cmd_compile(args: argparse.Namespace) -> int:
             rest_worker_count, rest_request_count = count_plan_workers_and_requests(
                 existing_rest_plan
             )
+            (
+                exclude_unranked_worker_count,
+                exclude_unranked_request_count,
+            ) = count_plan_workers_and_requests(existing_exclude_unranked_plan)
             summary = {
                 "status": "ok",
                 "backend": existing_top_plan.get("backend"),
                 "plan_paths": {
                     "top": str(split_two_group_top_path),
                     "rest": str(split_two_group_rest_path),
+                    "exclude_unranked": str(split_two_group_exclude_unranked_path),
                 },
                 "launch_strategy": top_launch_strategy,
                 "worker_count_top": top_worker_count,
                 "request_count_top": top_request_count,
                 "worker_count_rest": rest_worker_count,
                 "request_count_rest": rest_request_count,
+                "worker_count_exclude_unranked": exclude_unranked_worker_count,
+                "request_count_exclude_unranked": exclude_unranked_request_count,
                 "port_profile_id": compile_port_profile_id,
                 "compile_version": REPLAY_PLAN_COMPILE_VERSION,
                 "reused_existing_plan": True,
                 "split_two_group_plans": True,
                 "split_two_group_metric": split_two_group_metric,
+                "clean": compile_clean,
             }
+            if compile_clean:
+                summary["clean_removal_stats_path"] = (
+                    str(split_two_group_clean_stats_path)
+                    if split_two_group_clean_stats_path is not None
+                    else None
+                )
+                summary["clean_removal_details_path"] = (
+                    str(split_two_group_clean_details_path)
+                    if split_two_group_clean_details_path is not None
+                    else None
+                )
+                if isinstance(existing_clean_stats_payload, dict):
+                    summary["clean_removed_499_request_count"] = _to_int_or_default(
+                        existing_clean_stats_payload.get("removed_request_count"),
+                        default=0,
+                    )
             if compile_model_override is not None:
                 summary["model_override"] = compile_model_override
                 summary["model_override_key"] = compile_model_override_key
@@ -2236,6 +2494,10 @@ def cmd_compile(args: argparse.Namespace) -> int:
             )
 
     worker_plans: list[dict[str, Any]] = []
+    cleaned_499_request_count = 0
+    cleaned_499_count_by_trail: dict[str, int] = {}
+    cleaned_499_count_by_worker: dict[str, int] = {}
+    cleaned_499_request_details: list[dict[str, Any]] = []
     compile_progress_state = {
         "workers_completed": 0,
         "workers_total": len(run_infos),
@@ -2346,8 +2608,60 @@ def cmd_compile(args: argparse.Namespace) -> int:
                 final_agent_tail_s=final_agent_tail_s,
             )
 
+            request_keep_mask = [True] * len(request_records)
+            if compile_clean and request_records:
+                request_keep_mask = [
+                    not is_cleanable_499_record(record) for record in request_records
+                ]
+                removed_count = len(request_records) - sum(request_keep_mask)
+                if removed_count > 0:
+                    cleaned_499_request_count += removed_count
+                    _update_compile_progress(request_total_delta=-removed_count)
+                    cleaned_499_count_by_trail[source_trail_name] = (
+                        cleaned_499_count_by_trail.get(source_trail_name, 0) + removed_count
+                    )
+                    cleaned_499_count_by_worker[trial_id] = (
+                        cleaned_499_count_by_worker.get(trial_id, 0) + removed_count
+                    )
+                    for index, should_keep in enumerate(request_keep_mask):
+                        if should_keep:
+                            continue
+                        removed_record = request_records[index]
+                        response_payload = removed_record.get("response")
+                        response_error = (
+                            response_payload.get("error")
+                            if isinstance(response_payload, dict)
+                            else None
+                        )
+                        removed_duration_s: float | None = None
+                        with suppress(Exception):
+                            removed_duration_s = request_duration_seconds(removed_record)
+                        cleaned_499_request_details.append(
+                            {
+                                "source_trail_name": source_trail_name,
+                                "worker_id": trial_id,
+                                "source_gateway_run_id": run_dir.name,
+                                "source_gateway_profile_id": source_port_profile_id,
+                                "request_index": index,
+                                "request_id": removed_record.get("request_id"),
+                                "status_code": extract_record_status_code(removed_record),
+                                "response_error": response_error,
+                                "request_start_time": (
+                                    removed_record.get("request_start_time")
+                                    or removed_record.get("span_start_time")
+                                ),
+                                "request_end_time": (
+                                    removed_record.get("request_end_time")
+                                    or removed_record.get("span_end_time")
+                                ),
+                                "request_duration_s": removed_duration_s,
+                            }
+                        )
+
             planned_requests: list[dict[str, Any]] = []
             for index, record in enumerate(request_records):
+                if not request_keep_mask[index]:
+                    continue
                 planned_requests.append(
                     build_planned_request(
                         record=record,
@@ -2360,6 +2674,9 @@ def cmd_compile(args: argparse.Namespace) -> int:
                     )
                 )
                 _update_compile_progress(advance=1)
+
+            if compile_clean and not planned_requests:
+                delta_first_request_s = 0.0
 
             worker_plans.append(
                 {
@@ -2380,6 +2697,13 @@ def cmd_compile(args: argparse.Namespace) -> int:
             )
             compile_progress_state["workers_completed"] += 1
             _update_compile_progress()
+
+    if compile_clean and cleaned_499_request_count > 0:
+        print(
+            "[compile] clean mode: removed "
+            f"{cleaned_499_request_count} request(s) with status_code=499",
+            file=sys.stderr,
+        )
 
     worker_plans.sort(key=lambda item: (float(item["run_offset_s"]), str(item["worker_id"])))
     for launch_priority, worker in enumerate(worker_plans):
@@ -2408,8 +2732,13 @@ def cmd_compile(args: argparse.Namespace) -> int:
             "workers": workers_payload,
             "compile_options": {
                 "exclude_unranked_trails": exclude_unranked_trails,
+                "clean": compile_clean,
             },
         }
+        if compile_clean:
+            payload["compile_options"]["clean_removed_499_request_count"] = (
+                cleaned_499_request_count
+            )
         if compile_model_override_resolved is not None:
             payload["compile_options"]["model_override"] = compile_model_override_resolved
             payload["compile_options"]["model_override_key"] = compile_model_override_key
@@ -2455,8 +2784,11 @@ def cmd_compile(args: argparse.Namespace) -> int:
             "compile_version": REPLAY_PLAN_COMPILE_VERSION,
             "reused_existing_plan": False,
             "exclude_unranked_trails": exclude_unranked_trails,
+            "clean": compile_clean,
             "model": configured_model,
         }
+        if compile_clean:
+            summary["clean_removed_499_request_count"] = cleaned_499_request_count
         if compile_model_override is not None:
             summary["model_override"] = compile_model_override
             summary["model_override_key"] = compile_model_override_key
@@ -2525,13 +2857,24 @@ def cmd_compile(args: argparse.Namespace) -> int:
     rest_group_workers = [
         worker for worker in worker_plans if worker.get("source_trail_name") in rest_group_trail_names
     ]
+    exclude_unranked_group_workers = [
+        worker
+        for worker in worker_plans
+        if worker.get("source_trail_name") in top_group_trail_names
+        or worker.get("source_trail_name") in rest_group_trail_names
+    ]
     if not top_group_workers:
         raise ValueError("Split two-group top plan would be empty")
     if not rest_group_workers:
         raise ValueError("Split two-group rest plan would be empty")
+    if not exclude_unranked_group_workers:
+        raise ValueError("Split two-group exclude-unranked plan would be empty")
 
     top_group_workers = clone_workers_with_reindexed_launch_priority(top_group_workers)
     rest_group_workers = clone_workers_with_reindexed_launch_priority(rest_group_workers)
+    exclude_unranked_group_workers = clone_workers_with_reindexed_launch_priority(
+        exclude_unranked_group_workers
+    )
 
     top_plan_payload = _build_plan_payload_for_workers(
         top_group_workers,
@@ -2541,8 +2884,60 @@ def cmd_compile(args: argparse.Namespace) -> int:
         rest_group_workers,
         split_group="rest",
     )
+    exclude_unranked_plan_payload = _build_plan_payload_for_workers(
+        exclude_unranked_group_workers,
+        split_group="exclude-unranked",
+    )
     write_json(split_two_group_top_path, top_plan_payload)
     write_json(split_two_group_rest_path, rest_plan_payload)
+    write_json(split_two_group_exclude_unranked_path, exclude_unranked_plan_payload)
+
+    if compile_clean:
+        if (
+            split_two_group_clean_stats_path is None
+            or split_two_group_clean_details_path is None
+        ):
+            raise ValueError("Missing clean report output path while --clean is enabled")
+
+        removed_by_trail_rows = [
+            {
+                "source_trail_name": trail_name,
+                "removed_request_count": cleaned_499_count_by_trail[trail_name],
+            }
+            for trail_name in sorted(cleaned_499_count_by_trail)
+        ]
+        removed_by_worker_rows = [
+            {
+                "worker_id": worker_id,
+                "removed_request_count": cleaned_499_count_by_worker[worker_id],
+            }
+            for worker_id in sorted(cleaned_499_count_by_worker)
+        ]
+        clean_stats_payload = {
+            "status": "ok",
+            "schema": "clean-499-removal-stats.v1",
+            "compiled_at": compiled_at,
+            "source_job_dir": str(job_dir),
+            "split_two_group_metric": split_two_group_metric,
+            "clean_enabled": True,
+            "removed_request_count": cleaned_499_request_count,
+            "removed_trail_count": len(removed_by_trail_rows),
+            "removed_worker_count": len(removed_by_worker_rows),
+            "removed_count_by_trail": removed_by_trail_rows,
+            "removed_count_by_worker": removed_by_worker_rows,
+        }
+        clean_details_payload = {
+            "status": "ok",
+            "schema": "clean-499-removal-details.v1",
+            "compiled_at": compiled_at,
+            "source_job_dir": str(job_dir),
+            "split_two_group_metric": split_two_group_metric,
+            "clean_enabled": True,
+            "removed_request_count": cleaned_499_request_count,
+            "removed_requests": cleaned_499_request_details,
+        }
+        write_json(split_two_group_clean_stats_path, clean_stats_payload)
+        write_json(split_two_group_clean_details_path, clean_details_payload)
 
     summary = {
         "status": "ok",
@@ -2550,22 +2945,40 @@ def cmd_compile(args: argparse.Namespace) -> int:
         "plan_paths": {
             "top": str(split_two_group_top_path),
             "rest": str(split_two_group_rest_path),
+            "exclude_unranked": str(split_two_group_exclude_unranked_path),
         },
         "launch_strategy": launch_policy.get("strategy"),
         "worker_count_top": len(top_group_workers),
         "request_count_top": sum(len(worker["requests"]) for worker in top_group_workers),
         "worker_count_rest": len(rest_group_workers),
         "request_count_rest": sum(len(worker["requests"]) for worker in rest_group_workers),
+        "worker_count_exclude_unranked": len(exclude_unranked_group_workers),
+        "request_count_exclude_unranked": sum(
+            len(worker["requests"]) for worker in exclude_unranked_group_workers
+        ),
         "port_profile_id": compile_port_profile_id,
         "compile_version": REPLAY_PLAN_COMPILE_VERSION,
         "reused_existing_plan": False,
         "split_two_group_plans": True,
         "split_two_group_metric": split_two_group_metric,
+        "clean": compile_clean,
         "split_two_group_source_path": (
             str(split_two_group_source_path) if split_two_group_source_path is not None else None
         ),
         "model": configured_model,
     }
+    if compile_clean:
+        summary["clean_removed_499_request_count"] = cleaned_499_request_count
+        summary["clean_removal_stats_path"] = (
+            str(split_two_group_clean_stats_path)
+            if split_two_group_clean_stats_path is not None
+            else None
+        )
+        summary["clean_removal_details_path"] = (
+            str(split_two_group_clean_details_path)
+            if split_two_group_clean_details_path is not None
+            else None
+        )
     if compile_model_override is not None:
         summary["model_override"] = compile_model_override
         summary["model_override_key"] = compile_model_override_key
@@ -4072,8 +4485,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=None,
         help=(
-            "When set, compile writes two plans instead of one: "
-            "<plan>.<metric>.top.<ext> and <plan>.<metric>.rest.<ext>, based on "
+            "When set, compile writes split plans instead of one: "
+            "<plan>.<metric>.top.<ext>, <plan>.<metric>.rest.<ext>, and "
+            "<plan>.<metric>.exclude-unranked.<ext>, based on "
             "<job-dir>/original-analysis/split top/rest grouping."
         ),
     )
@@ -4083,7 +4497,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Grouping metric used with --split-two-group-plans. "
-            f"Default: {DEFAULT_SPLIT_TWO_GROUP_METRIC}."
+            "When omitted, compile generates both token_usage and context_usage plans."
         ),
     )
     compile_parser.add_argument(
@@ -4094,6 +4508,15 @@ def build_parser() -> argparse.ArgumentParser:
             "Non-split mode only. Exclude trails listed under "
             "<job-dir>/original-analysis/split/top-p-usage-ratio-summary.json "
             "unranked_trails."
+        ),
+    )
+    compile_parser.add_argument(
+        "--clean",
+        action="store_true",
+        default=None,
+        help=(
+            "Split mode only. Drop source requests with status_code=499 and collapse "
+            "their request-time windows. Output plans use a .clean filename suffix."
         ),
     )
     compile_parser.add_argument(

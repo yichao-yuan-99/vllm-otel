@@ -5,6 +5,7 @@ from concurrent.futures import ProcessPoolExecutor
 from contextlib import AbstractContextManager
 import json
 from datetime import datetime
+import math
 import os
 from pathlib import Path
 import sys
@@ -36,6 +37,7 @@ from pp_common.service_failure import parse_iso8601_to_utc
 
 DEFAULT_REQUESTS_OUTPUT_NAME = "llm-requests.json"
 DEFAULT_STATS_OUTPUT_NAME = "llm-request-stats.json"
+DEFAULT_SPEED_STATS_OUTPUT_NAME = "llm-request-speed-stats.json"
 DEFAULT_LONGEST_OUTPUT_NAME = "llm-requests-longest-10.json"
 DEFAULT_SHORTEST_OUTPUT_NAME = "llm-requests-shortest-10.json"
 EXTREME_REQUEST_LIMIT = 10
@@ -459,6 +461,71 @@ def build_stats_by_status_code(records: list[dict[str, Any]]) -> dict[str, dict[
     return grouped_payloads
 
 
+def _float_or_none(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            parsed = float(stripped)
+        except ValueError:
+            return None
+        return parsed if math.isfinite(parsed) else None
+    return None
+
+
+def _summarize_speed_values(values: list[float], *, request_count_200: int) -> dict[str, Any]:
+    if not values:
+        return {
+            "eligible_request_count": 0,
+            "excluded_request_count": request_count_200,
+            "avg_tokens_per_s": None,
+            "min_tokens_per_s": None,
+            "max_tokens_per_s": None,
+        }
+
+    return {
+        "eligible_request_count": len(values),
+        "excluded_request_count": max(request_count_200 - len(values), 0),
+        "avg_tokens_per_s": sum(values) / len(values),
+        "min_tokens_per_s": min(values),
+        "max_tokens_per_s": max(values),
+    }
+
+
+def build_average_stage_speed_tokens_per_s(records: list[dict[str, Any]]) -> dict[str, Any]:
+    request_count_200 = 0
+    prefill_speeds: list[float] = []
+    decode_speeds: list[float] = []
+
+    for record in records:
+        if _status_code_key(record) != "200":
+            continue
+        request_count_200 += 1
+
+        prompt_tokens = _float_or_none(record.get("prompt_tokens"))
+        completion_tokens = _float_or_none(record.get("completion_tokens"))
+        prefill_time_s = _float_or_none(record.get("gen_ai.latency.time_in_model_prefill"))
+        decode_time_s = _float_or_none(record.get("gen_ai.latency.time_in_model_decode"))
+
+        if prompt_tokens is not None and prefill_time_s is not None and prefill_time_s > 0.0:
+            prefill_speeds.append(prompt_tokens / prefill_time_s)
+        if completion_tokens is not None and decode_time_s is not None and decode_time_s > 0.0:
+            decode_speeds.append(completion_tokens / decode_time_s)
+
+    return {
+        "request_status_code": 200,
+        "request_count_200": request_count_200,
+        "prefill": _summarize_speed_values(prefill_speeds, request_count_200=request_count_200),
+        "decode": _summarize_speed_values(decode_speeds, request_count_200=request_count_200),
+    }
+
+
 def _duration_value_ms(record: dict[str, Any]) -> float | None:
     value = record.get("request_duration_ms")
     if isinstance(value, bool):
@@ -572,6 +639,18 @@ def extract_run_dir(
         "request_count": len(request_records),
     }
     stats_payload.update(build_numeric_stats(request_records))
+    stage_speed_summary = build_average_stage_speed_tokens_per_s(request_records)
+    stats_payload["average_stage_speed_tokens_per_s"] = stage_speed_summary
+    speed_stats_payload = {
+        "source_run_dir": str(run_dir),
+        "source_gateway_output_dir": source_gateway_output_dir,
+        "service_failure_detected": bool(
+            service_failure_payload.get("service_failure_detected", False)
+        ),
+        "service_failure_cutoff_time_utc": service_failure_payload.get("cutoff_time_utc"),
+        "request_count": len(request_records),
+        "average_stage_speed_tokens_per_s": stage_speed_summary,
+    }
     status_code_stats_payloads = build_stats_by_status_code(request_records)
     longest_requests, shortest_requests = select_extreme_duration_requests(
         request_records,
@@ -609,6 +688,7 @@ def extract_run_dir(
     resolved_output_dir.mkdir(parents=True, exist_ok=True)
     requests_output_path = resolved_output_dir / DEFAULT_REQUESTS_OUTPUT_NAME
     stats_output_path = resolved_output_dir / DEFAULT_STATS_OUTPUT_NAME
+    speed_stats_output_path = resolved_output_dir / DEFAULT_SPEED_STATS_OUTPUT_NAME
     longest_output_path = resolved_output_dir / DEFAULT_LONGEST_OUTPUT_NAME
     shortest_output_path = resolved_output_dir / DEFAULT_SHORTEST_OUTPUT_NAME
     status_output_paths: list[Path] = []
@@ -618,6 +698,10 @@ def extract_run_dir(
     )
     stats_output_path.write_text(
         json.dumps(stats_payload, ensure_ascii=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    speed_stats_output_path.write_text(
+        json.dumps(speed_stats_payload, ensure_ascii=True, indent=2) + "\n",
         encoding="utf-8",
     )
     longest_output_path.write_text(
@@ -648,6 +732,7 @@ def extract_run_dir(
     return [
         requests_output_path,
         stats_output_path,
+        speed_stats_output_path,
         longest_output_path,
         shortest_output_path,
         *status_output_paths,

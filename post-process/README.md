@@ -11,8 +11,12 @@ outputs.
 - `job-concurrency`: per-second active job concurrency over time for each run
 - `split/duration`: context-usage percentile split tables for per-job duration/turn/token metrics
 - `vllm-metrics`: parse/extract/summarize vLLM Prometheus metrics
+- `power`: summarize GPU power traces and estimate total run energy
 - `gateway/llm-requests`: flatten and summarize gateway LLM request traces
+- `prefill-concurrency`: 10ms prefill-phase concurrency series from LLM request spans
 - `gateway/stack`: recover stacked per-second gateway token throughput from request ranges
+- `gateway/stack-context`: recover stacked per-second agent context usage from request history
+- `gateway/stack-kv`: recover stacked per-second request-lifetime KV usage from request history
 - `gateway/usage`: aggregate gateway token usage per run and per agent
 
 ## Quick Navigation
@@ -25,11 +29,19 @@ outputs.
 - `post-process/visualization/job-concurrency/README.md`
 - `post-process/split/duration/README.md`
 - `post-process/vllm-metrics/README.md`
+- `post-process/power/README.md`
 - `post-process/gateway/llm-requests/README.md`
+- `post-process/prefill-concurrency/README.md`
 - `post-process/gateway/stack/README.md`
+- `post-process/gateway/stack-context/README.md`
+- `post-process/gateway/stack-kv/README.md`
 - `post-process/gateway/usage/README.md`
 - `post-process/visualization/gateway-stack/README.md`
+- `post-process/visualization/gateway-stack-context/README.md`
+- `post-process/visualization/gateway-stack-kv/README.md`
 - `post-process/visualization/vllm-metrics/README.md`
+- `post-process/visualization/power/README.md`
+- `post-process/visualization/prefill-concurrency/README.md`
 
 ## Script Index
 
@@ -51,21 +63,30 @@ outputs.
 
 Pipeline order:
 
-1. `global/extract_run.py`
-2. `global-progress/extract_run.py`
-3. `job-throughput/extract_run.py`
-4. `job-concurrency/extract_run.py`
-5. `gateway/llm-requests/extract_run.py`
-6. `gateway/stack/extract_run.py`
-7. `gateway/usage/extract_run.py`
-8. `split/duration/extract_run.py`
-9. `vllm-metrics/extract_run.py`
-10. `vllm-metrics/summarize_timeseries.py`
-11. `visualization/job-throughput/generate_all_figures.py`
-12. `visualization/job-concurrency/generate_all_figures.py`
-13. `visualization/gateway-stack/generate_all_figures.py`
-14. `visualization/vllm-metrics/generate_all_figures.py`
-15. `global/aggregate_runs_csv.py` (root-dir mode only, skipped in dry-run)
+1. `service-failure/extract_run.py`
+2. `global/extract_run.py`
+3. `global-progress/extract_run.py`
+4. `job-throughput/extract_run.py`
+5. `job-concurrency/extract_run.py`
+6. `gateway/llm-requests/extract_run.py`
+7. `prefill-concurrency/extract_run.py`
+8. `gateway/stack/extract_run.py`
+9. `gateway/stack-context/extract_run.py`
+10. `gateway/stack-kv/extract_run.py`
+11. `gateway/usage/extract_run.py`
+12. `split/duration/extract_run.py`
+13. `vllm-metrics/extract_run.py`
+14. `vllm-metrics/summarize_timeseries.py`
+15. `power/extract_run.py`
+16. `visualization/job-throughput/generate_all_figures.py`
+17. `visualization/job-concurrency/generate_all_figures.py`
+18. `visualization/prefill-concurrency/generate_all_figures.py`
+19. `visualization/gateway-stack/generate_all_figures.py`
+20. `visualization/gateway-stack-context/generate_all_figures.py`
+21. `visualization/gateway-stack-kv/generate_all_figures.py`
+22. `visualization/vllm-metrics/generate_all_figures.py`
+23. `visualization/power/generate_all_figures.py`
+24. `global/aggregate_runs_csv.py` (root-dir mode only, skipped in dry-run)
 
 ### `global-progress`
 
@@ -224,6 +245,36 @@ Pipeline order:
 - default output:
 - `<run-dir>/post-processed/vllm-log/gauge-counter-timeseries.stats.json`
 
+### `power`
+
+- `post-process/power/extract_run.py`
+- purpose: summarize GPU power from `power/power-log.jsonl` into
+- avg/min/max power
+- total energy estimate
+- time-offset power points (`time_offset_s`, `power_w`)
+- supports:
+- single run: `--run-dir <run-dir>`
+- batch discovery: `--root-dir <root-dir>`
+- parallel workers: `--max-procs`
+- dry-run: `--dry-run`
+- default output:
+- `<run-dir>/post-processed/power/power-summary.json`
+- behavior:
+- if `power/power-log.jsonl` is missing, writes a normal output with `power_log_found=false`
+
+- `post-process/visualization/power/generate_all_figures.py`
+- purpose: render one GPU power-over-time chart per run from power summary points
+- supports:
+- single run: `--run-dir <run-dir>`
+- batch discovery: `--root-dir <root-dir>`
+- parallel workers: `--max-procs`
+- dry-run: `--dry-run`
+- rendering controls:
+- `--format`
+- `--dpi`
+- default output:
+- `<run-dir>/post-processed/visualization/power/`
+
 ### `gateway/llm-requests`
 
 - `post-process/gateway/llm-requests/extract_run.py`
@@ -238,9 +289,44 @@ Pipeline order:
 - primary outputs:
 - `llm-requests.json`
 - `llm-request-stats.json`
+- `llm-request-speed-stats.json`
 - `llm-requests-longest-10.json`
 - `llm-requests-shortest-10.json`
 - `llm-requests-stats.<status_code>.json`
+
+### `prefill-concurrency`
+
+- `post-process/prefill-concurrency/extract_run.py`
+- purpose: extract request-level prefill activity ranges and compute 10ms prefill
+  concurrency over the full run duration
+- supports:
+- single run: `--run-dir <run-dir>`
+- batch discovery: `--root-dir <root-dir>`
+- parallel workers: `--max-procs`
+- dry-run: `--dry-run`
+- optional controls:
+- `--tick-ms` (default `10`)
+- optional input override: `--llm-requests <path>` (run-dir mode only)
+- default output directory:
+- `<run-dir>/post-processed/prefill-concurrency/`
+- primary outputs:
+- `prefill-activities.json`
+- `prefill-concurrency-timeseries.json`
+- `prefill-concurrency-stats.json`
+
+- `post-process/visualization/prefill-concurrency/generate_all_figures.py`
+- purpose: render one prefill-concurrency line chart per run from extracted
+  prefill-concurrency timeseries
+- supports:
+- single run: `--run-dir <run-dir>`
+- batch discovery: `--root-dir <root-dir>`
+- parallel workers: `--max-procs`
+- dry-run: `--dry-run`
+- rendering controls:
+- `--format`
+- `--dpi`
+- default output:
+- `<run-dir>/post-processed/visualization/prefill-concurrency/`
 
 ### `gateway/stack`
 
@@ -278,6 +364,69 @@ Pipeline order:
 - `--dpi`
 - default output:
 - `<run-dir>/post-processed/visualization/gateway-stack/`
+
+### `gateway/stack-context`
+
+- `post-process/gateway/stack-context/extract_run.py`
+- purpose: recover per-agent context usage ranges and stacked per-second context
+  usage from `llm-requests.json`
+- supports:
+- single run: `--run-dir <run-dir>`
+- batch discovery: `--root-dir <root-dir>`
+- parallel workers: `--max-procs`
+- dry-run: `--dry-run`
+- optional input override: `--llm-requests <path>` (run-dir mode only)
+- default output directory:
+- `<run-dir>/post-processed/gateway/stack-context/`
+- primary outputs:
+- `context-usage-ranges.json`
+- `context-usage-stacked-histogram.json`
+- note:
+- final active segment per agent ends at lifecycle `agent_end`
+  (`gateway-output/.../events/lifecycle.jsonl`) when available
+
+- `post-process/visualization/gateway-stack-context/generate_all_figures.py`
+- purpose: render raw + smoothed stacked context-usage line charts
+- supports:
+- single run: `--run-dir <run-dir>`
+- batch discovery: `--root-dir <root-dir>`
+- parallel workers: `--max-procs`
+- dry-run: `--dry-run`
+- rendering controls:
+- `--format`
+- `--dpi`
+- default output:
+- `<run-dir>/post-processed/visualization/gateway-stack-context/`
+
+### `gateway/stack-kv`
+
+- `post-process/gateway/stack-kv/extract_run.py`
+- purpose: recover request-lifetime KV occupancy ranges and stacked per-second KV
+  usage from `llm-requests.json`
+- supports:
+- single run: `--run-dir <run-dir>`
+- batch discovery: `--root-dir <root-dir>`
+- parallel workers: `--max-procs`
+- dry-run: `--dry-run`
+- optional input override: `--llm-requests <path>` (run-dir mode only)
+- default output directory:
+- `<run-dir>/post-processed/gateway/stack-kv/`
+- primary outputs:
+- `kv-usage-ranges.json`
+- `kv-usage-stacked-histogram.json`
+
+- `post-process/visualization/gateway-stack-kv/generate_all_figures.py`
+- purpose: render raw + smoothed stacked KV-usage line charts
+- supports:
+- single run: `--run-dir <run-dir>`
+- batch discovery: `--root-dir <root-dir>`
+- parallel workers: `--max-procs`
+- dry-run: `--dry-run`
+- rendering controls:
+- `--format`
+- `--dpi`
+- default output:
+- `<run-dir>/post-processed/visualization/gateway-stack-kv/`
 
 ### `gateway/usage`
 

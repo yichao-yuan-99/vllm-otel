@@ -38,6 +38,9 @@ experiments/sweep-qps-local/group/split/generated/
 experiments/sweep-qps-local/exclude-unranked/generated/
 experiments/sweep-qps/generated/
 experiments/single-qps/local/generated/
+experiments/single-qps-sweep-freq/local/generated/
+experiments/sweep-qps-docker-power-clean/generated/
+experiments/sweep-qps-docker-power/generated/
 con-driver/.cache/
 con-driver-test*/
 gateway-output/

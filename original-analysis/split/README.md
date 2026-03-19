@@ -30,7 +30,14 @@ Additional per-run outputs:
 ```text
 <run-dir>/original-analysis/split/top-p-token-usage-two-groups.json
 <run-dir>/original-analysis/split/top-p-context-usage-two-groups.json
+<run-dir>/original-analysis/split/top-p-usage-ratio-summary.strict-499.json
+<run-dir>/original-analysis/split/top-p-token-usage-two-groups.strict-499.json
+<run-dir>/original-analysis/split/top-p-context-usage-two-groups.strict-499.json
 ```
+
+Strict-mode details are documented in:
+
+- `original-analysis/split/README.strict-499.md`
 
 Batch mode:
 
@@ -39,11 +46,13 @@ python original-analysis/split/extract_run.py \
   --root-dir <root-dir>
 ```
 
-When `--root-dir` is used, two top-level CSV tables are also written:
+When `--root-dir` is used, normal and strict top-level CSV tables are written:
 
 ```text
 <root-dir>/split-top-p-token-usage-two-group-table.csv
 <root-dir>/split-top-p-context-usage-two-group-table.csv
+<root-dir>/split-top-p-token-usage-two-group-table.strict-499.csv
+<root-dir>/split-top-p-context-usage-two-group-table.strict-499.csv
 ```
 
 Columns:
@@ -89,10 +98,13 @@ Output includes:
 - `ranked_trails` / `unranked_trails`
 - `two_group_summaries.token_usage`
 - `two_group_summaries.context_usage`
+- `unranked_mode` (`normal` or `strict_499`)
+- `trail_count_with_status_499`
 
 ## Two-Group Files
 
-Two additional files are emitted per run:
+Two primary two-group files are emitted per run (plus strict `.strict-499`
+counterparts listed above):
 
 - `top-p-token-usage-two-groups.json`
 - `top-p-context-usage-two-groups.json`

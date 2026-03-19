@@ -145,19 +145,27 @@ def _build_step_commands_for_run_dir(
         "job-throughput/extract_run.py",
         "job-concurrency/extract_run.py",
         "gateway/llm-requests/extract_run.py",
+        "prefill-concurrency/extract_run.py",
         "gateway/stack/extract_run.py",
+        "gateway/stack-context/extract_run.py",
+        "gateway/stack-kv/extract_run.py",
         "gateway/usage/extract_run.py",
         "split/duration/extract_run.py",
         "vllm-metrics/extract_run.py",
         "vllm-metrics/summarize_timeseries.py",
+        "power/extract_run.py",
     ]
     if not skip_visualization:
         steps.extend(
             [
                 "visualization/job-throughput/generate_all_figures.py",
                 "visualization/job-concurrency/generate_all_figures.py",
+                "visualization/prefill-concurrency/generate_all_figures.py",
                 "visualization/gateway-stack/generate_all_figures.py",
+                "visualization/gateway-stack-context/generate_all_figures.py",
+                "visualization/gateway-stack-kv/generate_all_figures.py",
                 "visualization/vllm-metrics/generate_all_figures.py",
+                "visualization/power/generate_all_figures.py",
             ]
         )
 
@@ -190,19 +198,27 @@ def _build_step_commands_for_root_dir(
         "job-throughput/extract_run.py",
         "job-concurrency/extract_run.py",
         "gateway/llm-requests/extract_run.py",
+        "prefill-concurrency/extract_run.py",
         "gateway/stack/extract_run.py",
+        "gateway/stack-context/extract_run.py",
+        "gateway/stack-kv/extract_run.py",
         "gateway/usage/extract_run.py",
         "split/duration/extract_run.py",
         "vllm-metrics/extract_run.py",
         "vllm-metrics/summarize_timeseries.py",
+        "power/extract_run.py",
     ]
     if not skip_visualization:
         steps.extend(
             [
                 "visualization/job-throughput/generate_all_figures.py",
                 "visualization/job-concurrency/generate_all_figures.py",
+                "visualization/prefill-concurrency/generate_all_figures.py",
                 "visualization/gateway-stack/generate_all_figures.py",
+                "visualization/gateway-stack-context/generate_all_figures.py",
+                "visualization/gateway-stack-kv/generate_all_figures.py",
                 "visualization/vllm-metrics/generate_all_figures.py",
+                "visualization/power/generate_all_figures.py",
             ]
         )
 
