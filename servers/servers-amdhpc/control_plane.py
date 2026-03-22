@@ -184,6 +184,26 @@ def _normalize_local_mode_script(local_mode_script: str | None) -> str | None:
     return normalized
 
 
+def _normalize_user_extra_vllm_args(extra_vllm_args: list[str] | None) -> list[str]:
+    if extra_vllm_args is None:
+        return []
+    if not isinstance(extra_vllm_args, list):
+        raise ValueError("extra_vllm_args must be a list of strings")
+    if not extra_vllm_args:
+        return []
+
+    normalized: list[str] = []
+    for index, value in enumerate(extra_vllm_args):
+        if not isinstance(value, str):
+            raise ValueError(f"extra_vllm_args[{index}] must be a string")
+        if not value.strip():
+            raise ValueError(f"extra_vllm_args[{index}] cannot be empty")
+        if "\x00" in value:
+            raise ValueError(f"extra_vllm_args[{index}] cannot contain NUL byte")
+        normalized.append(value)
+    return normalized
+
+
 def _effective_partition_vllm_sif(
     *,
     partition_vllm_sif: Path | None,
@@ -388,6 +408,7 @@ class ControlPlane:
         block: bool = False,
         extra_env: dict[str, str] | None = None,
         lmcache_max_local_cpu_size: str | None = None,
+        extra_vllm_args: list[str] | None = None,
     ) -> CommandResult:
         port_profile = self._require_port_profile(port_profile_id)
         try:
@@ -396,9 +417,10 @@ class ControlPlane:
                 extra_env=normalized_extra_env,
                 lmcache_max_local_cpu_size=lmcache_max_local_cpu_size,
             )
+            normalized_extra_vllm_args = _normalize_user_extra_vllm_args(extra_vllm_args)
         except ValueError as exc:
             raise ControlPlaneError(
-                message=f"invalid start.extra_env/lmcache: {exc}",
+                message=f"invalid start.extra_env/lmcache/extra_vllm_args: {exc}",
                 code=122,
                 http_status=400,
             ) from exc
@@ -500,6 +522,7 @@ class ControlPlane:
                     port_profile=port_profile,
                     extra_env=normalized_extra_env,
                     lmcache_enabled=lmcache_enabled,
+                    extra_vllm_args=normalized_extra_vllm_args,
                 )
                 sbatch_result = self._run_checked(["sbatch", str(script_path)], timeout_seconds=120)
                 job_id = _extract_sbatch_job_id(f"{sbatch_result.stdout}\n{sbatch_result.stderr}")
@@ -552,6 +575,7 @@ class ControlPlane:
                     "vllm_sif": str(effective_vllm_sif),
                     "sbatch_script": str(script_path),
                     "extra_env": dict(normalized_extra_env),
+                    "extra_vllm_args": list(normalized_extra_vllm_args),
                     "blocked": block,
                 }
 
@@ -665,6 +689,7 @@ class ControlPlane:
         block: bool = True,
         extra_env: dict[str, str] | None = None,
         lmcache_max_local_cpu_size: str | None = None,
+        extra_vllm_args: list[str] | None = None,
     ) -> CommandResult:
         try:
             normalized_extra_env = _normalize_service_extra_env(extra_env)
@@ -672,9 +697,10 @@ class ControlPlane:
                 extra_env=normalized_extra_env,
                 lmcache_max_local_cpu_size=lmcache_max_local_cpu_size,
             )
+            normalized_extra_vllm_args = _normalize_user_extra_vllm_args(extra_vllm_args)
         except ValueError as exc:
             raise ControlPlaneError(
-                message=f"invalid group/start.extra_env/lmcache: {exc}",
+                message=f"invalid group/start.extra_env/lmcache/extra_vllm_args: {exc}",
                 code=123,
                 http_status=400,
             ) from exc
@@ -848,6 +874,7 @@ class ControlPlane:
                     visible_devices_by_profile=visible_devices_by_profile,
                     extra_env=normalized_extra_env,
                     lmcache_enabled=lmcache_enabled,
+                    extra_vllm_args=normalized_extra_vllm_args,
                 )
                 sbatch_result = self._run_checked(["sbatch", str(script_path)], timeout_seconds=120)
                 job_id = _extract_sbatch_job_id(f"{sbatch_result.stdout}\n{sbatch_result.stderr}")
@@ -895,6 +922,7 @@ class ControlPlane:
                     "total_vram_per_profile_gb": total_vram_per_profile_gb,
                     "vllm_sif": str(effective_vllm_sif),
                     "extra_env": dict(normalized_extra_env),
+                    "extra_vllm_args": list(normalized_extra_vllm_args),
                     "blocked": bool(block),
                     "sbatch_script": str(script_path),
                 }
@@ -1039,6 +1067,7 @@ class ControlPlane:
         model: str,
         extra_env: dict[str, str] | None = None,
         lmcache_max_local_cpu_size: str | None = None,
+        extra_vllm_args: list[str] | None = None,
         no_async_scheduling: bool = False,
         local_mode_script: str | None = None,
         check_port_availability: bool = False,
@@ -1050,10 +1079,11 @@ class ControlPlane:
                 extra_env=normalized_extra_env,
                 lmcache_max_local_cpu_size=lmcache_max_local_cpu_size,
             )
+            normalized_extra_vllm_args = _normalize_user_extra_vllm_args(extra_vllm_args)
             normalized_local_mode_script = _normalize_local_mode_script(local_mode_script)
         except ValueError as exc:
             raise ControlPlaneError(
-                message=f"invalid render/start.extra_env/lmcache/local_mode: {exc}",
+                message=f"invalid render/start.extra_env/lmcache/extra_vllm_args/local_mode: {exc}",
                 code=122,
                 http_status=400,
             ) from exc
@@ -1111,6 +1141,7 @@ class ControlPlane:
                     local_mode_script=normalized_local_mode_script,
                     extra_env=normalized_extra_env,
                     lmcache_enabled=lmcache_enabled,
+                    extra_vllm_args=normalized_extra_vllm_args,
                     no_async_scheduling=no_async_scheduling,
                 )
             else:
@@ -1120,6 +1151,7 @@ class ControlPlane:
                     port_profile=port_profile,
                     extra_env=normalized_extra_env,
                     lmcache_enabled=lmcache_enabled,
+                    extra_vllm_args=normalized_extra_vllm_args,
                     no_async_scheduling=no_async_scheduling,
                 )
 
@@ -1139,6 +1171,7 @@ class ControlPlane:
                 "lmcache_port": port_profile.lmcache_port,
                 "sbatch_script": str(script_path),
                 "extra_env": dict(normalized_extra_env),
+                "extra_vllm_args": list(normalized_extra_vllm_args),
                 "lmcache_enabled": lmcache_enabled,
                 "no_async_scheduling": bool(no_async_scheduling),
                 "local_mode_enabled": normalized_local_mode_script is not None,
@@ -1156,6 +1189,7 @@ class ControlPlane:
         model: str,
         extra_env: dict[str, str] | None = None,
         lmcache_max_local_cpu_size: str | None = None,
+        extra_vllm_args: list[str] | None = None,
         no_async_scheduling: bool = False,
         local_mode_script: str | None = None,
         check_port_availability: bool = False,
@@ -1166,10 +1200,11 @@ class ControlPlane:
                 extra_env=normalized_extra_env,
                 lmcache_max_local_cpu_size=lmcache_max_local_cpu_size,
             )
+            normalized_extra_vllm_args = _normalize_user_extra_vllm_args(extra_vllm_args)
             normalized_local_mode_script = _normalize_local_mode_script(local_mode_script)
         except ValueError as exc:
             raise ControlPlaneError(
-                message=f"invalid render/group-start.extra_env/lmcache/local_mode: {exc}",
+                message=f"invalid render/group-start.extra_env/lmcache/extra_vllm_args/local_mode: {exc}",
                 code=123,
                 http_status=400,
             ) from exc
@@ -1282,6 +1317,7 @@ class ControlPlane:
                 visible_devices_by_profile=visible_devices_by_profile,
                 extra_env=normalized_extra_env,
                 lmcache_enabled=lmcache_enabled,
+                extra_vllm_args=normalized_extra_vllm_args,
                 no_async_scheduling=no_async_scheduling,
                 local_mode_script=normalized_local_mode_script,
             )
@@ -1302,6 +1338,7 @@ class ControlPlane:
                 "visible_devices_by_profile": list(visible_devices_by_profile),
                 "sbatch_script": str(script_path),
                 "extra_env": dict(normalized_extra_env),
+                "extra_vllm_args": list(normalized_extra_vllm_args),
                 "lmcache_enabled": lmcache_enabled,
                 "no_async_scheduling": bool(no_async_scheduling),
                 "local_mode_enabled": normalized_local_mode_script is not None,
@@ -2978,6 +3015,7 @@ class ControlPlane:
         visible_devices_by_profile: list[str],
         extra_env: dict[str, str],
         lmcache_enabled: bool,
+        extra_vllm_args: list[str],
         no_async_scheduling: bool = False,
         local_mode_script: str | None = None,
     ) -> Path:
@@ -3029,7 +3067,7 @@ class ControlPlane:
 
         ssh_options = " ".join(shlex.quote(opt) for opt in self._cfg.ssh_options)
         effective_extra_args = _effective_vllm_extra_args(
-            extra_args=model_spec.extra_args,
+            extra_args=[*model_spec.extra_args, *extra_vllm_args],
             gpus_per_node=gpus_per_profile,
         )
         encoded_extra_args = _encode_model_extra_args(effective_extra_args)
@@ -3546,6 +3584,7 @@ class ControlPlane:
         port_profile: AMDHPCPortProfile,
         extra_env: dict[str, str],
         lmcache_enabled: bool,
+        extra_vllm_args: list[str],
         no_async_scheduling: bool = False,
     ) -> Path:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -3570,7 +3609,7 @@ class ControlPlane:
 
         ssh_options = " ".join(shlex.quote(opt) for opt in self._cfg.ssh_options)
         effective_extra_args = _effective_vllm_extra_args(
-            extra_args=model_spec.extra_args,
+            extra_args=[*model_spec.extra_args, *extra_vllm_args],
             gpus_per_node=partition_spec.gpus_per_node,
         )
         encoded_extra_args = _encode_model_extra_args(effective_extra_args)
@@ -3785,6 +3824,7 @@ class ControlPlane:
         local_mode_script: str,
         extra_env: dict[str, str],
         lmcache_enabled: bool,
+        extra_vllm_args: list[str],
         no_async_scheduling: bool = False,
     ) -> Path:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -3808,7 +3848,7 @@ class ControlPlane:
         vllm_cache_root = self._cfg.env.get("VLLM_CACHE_ROOT", f"{xdg_cache_home}/vllm")
 
         effective_extra_args = _effective_vllm_extra_args(
-            extra_args=model_spec.extra_args,
+            extra_args=[*model_spec.extra_args, *extra_vllm_args],
             gpus_per_node=partition_spec.gpus_per_node,
         )
         encoded_extra_args = _encode_model_extra_args(effective_extra_args)

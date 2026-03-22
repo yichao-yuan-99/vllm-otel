@@ -12,6 +12,7 @@ The server keeps cluster partition config, loads shared model definitions, submi
 - `servers/servers-amdhpc/pyproject.toml`: Python package/dependency setup.
 - `servers/servers-amdhpc/server_config.toml`: cluster/server settings and partition config.
 - `servers/servers-amdhpc/README.remote-host.md`: using `-r/--remote-host` to override SSH target.
+- `servers/servers-amdhpc/README.start-many.md`: vectorized single-profile starts (`start-many`).
 - `servers/servers-amdhpc/tests/test_live_multi_profile.py`: gated live integration test for concurrent profiles `5..9`.
 - `configs/model_config.toml`: shared model definitions used by the AMD HPC control plane.
 - `servers/servers-amdhpc/run/control_state.json`: active job state (auto-generated).
@@ -61,8 +62,11 @@ python3 servers/servers-amdhpc/client.py status -r amd-hpc -P 0
 python3 servers/servers-amdhpc/client.py start -r amd-hpc -P 0 -p mi3008x -m kimi_k2_5
 python3 servers/servers-amdhpc/client.py start -r amd-hpc -P 0 -p mi3008x -m kimi_k2_5 -b
 python3 servers/servers-amdhpc/client.py start -r amd-hpc -P 0 -p mi3008x -m kimi_k2_5 --lmcache 100
+python3 servers/servers-amdhpc/client.py start -r amd-hpc -P 0 -p mi3008x -m kimi_k2_5 --extra-vllm-args "--enable-expert-parallel"
+python3 servers/servers-amdhpc/client.py start-many -r amd-hpc -L 0,1,2,3 -p mi3008x -m qwen3_coder_30b
 python3 servers/servers-amdhpc/client.py start-group -r amd-hpc -g bench_a -L 0,1,2,3 -p mi3008x -m kimi_k2_5
 python3 servers/servers-amdhpc/client.py start-group -r amd-hpc -g bench_a -L 0,1,2,3 -p mi3008x -m kimi_k2_5 --lmcache 100
+python3 servers/servers-amdhpc/client.py start-group -r amd-hpc -g bench_a -L 0,1,2,3 -p mi3008x -m kimi_k2_5 --extra-vllm-args "--enable-expert-parallel"
 python3 servers/servers-amdhpc/client.py start-group -r amd-hpc -g bench_b -L 0,1,2,3,4,5,6,7 -p mi3008x -m qwen3_coder_30b
 python3 servers/servers-amdhpc/client.py group-status -r amd-hpc -g bench_a
 python3 servers/servers-amdhpc/client.py up -r amd-hpc -P 0
@@ -78,6 +82,7 @@ python3 servers/servers-amdhpc/client.py stop-group -r amd-hpc -g bench_a
 `-r` / `--remote-host` is an alias for `--ssh-target` and is accepted by all client commands; see `servers/servers-amdhpc/README.remote-host.md`.
 Client default server URL is derived from the selected local tunnel record. By default the local control port is `23971 + <port_profile>` (for example: profile `0` -> `23971`, profile `1` -> `23972`).
 Client `start` now also launches a per-profile local gateway daemon in the background after services are up, and `stop` tears it down first.
+For vectorized independent starts across many profiles (one start job per profile), see `servers/servers-amdhpc/README.start-many.md`.
 
 ## Render sbatch only (no submit)
 
@@ -90,10 +95,14 @@ python3 servers/servers-amdhpc/render-sbatch.py start -P 0 -p mi3008x -m qwen3_c
 
 # Grouped render (4 profiles on one node -> tp=2)
 python3 servers/servers-amdhpc/render-sbatch.py start-group -g mi300_tp2 -L 0,1,2,3 -p mi3008x -m qwen3_coder_30b
+
+# Add extra vLLM args
+python3 servers/servers-amdhpc/render-sbatch.py start -P 0 -p mi3008x -m qwen3_coder_30b --extra-vllm-args "--enable-expert-parallel"
 ```
 
 Optional:
 - add `--lmcache <size>` to inject LMCache settings into the rendered vLLM command/env
+- add `--extra-vllm-args "<args>"` to append additional vLLM start flags
 - add `--check-port-availability` to fail render if selected login-node ports are currently in use
 
 ## Grouped Single-Node GPU Split

@@ -13,7 +13,10 @@ MODULE_ROOT = Path(__file__).resolve().parents[1]
 if str(MODULE_ROOT) not in sys.path:
     sys.path.insert(0, str(MODULE_ROOT))
 
-from control_plane import _effective_vllm_extra_args  # type: ignore[import-not-found]
+from control_plane import (  # type: ignore[import-not-found]
+    _effective_vllm_extra_args,
+    _normalize_user_extra_vllm_args,
+)
 
 
 class EffectiveVllmExtraArgsTest(unittest.TestCase):
@@ -46,6 +49,30 @@ class EffectiveVllmExtraArgsTest(unittest.TestCase):
                 "ray",
             ],
         )
+
+
+class NormalizeUserExtraVllmArgsTest(unittest.TestCase):
+    def test_missing_or_empty_returns_empty(self) -> None:
+        self.assertEqual(_normalize_user_extra_vllm_args(None), [])
+        self.assertEqual(_normalize_user_extra_vllm_args([]), [])
+
+    def test_preserves_valid_values(self) -> None:
+        self.assertEqual(
+            _normalize_user_extra_vllm_args(["--enable-expert-parallel", "--max-model-len", "32768"]),
+            ["--enable-expert-parallel", "--max-model-len", "32768"],
+        )
+
+    def test_rejects_empty_tokens(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cannot be empty"):
+            _normalize_user_extra_vllm_args(["--ok", "   "])
+
+    def test_rejects_nul_bytes(self) -> None:
+        with self.assertRaisesRegex(ValueError, "NUL"):
+            _normalize_user_extra_vllm_args(["--ok", "bad\x00arg"])
+
+    def test_rejects_non_list_input(self) -> None:
+        with self.assertRaisesRegex(ValueError, "list of strings"):
+            _normalize_user_extra_vllm_args("--enable-expert-parallel")  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":

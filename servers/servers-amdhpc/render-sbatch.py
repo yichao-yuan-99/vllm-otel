@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import shlex
 from typing import Any
 
 import typer
@@ -75,6 +76,21 @@ def _parse_extra_env_list(values: list[str]) -> dict[str, str]:
         if key in parsed:
             raise ValueError(f"duplicate env key '{key}'")
         parsed[key] = value
+    return parsed
+
+
+def _parse_extra_vllm_args(value: str | None) -> list[str]:
+    if value is None:
+        return []
+    text = value.strip()
+    if not text:
+        return []
+    try:
+        parsed = shlex.split(text)
+    except ValueError as exc:
+        raise ValueError(f"invalid extra-vllm-args: {exc}") from exc
+    if not parsed:
+        return []
     return parsed
 
 
@@ -182,6 +198,14 @@ def start(
             "Sets LMCACHE_MAX_LOCAL_CPU_SIZE and enables kv-transfer-config."
         ),
     ),
+    extra_vllm_args: str | None = typer.Option(
+        None,
+        "--extra-vllm-args",
+        help=(
+            "Additional vLLM CLI args string appended to model defaults. "
+            'Example: --extra-vllm-args="--enable-expert-parallel --max-model-len 32768".'
+        ),
+    ),
     no_async_scheduling: bool = typer.Option(
         False,
         "--no-async-scheduling",
@@ -202,6 +226,10 @@ def start(
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--env") from exc
     try:
+        parsed_extra_vllm_args = _parse_extra_vllm_args(extra_vllm_args)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--extra-vllm-args") from exc
+    try:
         local_mode_script = _resolve_local_mode_script(local_mode)
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--local-mode") from exc
@@ -221,6 +249,7 @@ def start(
             model=model,
             extra_env=extra_env,
             lmcache_max_local_cpu_size=str(lmcache) if lmcache is not None else None,
+            extra_vllm_args=parsed_extra_vllm_args,
             no_async_scheduling=bool(no_async_scheduling),
             local_mode_script=local_mode_script,
             check_port_availability=_check_port_availability_from_ctx(ctx),
@@ -277,6 +306,14 @@ def start_group(
             "Sets LMCACHE_MAX_LOCAL_CPU_SIZE and enables kv-transfer-config."
         ),
     ),
+    extra_vllm_args: str | None = typer.Option(
+        None,
+        "--extra-vllm-args",
+        help=(
+            "Additional vLLM CLI args string appended to model defaults. "
+            'Example: --extra-vllm-args="--enable-expert-parallel --max-model-len 32768".'
+        ),
+    ),
     no_async_scheduling: bool = typer.Option(
         False,
         "--no-async-scheduling",
@@ -306,6 +343,10 @@ def start_group(
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--env") from exc
     try:
+        parsed_extra_vllm_args = _parse_extra_vllm_args(extra_vllm_args)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--extra-vllm-args") from exc
+    try:
         local_mode_script = _resolve_local_mode_script(local_mode)
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--local-mode") from exc
@@ -326,6 +367,7 @@ def start_group(
             model=model,
             extra_env=extra_env,
             lmcache_max_local_cpu_size=str(lmcache) if lmcache is not None else None,
+            extra_vllm_args=parsed_extra_vllm_args,
             no_async_scheduling=bool(no_async_scheduling),
             local_mode_script=local_mode_script,
             check_port_availability=_check_port_availability_from_ctx(ctx),

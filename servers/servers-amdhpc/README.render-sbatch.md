@@ -24,6 +24,7 @@ python3 servers/servers-amdhpc/render-sbatch.py start-group \
 Optional flags:
 
 - `--lmcache <size>`: enables LMCache options in rendered vLLM startup.
+- `--extra-vllm-args "<args>"`: appends additional vLLM CLI options (for example `--enable-expert-parallel`).
 - `--no-async-scheduling`: appends `--no-async-scheduling` to rendered vLLM startup.
 - `--env KEY=VALUE` (repeatable): inject extra environment variables into rendered vLLM process.
 - `--check-port-availability`: validates selected login-node ports are currently free (off by default).

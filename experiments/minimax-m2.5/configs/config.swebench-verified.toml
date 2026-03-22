@@ -1,0 +1,9 @@
+[driver]
+driver_backend = "harbor"
+pattern = "eager"
+pool = "swebench-verified"
+max_concurrent = 5
+n_task = 500
+results_dir = "experiments/results/minimax-m2.5/swebench-verified/mini-swe-agent"
+sample_without_replacement = true
+agent = "mini-swe-agent"

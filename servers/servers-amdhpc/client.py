@@ -502,6 +502,21 @@ def _parse_extra_env_list(values: list[str]) -> dict[str, str]:
     return parsed
 
 
+def _parse_extra_vllm_args(value: str | None) -> list[str]:
+    if value is None:
+        return []
+    text = value.strip()
+    if not text:
+        return []
+    try:
+        parsed = shlex.split(text)
+    except ValueError as exc:
+        raise ValueError(f"invalid extra-vllm-args: {exc}") from exc
+    if not parsed:
+        return []
+    return parsed
+
+
 def _sorted_unique_profile_ids(profile_ids: list[int]) -> list[int]:
     return sorted(set(int(value) for value in profile_ids))
 
@@ -1500,6 +1515,129 @@ def _cleanup_after_start_interrupt(ctx: typer.Context, *, port_profile: int) -> 
     )
 
 
+def _start_single_profile_flow(
+    ctx: typer.Context,
+    *,
+    ssh_target: str,
+    port_profile: int,
+    partition: str,
+    model: str,
+    block: bool,
+    server_port: int,
+    ssh_option: list[str],
+    extra_env: dict[str, str],
+    lmcache: int | None,
+    extra_vllm_args: list[str],
+    progress_tag: str = "start",
+) -> dict[str, Any]:
+    start_payload: dict[str, Any] = {
+        "port_profile": port_profile,
+        "partition": partition,
+        "model": model,
+        "extra_env": extra_env,
+        "extra_vllm_args": list(extra_vllm_args),
+    }
+    if lmcache is not None:
+        start_payload["lmcache"] = lmcache
+
+    clientd_payload = start_client_d(
+        ssh_target=ssh_target,
+        port_profile_id=port_profile,
+        runtime_dir=_clientd_runtime_dir(ctx),
+        remote_server_port=server_port,
+        ssh_options=ssh_option or None,
+    )
+    if not _is_ok(clientd_payload):
+        return clientd_payload
+
+    wait_up_payload: dict[str, Any] | None = None
+    if block:
+        server_payload = _run_blocking_with_progress(
+            ctx,
+            endpoint="/start",
+            payload={**start_payload, "block": True},
+            progress_endpoint="/start/status",
+            progress_payload={"port_profile": port_profile},
+            progress_tag=progress_tag,
+            timeout_seconds=START_BLOCKING_TIMEOUT_SECONDS,
+        )
+    else:
+        server_payload = _run_command_with_timeout(
+            ctx,
+            "/start",
+            payload={**start_payload, "block": False},
+            timeout_seconds=None,
+        )
+    if not _is_ok(server_payload):
+        gateway_cleanup_payload = _stop_gateway_for_profile(ctx, port_profile=port_profile)
+        cleanup_payload = _stop_clientd_for_profile(ctx, port_profile=port_profile)
+        return _start_failure_payload(
+            server_payload=server_payload,
+            clientd_start_payload=clientd_payload,
+            clientd_cleanup_payload=cleanup_payload,
+            gateway_cleanup_payload=gateway_cleanup_payload,
+        )
+
+    if not block:
+        typer.echo(
+            f"[{progress_tag}] waiting for service readiness before launching gateway.",
+            err=True,
+        )
+        wait_up_payload = _run_command_with_timeout(
+            ctx,
+            "/wait-up",
+            payload={
+                "port_profile": port_profile,
+                "timeout_seconds": GATEWAY_WAIT_UP_TIMEOUT_SECONDS,
+                "poll_interval_seconds": GATEWAY_WAIT_UP_POLL_INTERVAL_SECONDS,
+                "defer_timeout_until_running": True,
+            },
+            timeout_seconds=START_BLOCKING_TIMEOUT_SECONDS,
+        )
+
+        if not _is_ok(wait_up_payload):
+            (
+                server_cleanup_payload,
+                gateway_cleanup_payload,
+                clientd_cleanup_payload,
+            ) = _cleanup_after_start_failure(ctx, port_profile=port_profile)
+            return _start_failure_payload(
+                server_payload=wait_up_payload,
+                clientd_start_payload=clientd_payload,
+                clientd_cleanup_payload=clientd_cleanup_payload,
+                wait_up_payload=wait_up_payload,
+                gateway_cleanup_payload=gateway_cleanup_payload,
+                server_cleanup_payload=server_cleanup_payload,
+            )
+
+    gateway_payload = start_gateway_daemon(
+        port_profile_id=port_profile,
+        runtime_dir=_clientd_runtime_dir(ctx),
+    )
+    if not _is_ok(gateway_payload):
+        (
+            server_cleanup_payload,
+            gateway_cleanup_payload,
+            clientd_cleanup_payload,
+        ) = _cleanup_after_start_failure(ctx, port_profile=port_profile)
+        return _start_failure_payload(
+            server_payload=gateway_payload,
+            clientd_start_payload=clientd_payload,
+            clientd_cleanup_payload=clientd_cleanup_payload,
+            wait_up_payload=wait_up_payload,
+            gateway_start_payload=gateway_payload,
+            gateway_cleanup_payload=gateway_cleanup_payload,
+            server_cleanup_payload=server_cleanup_payload,
+        )
+
+    return _start_result_payload(
+        server_payload=server_payload,
+        clientd_payload=clientd_payload,
+        gateway_payload=gateway_payload,
+        wait_up_payload=wait_up_payload,
+    )
+
+
 @app.command()
 def start(
     ctx: typer.Context,
@@ -1541,12 +1679,123 @@ def start(
             "Sets LMCACHE_MAX_LOCAL_CPU_SIZE and enables kv-transfer-config."
         ),
     ),
+    extra_vllm_args: str | None = typer.Option(
+        None,
+        "--extra-vllm-args",
+        help=(
+            "Additional vLLM CLI args string appended to model defaults. "
+            'Example: --extra-vllm-args="--enable-expert-parallel --max-model-len 32768".'
+        ),
+    ),
 ) -> None:
     """Start client-d and submit an sbatch job for a configured partition + model."""
     try:
         extra_env = _parse_extra_env_list(env)
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--env") from exc
+    try:
+        parsed_extra_vllm_args = _parse_extra_vllm_args(extra_vllm_args)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--extra-vllm-args") from exc
+    if lmcache is not None and lmcache <= 0:
+        raise typer.BadParameter("--lmcache must be a positive integer", param_hint="--lmcache")
+    if lmcache is not None and "LMCACHE_MAX_LOCAL_CPU_SIZE" in extra_env:
+        raise typer.BadParameter(
+            "cannot combine --lmcache with --env LMCACHE_MAX_LOCAL_CPU_SIZE=...",
+            param_hint="--lmcache",
+        )
+    try:
+        payload = _start_single_profile_flow(
+            ctx,
+            ssh_target=ssh_target,
+            port_profile=port_profile,
+            partition=partition,
+            model=model,
+            block=block,
+            server_port=server_port,
+            ssh_option=ssh_option,
+            extra_env=extra_env,
+            lmcache=lmcache,
+            extra_vllm_args=parsed_extra_vllm_args,
+            progress_tag="start",
+        )
+    except KeyboardInterrupt:
+        _cleanup_after_start_interrupt(ctx, port_profile=port_profile)
+        raise typer.Exit(code=130)
+
+    _print_json(payload)
+    if not _is_ok(payload):
+        raise typer.Exit(code=1)
+
+
+@app.command(name="start-many")
+def start_many(
+    ctx: typer.Context,
+    ssh_target: str = _remote_host_option(),
+    profile_list: str = typer.Option(
+        ...,
+        "--profile-list",
+        "-L",
+        help="Comma-separated port profile IDs, e.g. 0,1,2,3.",
+    ),
+    partition: str = typer.Option(..., "--partition", "-p", help="Configured partition key."),
+    model: str = typer.Option(..., "--model", "-m", help="Configured model key."),
+    block: bool = typer.Option(
+        False,
+        "--block",
+        "-b",
+        help="Block per profile until services are fully up before advancing.",
+    ),
+    server_port: int = typer.Option(
+        DEFAULT_SERVER_PORT,
+        "--server-port",
+        help="Remote control server port on the login node.",
+    ),
+    ssh_option: list[str] = typer.Option(
+        [],
+        "--ssh-option",
+        help="Additional raw ssh option token. Repeat to pass multiple tokens.",
+    ),
+    env: list[str] = typer.Option(
+        [],
+        "--env",
+        help="Additional vLLM environment variable in KEY=VALUE form. Repeat to pass multiple values.",
+    ),
+    lmcache: int | None = typer.Option(
+        None,
+        "--lmcache",
+        help=(
+            "Enable LMCache with a maximum local CPU size. "
+            "Sets LMCACHE_MAX_LOCAL_CPU_SIZE and enables kv-transfer-config."
+        ),
+    ),
+    extra_vllm_args: str | None = typer.Option(
+        None,
+        "--extra-vllm-args",
+        help=(
+            "Additional vLLM CLI args string appended to model defaults. "
+            'Example: --extra-vllm-args="--enable-expert-parallel --max-model-len 32768".'
+        ),
+    ),
+    continue_on_error: bool = typer.Option(
+        True,
+        "--continue-on-error/--fail-fast",
+        help="Continue starting remaining profiles when one profile fails.",
+    ),
+) -> None:
+    """Vectorized start: run single-profile starts across a list of profiles."""
+    try:
+        profile_ids = _parse_profile_list(profile_list)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--profile-list") from exc
+    try:
+        extra_env = _parse_extra_env_list(env)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--env") from exc
+    try:
+        parsed_extra_vllm_args = _parse_extra_vllm_args(extra_vllm_args)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--extra-vllm-args") from exc
     if lmcache is not None and lmcache <= 0:
         raise typer.BadParameter("--lmcache must be a positive integer", param_hint="--lmcache")
     if lmcache is not None and "LMCACHE_MAX_LOCAL_CPU_SIZE" in extra_env:
@@ -1555,129 +1804,83 @@ def start(
             param_hint="--lmcache",
         )
 
-    start_payload: dict[str, Any] = {
-        "port_profile": port_profile,
-        "partition": partition,
-        "model": model,
-        "extra_env": extra_env,
-    }
-    if lmcache is not None:
-        start_payload["lmcache"] = lmcache
+    total = len(profile_ids)
+    results: dict[str, dict[str, Any]] = {}
+    started_profile_ids: list[int] = []
+    failed_profile_ids: list[int] = []
+    attempted_profile_ids: list[int] = []
 
-    clientd_payload = start_client_d(
-        ssh_target=ssh_target,
-        port_profile_id=port_profile,
-        runtime_dir=_clientd_runtime_dir(ctx),
-        remote_server_port=server_port,
-        ssh_options=ssh_option or None,
-    )
-    _require_ok(clientd_payload)
-
-    wait_up_payload: dict[str, Any] | None = None
-    if block:
+    for index, profile_id in enumerate(profile_ids, start=1):
+        typer.echo(f"[start-many] ({index}/{total}) starting profile={profile_id}")
         try:
-            server_payload = _run_blocking_with_progress(
+            payload = _start_single_profile_flow(
                 ctx,
-                endpoint="/start",
-                payload={**start_payload, "block": True},
-                progress_endpoint="/start/status",
-                progress_payload={"port_profile": port_profile},
-                progress_tag="start",
-                timeout_seconds=START_BLOCKING_TIMEOUT_SECONDS,
+                ssh_target=ssh_target,
+                port_profile=profile_id,
+                partition=partition,
+                model=model,
+                block=block,
+                server_port=server_port,
+                ssh_option=ssh_option,
+                extra_env=extra_env,
+                lmcache=lmcache,
+                extra_vllm_args=parsed_extra_vllm_args,
+                progress_tag=f"start:p{profile_id}",
             )
         except KeyboardInterrupt:
-            _cleanup_after_start_interrupt(ctx, port_profile=port_profile)
+            _cleanup_after_start_interrupt(ctx, port_profile=profile_id)
             raise typer.Exit(code=130)
-    else:
-        server_payload = _run_command_with_timeout(
-            ctx,
-            "/start",
-            payload={**start_payload, "block": False},
-            timeout_seconds=None,
-        )
-    if not _is_ok(server_payload):
-        gateway_cleanup_payload = _stop_gateway_for_profile(ctx, port_profile=port_profile)
-        cleanup_payload = _stop_clientd_for_profile(ctx, port_profile=port_profile)
-        _print_json(
-            _start_failure_payload(
-                server_payload=server_payload,
-                clientd_start_payload=clientd_payload,
-                clientd_cleanup_payload=cleanup_payload,
-                gateway_cleanup_payload=gateway_cleanup_payload,
-            )
-        )
-        raise typer.Exit(code=1)
+        except Exception as exc:  # noqa: BLE001
+            payload = {
+                "ok": False,
+                "code": 1,
+                "message": f"profile {profile_id} start failed with exception: {exc}",
+                "data": {"port_profile": profile_id},
+            }
 
-    if not block:
+        attempted_profile_ids.append(profile_id)
+        results[str(profile_id)] = payload
+        if _is_ok(payload):
+            started_profile_ids.append(profile_id)
+            typer.echo(f"[start-many] profile={profile_id} ready")
+            continue
+
+        failed_profile_ids.append(profile_id)
         typer.echo(
-            "[start] waiting for service readiness before launching gateway.",
+            f"[start-many] profile={profile_id} failed: {payload.get('message', 'start failed')}",
             err=True,
         )
-        try:
-            wait_up_payload = _run_command_with_timeout(
-                ctx,
-                "/wait-up",
-                payload={
-                    "port_profile": port_profile,
-                    "timeout_seconds": GATEWAY_WAIT_UP_TIMEOUT_SECONDS,
-                    "poll_interval_seconds": GATEWAY_WAIT_UP_POLL_INTERVAL_SECONDS,
-                    "defer_timeout_until_running": True,
-                },
-                timeout_seconds=START_BLOCKING_TIMEOUT_SECONDS,
-            )
-        except KeyboardInterrupt:
-            _cleanup_after_start_interrupt(ctx, port_profile=port_profile)
-            raise typer.Exit(code=130)
+        if not continue_on_error:
+            break
 
-        if not _is_ok(wait_up_payload):
-            (
-                server_cleanup_payload,
-                gateway_cleanup_payload,
-                clientd_cleanup_payload,
-            ) = _cleanup_after_start_failure(ctx, port_profile=port_profile)
-            _print_json(
-                _start_failure_payload(
-                    server_payload=wait_up_payload,
-                    clientd_start_payload=clientd_payload,
-                    clientd_cleanup_payload=clientd_cleanup_payload,
-                    wait_up_payload=wait_up_payload,
-                    gateway_cleanup_payload=gateway_cleanup_payload,
-                    server_cleanup_payload=server_cleanup_payload,
-                )
+    pending_profile_ids = [profile_id for profile_id in profile_ids if profile_id not in attempted_profile_ids]
+    ok = not failed_profile_ids
+    summary = {
+        "ok": ok,
+        "code": 0 if ok else 1,
+        "message": (
+            f"started {len(started_profile_ids)} profiles"
+            if ok
+            else (
+                f"started {len(started_profile_ids)} profiles; "
+                f"failed {len(failed_profile_ids)}"
             )
-            raise typer.Exit(code=1)
-
-    gateway_payload = start_gateway_daemon(
-        port_profile_id=port_profile,
-        runtime_dir=_clientd_runtime_dir(ctx),
-    )
-    if not _is_ok(gateway_payload):
-        (
-            server_cleanup_payload,
-            gateway_cleanup_payload,
-            clientd_cleanup_payload,
-        ) = _cleanup_after_start_failure(ctx, port_profile=port_profile)
-        _print_json(
-            _start_failure_payload(
-                server_payload=gateway_payload,
-                clientd_start_payload=clientd_payload,
-                clientd_cleanup_payload=clientd_cleanup_payload,
-                wait_up_payload=wait_up_payload,
-                gateway_start_payload=gateway_payload,
-                gateway_cleanup_payload=gateway_cleanup_payload,
-                server_cleanup_payload=server_cleanup_payload,
-            )
-        )
+        ),
+        "data": {
+            "partition": partition,
+            "model": model,
+            "profile_list": profile_ids,
+            "attempted_profile_ids": attempted_profile_ids,
+            "started_profile_ids": started_profile_ids,
+            "failed_profile_ids": failed_profile_ids,
+            "pending_profile_ids": pending_profile_ids,
+            "continue_on_error": bool(continue_on_error),
+            "results": results,
+        },
+    }
+    _print_json(summary)
+    if not ok:
         raise typer.Exit(code=1)
-
-    _print_json(
-        _start_result_payload(
-            server_payload=server_payload,
-            clientd_payload=clientd_payload,
-            gateway_payload=gateway_payload,
-            wait_up_payload=wait_up_payload,
-        )
-    )
 
 
 @app.command()
@@ -1751,6 +1954,14 @@ def start_group(
             "Sets LMCACHE_MAX_LOCAL_CPU_SIZE and enables kv-transfer-config."
         ),
     ),
+    extra_vllm_args: str | None = typer.Option(
+        None,
+        "--extra-vllm-args",
+        help=(
+            "Additional vLLM CLI args string appended to model defaults. "
+            'Example: --extra-vllm-args="--enable-expert-parallel --max-model-len 32768".'
+        ),
+    ),
     clientd_timeout_seconds: float = typer.Option(
         10.0,
         "--clientd-timeout-seconds",
@@ -1766,6 +1977,10 @@ def start_group(
         extra_env = _parse_extra_env_list(env)
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--env") from exc
+    try:
+        parsed_extra_vllm_args = _parse_extra_vllm_args(extra_vllm_args)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--extra-vllm-args") from exc
     if lmcache is not None and lmcache <= 0:
         raise typer.BadParameter("--lmcache must be a positive integer", param_hint="--lmcache")
     if lmcache is not None and "LMCACHE_MAX_LOCAL_CPU_SIZE" in extra_env:
@@ -1781,6 +1996,7 @@ def start_group(
         "model": model,
         "block": True,
         "extra_env": extra_env,
+        "extra_vllm_args": parsed_extra_vllm_args,
     }
     if lmcache is not None:
         group_start_payload["lmcache"] = lmcache

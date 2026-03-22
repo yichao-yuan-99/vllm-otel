@@ -8,6 +8,7 @@ import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import shlex
 import signal
 import time
 from typing import Any
@@ -330,6 +331,51 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         return str(size_value)
 
+    def _optional_extra_vllm_args(self, payload: dict[str, Any], *, command_name: str) -> list[str]:
+        raw_value = payload.get("extra_vllm_args")
+        if raw_value is None:
+            return []
+
+        if isinstance(raw_value, str):
+            text = raw_value.strip()
+            if not text:
+                return []
+            try:
+                parsed = shlex.split(text)
+            except ValueError as exc:
+                raise ControlPlaneError(
+                    message=f"{command_name}.extra_vllm_args must be shell-parseable",
+                    code=236,
+                    http_status=400,
+                ) from exc
+            if not parsed:
+                return []
+            return parsed
+
+        if isinstance(raw_value, list):
+            parsed_list: list[str] = []
+            for item in raw_value:
+                if not isinstance(item, str):
+                    raise ControlPlaneError(
+                        message=f"{command_name}.extra_vllm_args list values must be strings",
+                        code=237,
+                        http_status=400,
+                    )
+                if not item.strip():
+                    raise ControlPlaneError(
+                        message=f"{command_name}.extra_vllm_args list values cannot be empty",
+                        code=238,
+                        http_status=400,
+                    )
+                parsed_list.append(item)
+            return parsed_list
+
+        raise ControlPlaneError(
+            message=f"{command_name}.extra_vllm_args must be a string or list of strings",
+            code=239,
+            http_status=400,
+        )
+
     def _start_command(self, payload: dict[str, Any]) -> CommandResult:
         port_profile = self._require_port_profile(payload, command_name="start")
         partition = payload.get("partition")
@@ -337,6 +383,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         block = payload.get("block", False)
         extra_env = self._optional_extra_env(payload, command_name="start")
         lmcache_size = self._optional_lmcache_size(payload, command_name="start")
+        extra_vllm_args = self._optional_extra_vllm_args(payload, command_name="start")
         if not isinstance(partition, str) or not partition:
             raise ControlPlaneError(
                 message="start requires 'partition'",
@@ -362,6 +409,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             block=block,
             extra_env=extra_env,
             lmcache_max_local_cpu_size=lmcache_size,
+            extra_vllm_args=extra_vllm_args,
         )
 
     def _stop_command(self, payload: dict[str, Any]) -> CommandResult:
@@ -383,6 +431,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         block = payload.get("block", True)
         extra_env = self._optional_extra_env(payload, command_name="group/start")
         lmcache_size = self._optional_lmcache_size(payload, command_name="group/start")
+        extra_vllm_args = self._optional_extra_vllm_args(payload, command_name="group/start")
         if not isinstance(partition, str) or not partition:
             raise ControlPlaneError(
                 message="group/start requires 'partition'",
@@ -409,6 +458,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             block=block,
             extra_env=extra_env,
             lmcache_max_local_cpu_size=lmcache_size,
+            extra_vllm_args=extra_vllm_args,
         )
 
     def _group_stop_command(self, payload: dict[str, Any]) -> CommandResult:
