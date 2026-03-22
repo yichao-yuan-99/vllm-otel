@@ -10,6 +10,20 @@ The extraction logic:
 3. use 10ms ticks (`tick_ms=10` by default) across the full run duration
 4. accumulate active prefill requests per tick to produce a concurrency series
 5. summarize min/max/avg prefill concurrency
+6. summarize contiguous interval lengths for each concurrency value (`0`, `1`, `2`, ...)
+
+Interval summary details:
+
+- `0` means no prefill is active at that tick
+- contiguous ticks with the same value are treated as one interval
+- for each value `x`, stats include:
+  - `interval_count`
+  - `avg/min/max/std` interval length in ticks
+  - `avg/min/max/std` interval length in seconds
+
+These are written to:
+
+- `prefill-concurrency-stats.json` under `concurrency_interval_length_stats`
 
 ## Script
 

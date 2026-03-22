@@ -277,6 +277,87 @@ def _build_prefill_concurrency_points(
     return points
 
 
+def _build_interval_length_stats(
+    interval_lengths_ticks: list[int],
+    *,
+    tick_s: float,
+) -> dict[str, int | float]:
+    if not interval_lengths_ticks:
+        return {
+            "interval_count": 0,
+            "avg_interval_length_ticks": 0.0,
+            "min_interval_length_ticks": 0,
+            "max_interval_length_ticks": 0,
+            "std_interval_length_ticks": 0.0,
+            "avg_interval_length_s": 0.0,
+            "min_interval_length_s": 0.0,
+            "max_interval_length_s": 0.0,
+            "std_interval_length_s": 0.0,
+        }
+
+    interval_count = len(interval_lengths_ticks)
+    avg_interval_length_ticks = sum(interval_lengths_ticks) / interval_count
+    variance_ticks = (
+        sum(
+            (interval_length_ticks - avg_interval_length_ticks) ** 2
+            for interval_length_ticks in interval_lengths_ticks
+        )
+        / interval_count
+    )
+    std_interval_length_ticks = math.sqrt(variance_ticks)
+    min_interval_length_ticks = min(interval_lengths_ticks)
+    max_interval_length_ticks = max(interval_lengths_ticks)
+
+    return {
+        "interval_count": interval_count,
+        "avg_interval_length_ticks": round(avg_interval_length_ticks, 6),
+        "min_interval_length_ticks": min_interval_length_ticks,
+        "max_interval_length_ticks": max_interval_length_ticks,
+        "std_interval_length_ticks": round(std_interval_length_ticks, 6),
+        "avg_interval_length_s": round(avg_interval_length_ticks * tick_s, 6),
+        "min_interval_length_s": round(min_interval_length_ticks * tick_s, 6),
+        "max_interval_length_s": round(max_interval_length_ticks * tick_s, 6),
+        "std_interval_length_s": round(std_interval_length_ticks * tick_s, 6),
+    }
+
+
+def _build_concurrency_interval_length_stats(
+    prefill_concurrency_points: list[dict[str, float | int]],
+    *,
+    tick_s: float,
+) -> dict[str, dict[str, int | float]]:
+    values = [
+        int(point["concurrency"])
+        for point in prefill_concurrency_points
+        if isinstance(point.get("concurrency"), int)
+    ]
+    if not values:
+        return {}
+
+    interval_lengths_by_concurrency: dict[int, list[int]] = {}
+    current_value = values[0]
+    current_interval_length = 1
+    for value in values[1:]:
+        if value == current_value:
+            current_interval_length += 1
+            continue
+        interval_lengths_by_concurrency.setdefault(current_value, []).append(
+            current_interval_length
+        )
+        current_value = value
+        current_interval_length = 1
+    interval_lengths_by_concurrency.setdefault(current_value, []).append(current_interval_length)
+
+    concurrency_interval_length_stats: dict[str, dict[str, int | float]] = {}
+    for concurrency in sorted(interval_lengths_by_concurrency):
+        interval_lengths_ticks = interval_lengths_by_concurrency[concurrency]
+        concurrency_interval_length_stats[str(concurrency)] = {
+            "concurrency": concurrency,
+            **_build_interval_length_stats(interval_lengths_ticks, tick_s=tick_s),
+        }
+    return concurrency_interval_length_stats
+
+
 def _build_prefill_concurrency_stats(
     prefill_concurrency_points: list[dict[str, float | int]],
 ) -> tuple[int, int, float]:
@@ -322,6 +403,10 @@ def extract_prefill_concurrency_from_run_dir(
         total_duration_s=total_duration_s,
         tick_s=tick_s,
     )
+    concurrency_interval_length_stats = _build_concurrency_interval_length_stats(
+        prefill_concurrency_points,
+        tick_s=tick_s,
+    )
     min_concurrency, max_concurrency, avg_concurrency = _build_prefill_concurrency_stats(
         prefill_concurrency_points
     )
@@ -358,6 +443,7 @@ def extract_prefill_concurrency_from_run_dir(
         "min_concurrency": min_concurrency,
         "max_concurrency": max_concurrency,
         "avg_concurrency": avg_concurrency,
+        "concurrency_interval_length_stats": concurrency_interval_length_stats,
     }
     return activities_payload, timeseries_payload, stats_payload
 

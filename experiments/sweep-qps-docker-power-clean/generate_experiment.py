@@ -32,7 +32,7 @@ DEFAULT_OUTPUT_CONFIG_DIR = (
     REPO_ROOT / "experiments" / "sweep-qps-docker-power-clean" / "generated"
 )
 DEFAULT_REPLAY_OUTPUT_ROOT = (
-    Path("results") / "replay" / "sweep-qps-docker-power-clean" / "split"
+    Path("results") / "replay" / "sweep-qps-docker-power-clean"
 )
 MODEL_CONFIG_PATH = REPO_ROOT / "configs" / "model_config.toml"
 
@@ -188,6 +188,22 @@ def path_for_config(path: Path) -> str:
         return str(path.resolve().relative_to(REPO_ROOT))
     except ValueError:
         return str(path.resolve())
+
+
+def derive_dataset_lineage_from_source_run_dir(source_run_dir: Path) -> Path:
+    try:
+        source_relative = source_run_dir.resolve().relative_to(RESULTS_ROOT.resolve())
+    except ValueError as exc:
+        raise ValueError("--source-run-dir must live under top-level results/") from exc
+
+    # Expected source lineage: results/<model>/<dataset...>/<run-dir>
+    if len(source_relative.parts) < 3:
+        raise ValueError(
+            "--source-run-dir under results/ must include at least "
+            "<model>/<dataset>/<run-dir>"
+        )
+    dataset_lineage_parts = source_relative.parts[1:-1]
+    return Path(*dataset_lineage_parts)
 
 
 def _load_target_model_specs() -> dict[str, TargetModelSpec]:
@@ -553,7 +569,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(DEFAULT_REPLAY_OUTPUT_ROOT),
         help=(
             "Replay output root. Default appends "
-            "<split>/<qps>/<timestamp> under results/replay/sweep-qps-docker-power-clean/split/."
+            "<dataset-lineage>/split/<split>/<qps>/<timestamp> under "
+            "results/replay/sweep-qps-docker-power-clean/. "
+            "dataset-lineage is inferred from --source-run-dir by dropping "
+            "the first (<model>) and last (<run-dir>) path segments."
         ),
     )
     return parser
@@ -605,6 +624,7 @@ def main(argv: list[str] | None = None) -> int:
             replay_output_root = (REPO_ROOT / replay_output_root).resolve()
         else:
             replay_output_root = replay_output_root.resolve()
+        source_dataset_lineage = derive_dataset_lineage_from_source_run_dir(source_run_dir)
 
         batch_timestamp = build_utc_timestamp_slug()
         batch_dir = (output_config_root / batch_timestamp).resolve()
@@ -632,7 +652,12 @@ def main(argv: list[str] | None = None) -> int:
         for qps in qps_values:
             qps_slug = format_qps_slug(qps)
             replay_output_dir = (
-                replay_output_root / split / qps_slug / batch_timestamp
+                replay_output_root
+                / source_dataset_lineage
+                / "split"
+                / split
+                / qps_slug
+                / batch_timestamp
             ).resolve()
             replay_payload = {
                 "plan": path_for_config(selected_plan_copy_path),
@@ -686,6 +711,7 @@ def main(argv: list[str] | None = None) -> int:
             "status": "ok",
             "batch_timestamp": batch_timestamp,
             "source_run_dir": str(source_run_dir),
+            "source_dataset_lineage": str(source_dataset_lineage),
             "target_model": target_model,
             "split": split,
             "split_two_group_metric": args.split_two_group_metric,

@@ -119,6 +119,44 @@ def test_extract_prefill_concurrency_from_llm_requests_payload(tmp_path: Path) -
     assert stats_payload["min_concurrency"] == 0
     assert stats_payload["max_concurrency"] == 2
     assert stats_payload["avg_concurrency"] == 1.0
+    assert stats_payload["concurrency_interval_length_stats"] == {
+        "0": {
+            "concurrency": 0,
+            "interval_count": 2,
+            "avg_interval_length_ticks": 1.0,
+            "min_interval_length_ticks": 1,
+            "max_interval_length_ticks": 1,
+            "std_interval_length_ticks": 0.0,
+            "avg_interval_length_s": 0.01,
+            "min_interval_length_s": 0.01,
+            "max_interval_length_s": 0.01,
+            "std_interval_length_s": 0.0,
+        },
+        "1": {
+            "concurrency": 1,
+            "interval_count": 1,
+            "avg_interval_length_ticks": 1.0,
+            "min_interval_length_ticks": 1,
+            "max_interval_length_ticks": 1,
+            "std_interval_length_ticks": 0.0,
+            "avg_interval_length_s": 0.01,
+            "min_interval_length_s": 0.01,
+            "max_interval_length_s": 0.01,
+            "std_interval_length_s": 0.0,
+        },
+        "2": {
+            "concurrency": 2,
+            "interval_count": 1,
+            "avg_interval_length_ticks": 2.0,
+            "min_interval_length_ticks": 2,
+            "max_interval_length_ticks": 2,
+            "std_interval_length_ticks": 0.0,
+            "avg_interval_length_s": 0.02,
+            "min_interval_length_s": 0.02,
+            "max_interval_length_s": 0.02,
+            "std_interval_length_s": 0.0,
+        },
+    }
 
 
 def test_extract_prefill_concurrency_handles_no_valid_prefill_activities(
@@ -156,6 +194,51 @@ def test_extract_prefill_concurrency_handles_no_valid_prefill_activities(
     assert stats_payload["min_concurrency"] == 0
     assert stats_payload["max_concurrency"] == 0
     assert stats_payload["avg_concurrency"] == 0.0
+    assert stats_payload["concurrency_interval_length_stats"] == {
+        "0": {
+            "concurrency": 0,
+            "interval_count": 1,
+            "avg_interval_length_ticks": 3.0,
+            "min_interval_length_ticks": 3,
+            "max_interval_length_ticks": 3,
+            "std_interval_length_ticks": 0.0,
+            "avg_interval_length_s": 0.03,
+            "min_interval_length_s": 0.03,
+            "max_interval_length_s": 0.03,
+            "std_interval_length_s": 0.0,
+        }
+    }
+
+
+def test_build_concurrency_interval_length_stats_computes_std() -> None:
+    points = [
+        {"concurrency": 0},
+        {"concurrency": 0},
+        {"concurrency": 1},
+        {"concurrency": 1},
+        {"concurrency": 1},
+        {"concurrency": 0},
+        {"concurrency": 2},
+        {"concurrency": 2},
+        {"concurrency": 0},
+        {"concurrency": 0},
+        {"concurrency": 0},
+    ]
+
+    stats = extract_run._build_concurrency_interval_length_stats(points, tick_s=0.1)
+
+    assert stats["0"] == {
+        "concurrency": 0,
+        "interval_count": 3,
+        "avg_interval_length_ticks": 2.0,
+        "min_interval_length_ticks": 1,
+        "max_interval_length_ticks": 3,
+        "std_interval_length_ticks": 0.816497,
+        "avg_interval_length_s": 0.2,
+        "min_interval_length_s": 0.1,
+        "max_interval_length_s": 0.3,
+        "std_interval_length_s": 0.08165,
+    }
 
 
 def test_discover_run_dirs_with_llm_requests_scans_recursively(tmp_path: Path) -> None:

@@ -16,7 +16,9 @@ Compared to `single-qps/local`:
 
 Default replay output layout:
 
-- `results/replay/sweep-qps-docker-power-clean/split/<split>/<qps>/<timestamp>/`
+- `results/replay/sweep-qps-docker-power-clean/<dataset>/<agent>/split/<split>/<qps>/<timestamp>/`
+  where `<dataset>/<agent>` is inferred from `--source-run-dir` by dropping
+  the first (`<model>`) and last (`<run-dir>`) path segments.
 
 ## Generate One Sweep Bundle
 

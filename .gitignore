@@ -49,4 +49,8 @@ tmp-replay-run*/
 tmp-concurrency-check*/
 *.replayed-*/
 
+analysis/gram-freq/output
+analysis/gram-freq-fine/output
+experiments/single-qps-sweep-freq-clean/local/generated/
+
 tmp/

@@ -78,6 +78,9 @@ Output includes:
 - total duration of the experiment (`total_duration_s`)
 - trial count (`trial_count`; alias: `trail_count`)
 - avg/min/max of trial durations (`trial_duration_stats_s`)
+- per-agent execution breakdown (`agent_time_breakdown_s`) with:
+  - per-agent `llm_time_s`, `non_llm_time_s`, `agent_total_time_s`
+  - aggregate sums and `avg/min/max/std` stats for each time bucket
 - per-trial list with:
   - `start_offset_s`
   - `end_offset_s`

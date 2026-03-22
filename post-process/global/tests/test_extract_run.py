@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -53,6 +54,9 @@ def test_extract_global_summary_from_replay_run(tmp_path: Path) -> None:
     assert payload["trial_duration_stats_s"]["min"] == 3.0
     assert payload["trial_duration_stats_s"]["max"] == 5.0
     assert payload["trial_duration_stats_s"]["avg"] == 4.0
+    assert payload["agent_time_breakdown_s"]["agent_count"] == 0
+    assert payload["agent_time_breakdown_s"]["llm_time_sum_s"] == 0.0
+    assert payload["agent_time_breakdown_s"]["non_llm_time_sum_s"] == 0.0
     assert payload["trials"][0]["trial_id"] == "trial-0001"
     assert payload["trials"][0]["start_offset_s"] == 1.0
     assert payload["trials"][0]["end_offset_s"] == 4.0
@@ -102,9 +106,182 @@ def test_extract_global_summary_from_con_driver_run(tmp_path: Path) -> None:
     assert result["trial_duration_stats_s"]["min"] == 2.0
     assert result["trial_duration_stats_s"]["max"] == 4.0
     assert result["trial_duration_stats_s"]["avg"] == 3.0
+    assert result["agent_time_breakdown_s"]["agent_count"] == 0
     assert result["trials"][0]["trial_id"] == "trial-0001"
     assert result["trials"][0]["start_offset_s"] == 1.0
     assert result["trials"][0]["end_offset_s"] == 3.0
+
+
+def test_extract_global_summary_includes_per_agent_llm_and_non_llm_time(tmp_path: Path) -> None:
+    run_dir = tmp_path / "job-replay"
+    replay_dir = run_dir / "replay"
+    replay_dir.mkdir(parents=True)
+
+    trial1_token = "token-trial-1"
+    trial2_token = "token-trial-2"
+    trial1_hash = hashlib.sha256(trial1_token.encode("utf-8")).hexdigest()
+    trial2_hash = hashlib.sha256(trial2_token.encode("utf-8")).hexdigest()
+
+    (replay_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "started_at": "2026-03-08T00:00:00.000Z",
+                "finished_at": "2026-03-08T00:00:30.000Z",
+                "worker_results": {
+                    "trial-0001": {
+                        "worker_id": "trial-0001",
+                        "api_token": trial1_token,
+                        "status": "completed",
+                        "started_at": "2026-03-08T00:00:01.000Z",
+                        "finished_at": "2026-03-08T00:00:11.000Z",
+                    },
+                    "trial-0002": {
+                        "worker_id": "trial-0002",
+                        "api_token": trial2_token,
+                        "status": "completed",
+                        "started_at": "2026-03-08T00:00:02.000Z",
+                        "finished_at": "2026-03-08T00:00:22.000Z",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    run1_dir = run_dir / "gateway-output" / "run_01"
+    run2_dir = run_dir / "gateway-output" / "run_02"
+    (run1_dir / "events").mkdir(parents=True)
+    (run1_dir / "requests").mkdir(parents=True)
+    (run2_dir / "events").mkdir(parents=True)
+    (run2_dir / "requests").mkdir(parents=True)
+
+    (run1_dir / "events" / "lifecycle.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "event_type": "job_start",
+                        "timestamp": "2026-03-08T00:00:00.000Z",
+                        "trace_id": "trace-1",
+                        "api_token_hash": trial1_hash,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "event_type": "agent_start",
+                        "timestamp": "2026-03-08T00:00:01.000Z",
+                        "trace_id": "trace-1",
+                        "api_token_hash": trial1_hash,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "event_type": "agent_end",
+                        "timestamp": "2026-03-08T00:00:11.000Z",
+                        "trace_id": "trace-1",
+                        "api_token_hash": trial1_hash,
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run1_dir / "requests" / "model_inference.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "request_start_time": "2026-03-08T00:00:02.000Z",
+                        "request_end_time": "2026-03-08T00:00:04.000Z",
+                        "request_duration_ms": 2000,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "request_start_time": "2026-03-08T00:00:05.000Z",
+                        "request_end_time": "2026-03-08T00:00:08.000Z",
+                        "request_duration_ms": 3000,
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    (run2_dir / "events" / "lifecycle.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "event_type": "job_start",
+                        "timestamp": "2026-03-08T00:00:00.000Z",
+                        "trace_id": "trace-2",
+                        "api_token_hash": trial2_hash,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "event_type": "agent_start",
+                        "timestamp": "2026-03-08T00:00:02.000Z",
+                        "trace_id": "trace-2",
+                        "api_token_hash": trial2_hash,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "event_type": "agent_end",
+                        "timestamp": "2026-03-08T00:00:22.000Z",
+                        "trace_id": "trace-2",
+                        "api_token_hash": trial2_hash,
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run2_dir / "requests" / "model_inference.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "request_start_time": "2026-03-08T00:00:03.000Z",
+                        "request_end_time": "2026-03-08T00:00:07.000Z",
+                        "request_duration_ms": 4000,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "request_start_time": "2026-03-08T00:00:08.000Z",
+                        "request_end_time": "2026-03-08T00:00:12.000Z",
+                        "request_duration_ms": 4000,
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = extract_run.extract_global_trial_summary_from_run_dir(run_dir)
+
+    breakdown = result["agent_time_breakdown_s"]
+    assert breakdown["agent_count"] == 2
+    assert breakdown["mapped_trial_count"] == 2
+    assert breakdown["llm_time_sum_s"] == 13.0
+    assert breakdown["non_llm_time_sum_s"] == 17.0
+    assert breakdown["agent_total_time_sum_s"] == 30.0
+
+    agent_entries = breakdown["agents"]
+    assert [entry["trial_id"] for entry in agent_entries] == ["trial-0001", "trial-0002"]
+    assert agent_entries[0]["llm_time_s"] == 5.0
+    assert agent_entries[0]["non_llm_time_s"] == 5.0
+    assert agent_entries[0]["agent_total_time_s"] == 10.0
+    assert agent_entries[1]["llm_time_s"] == 8.0
+    assert agent_entries[1]["non_llm_time_s"] == 12.0
+    assert agent_entries[1]["agent_total_time_s"] == 20.0
 
 
 def test_extract_global_summary_rejects_unknown_layout(tmp_path: Path) -> None:

@@ -12,6 +12,7 @@ outputs.
 - `split/duration`: context-usage percentile split tables for per-job duration/turn/token metrics
 - `vllm-metrics`: parse/extract/summarize vLLM Prometheus metrics
 - `power`: summarize GPU power traces and estimate total run energy
+- `power-sampling`: sample interpolated power at prefill-concurrency ticks
 - `gateway/llm-requests`: flatten and summarize gateway LLM request traces
 - `prefill-concurrency`: 10ms prefill-phase concurrency series from LLM request spans
 - `gateway/stack`: recover stacked per-second gateway token throughput from request ranges
@@ -30,6 +31,7 @@ outputs.
 - `post-process/split/duration/README.md`
 - `post-process/vllm-metrics/README.md`
 - `post-process/power/README.md`
+- `post-process/power-sampling/README.md`
 - `post-process/gateway/llm-requests/README.md`
 - `post-process/prefill-concurrency/README.md`
 - `post-process/gateway/stack/README.md`
@@ -78,15 +80,16 @@ Pipeline order:
 13. `vllm-metrics/extract_run.py`
 14. `vllm-metrics/summarize_timeseries.py`
 15. `power/extract_run.py`
-16. `visualization/job-throughput/generate_all_figures.py`
-17. `visualization/job-concurrency/generate_all_figures.py`
-18. `visualization/prefill-concurrency/generate_all_figures.py`
-19. `visualization/gateway-stack/generate_all_figures.py`
-20. `visualization/gateway-stack-context/generate_all_figures.py`
-21. `visualization/gateway-stack-kv/generate_all_figures.py`
-22. `visualization/vllm-metrics/generate_all_figures.py`
-23. `visualization/power/generate_all_figures.py`
-24. `global/aggregate_runs_csv.py` (root-dir mode only, skipped in dry-run)
+16. `power-sampling/extract_run.py`
+17. `visualization/job-throughput/generate_all_figures.py`
+18. `visualization/job-concurrency/generate_all_figures.py`
+19. `visualization/prefill-concurrency/generate_all_figures.py`
+20. `visualization/gateway-stack/generate_all_figures.py`
+21. `visualization/gateway-stack-context/generate_all_figures.py`
+22. `visualization/gateway-stack-kv/generate_all_figures.py`
+23. `visualization/vllm-metrics/generate_all_figures.py`
+24. `visualization/power/generate_all_figures.py`
+25. `global/aggregate_runs_csv.py` (root-dir mode only, skipped in dry-run)
 
 ### `global-progress`
 

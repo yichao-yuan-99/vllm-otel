@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
+import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -132,6 +134,298 @@ def _build_duration_stats(trials: list[dict[str, Any]]) -> dict[str, float | Non
     }
 
 
+def _build_numeric_stats(values: list[float]) -> dict[str, float | int | None]:
+    if not values:
+        return {
+            "sample_count": 0,
+            "avg": None,
+            "min": None,
+            "max": None,
+            "std": None,
+        }
+    avg = sum(values) / len(values)
+    variance = sum((value - avg) ** 2 for value in values) / len(values)
+    return {
+        "sample_count": len(values),
+        "avg": avg,
+        "min": min(values),
+        "max": max(values),
+        "std": math.sqrt(max(variance, 0.0)),
+    }
+
+
+def _hash_api_token(api_token: Any) -> str | None:
+    if not isinstance(api_token, str):
+        return None
+    if not api_token:
+        return None
+    return hashlib.sha256(api_token.encode("utf-8")).hexdigest()
+
+
+def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        payload = json.loads(stripped)
+        if isinstance(payload, dict):
+            records.append(payload)
+    return records
+
+
+def _request_within_cutoff(
+    record: dict[str, Any],
+    *,
+    cutoff_time_utc: datetime | None = None,
+) -> bool:
+    if cutoff_time_utc is None:
+        return True
+    request_start_time = parse_iso8601_to_utc(record.get("request_start_time"))
+    request_end_time = parse_iso8601_to_utc(record.get("request_end_time"))
+    if request_start_time is not None and request_start_time > cutoff_time_utc:
+        return False
+    if request_end_time is not None and request_end_time > cutoff_time_utc:
+        return False
+    return True
+
+
+def _request_duration_s(record: dict[str, Any]) -> float | None:
+    duration_ms = _float_or_none(record.get("request_duration_ms"))
+    if duration_ms is None:
+        duration_ms = _float_or_none(record.get("duration_ms"))
+    if duration_ms is not None and duration_ms >= 0:
+        return round(duration_ms / 1000.0, 6)
+
+    request_start_dt = _parse_iso8601(record.get("request_start_time"))
+    request_end_dt = _parse_iso8601(record.get("request_end_time"))
+    duration_s = _duration_seconds(request_start_dt, request_end_dt)
+    if duration_s is not None and duration_s >= 0:
+        return duration_s
+    return None
+
+
+def _profile_id_from_name(name: str) -> int | None:
+    prefix = "profile-"
+    if not name.startswith(prefix):
+        return None
+    raw = name[len(prefix) :]
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _discover_gateway_run_dirs(gateway_output_dir: Path) -> list[Path]:
+    run_dirs: list[Path] = []
+
+    for run_dir in sorted(gateway_output_dir.glob("run_*")):
+        if run_dir.is_dir():
+            run_dirs.append(run_dir)
+
+    for child in sorted(gateway_output_dir.iterdir()):
+        if not child.is_dir():
+            continue
+        if _profile_id_from_name(child.name) is None:
+            continue
+        for run_dir in sorted(child.glob("run_*")):
+            if run_dir.is_dir():
+                run_dirs.append(run_dir)
+
+    return run_dirs
+
+
+def _extract_gateway_agent_timing(
+    gateway_run_dir: Path,
+    *,
+    cutoff_time_utc: datetime | None = None,
+) -> dict[str, Any] | None:
+    lifecycle_path = gateway_run_dir / "events" / "lifecycle.jsonl"
+    requests_path = gateway_run_dir / "requests" / "model_inference.jsonl"
+    if not lifecycle_path.is_file() or not requests_path.is_file():
+        return None
+
+    lifecycle_records = _load_jsonl(lifecycle_path)
+    trace_id: str | None = None
+    api_token_hash: str | None = None
+    agent_start_dt: datetime | None = None
+    agent_end_dt: datetime | None = None
+    fallback_end_dt: datetime | None = None
+
+    for record in lifecycle_records:
+        if trace_id is None:
+            candidate_trace_id = record.get("trace_id")
+            if isinstance(candidate_trace_id, str) and candidate_trace_id:
+                trace_id = candidate_trace_id
+        if api_token_hash is None:
+            candidate_token_hash = record.get("api_token_hash")
+            if isinstance(candidate_token_hash, str) and candidate_token_hash:
+                api_token_hash = candidate_token_hash
+
+        event_time_raw = record.get("timestamp")
+        event_time = _parse_iso8601(event_time_raw)
+        if event_time is None:
+            continue
+        event_time_utc = parse_iso8601_to_utc(event_time_raw)
+        if cutoff_time_utc is not None and event_time_utc is not None and event_time_utc > cutoff_time_utc:
+            continue
+
+        event_type = record.get("event_type")
+        if event_type == "agent_start" and agent_start_dt is None:
+            agent_start_dt = event_time
+        elif event_type == "agent_end":
+            agent_end_dt = event_time
+        elif event_type == "job_end":
+            fallback_end_dt = event_time
+
+    if agent_end_dt is None:
+        agent_end_dt = fallback_end_dt
+
+    lifecycle_agent_duration_s = _duration_seconds(agent_start_dt, agent_end_dt)
+
+    llm_request_count = 0
+    llm_duration_s = 0.0
+    request_records = _load_jsonl(requests_path)
+    for record in request_records:
+        if not _request_within_cutoff(record, cutoff_time_utc=cutoff_time_utc):
+            continue
+        duration_s = _request_duration_s(record)
+        if duration_s is None:
+            continue
+        llm_request_count += 1
+        llm_duration_s += duration_s
+
+    return {
+        "gateway_run_id": gateway_run_dir.name,
+        "trace_id": trace_id,
+        "api_token_hash": api_token_hash,
+        "lifecycle_agent_duration_s": lifecycle_agent_duration_s,
+        "llm_duration_s": round(llm_duration_s, 6),
+        "llm_request_count": llm_request_count,
+    }
+
+
+def _build_agent_time_breakdown(
+    run_dir: Path,
+    *,
+    source_type: str,
+    trials: list[dict[str, Any]],
+    cutoff_time_utc: datetime | None = None,
+) -> dict[str, Any]:
+    trial_duration_by_id: dict[str, float] = {}
+    trial_id_by_api_hash: dict[str, str] = {}
+    for trial in trials:
+        trial_id = trial.get("trial_id")
+        if isinstance(trial_id, str) and trial_id:
+            duration_s = trial.get("duration_s")
+            if isinstance(duration_s, (int, float)):
+                trial_duration_by_id[trial_id] = float(duration_s)
+            api_token_hash = trial.get("api_token_hash")
+            if isinstance(api_token_hash, str) and api_token_hash:
+                trial_id_by_api_hash[api_token_hash] = trial_id
+
+    gateway_output_dir = run_dir / "gateway-output"
+    if not gateway_output_dir.is_dir():
+        return {
+            "source_gateway_output_dir": None,
+            "source_type": source_type,
+            "agent_count": 0,
+            "mapped_trial_count": 0,
+            "agent_total_time_sum_s": 0.0,
+            "llm_time_sum_s": 0.0,
+            "non_llm_time_sum_s": 0.0,
+            "agent_total_time_stats_s": _build_numeric_stats([]),
+            "llm_time_stats_s": _build_numeric_stats([]),
+            "non_llm_time_stats_s": _build_numeric_stats([]),
+            "agents": [],
+        }
+
+    agent_entries: list[dict[str, Any]] = []
+    for gateway_run_dir in _discover_gateway_run_dirs(gateway_output_dir):
+        timing = _extract_gateway_agent_timing(
+            gateway_run_dir,
+            cutoff_time_utc=cutoff_time_utc,
+        )
+        if timing is None:
+            continue
+
+        api_token_hash = timing.get("api_token_hash")
+        mapped_trial_id: str | None = None
+        if isinstance(api_token_hash, str) and api_token_hash:
+            mapped_trial_id = trial_id_by_api_hash.get(api_token_hash)
+
+        trial_duration_s: float | None = None
+        if isinstance(mapped_trial_id, str):
+            trial_duration_s = trial_duration_by_id.get(mapped_trial_id)
+
+        lifecycle_agent_duration_s = timing.get("lifecycle_agent_duration_s")
+        llm_duration_s = timing.get("llm_duration_s")
+        resolved_agent_total_s = (
+            trial_duration_s
+            if isinstance(trial_duration_s, (int, float))
+            else (lifecycle_agent_duration_s if isinstance(lifecycle_agent_duration_s, (int, float)) else None)
+        )
+        non_llm_duration_s: float | None = None
+        if isinstance(resolved_agent_total_s, (int, float)) and isinstance(llm_duration_s, (int, float)):
+            non_llm_duration_s = round(max(float(resolved_agent_total_s) - float(llm_duration_s), 0.0), 6)
+
+        agent_entries.append(
+            {
+                "trial_id": mapped_trial_id,
+                "gateway_run_id": timing.get("gateway_run_id"),
+                "trace_id": timing.get("trace_id"),
+                "api_token_hash": api_token_hash,
+                "trial_duration_s": trial_duration_s,
+                "lifecycle_agent_duration_s": lifecycle_agent_duration_s,
+                "agent_total_time_s": resolved_agent_total_s,
+                "llm_time_s": llm_duration_s,
+                "non_llm_time_s": non_llm_duration_s,
+                "llm_request_count": timing.get("llm_request_count"),
+            }
+        )
+
+    agent_entries.sort(
+        key=lambda entry: (
+            entry.get("trial_id") or "",
+            entry.get("gateway_run_id") or "",
+        )
+    )
+
+    total_values = [
+        float(entry["agent_total_time_s"])
+        for entry in agent_entries
+        if isinstance(entry.get("agent_total_time_s"), (int, float))
+    ]
+    llm_values = [
+        float(entry["llm_time_s"])
+        for entry in agent_entries
+        if isinstance(entry.get("llm_time_s"), (int, float))
+    ]
+    non_llm_values = [
+        float(entry["non_llm_time_s"])
+        for entry in agent_entries
+        if isinstance(entry.get("non_llm_time_s"), (int, float))
+    ]
+
+    return {
+        "source_gateway_output_dir": str(gateway_output_dir.resolve()),
+        "source_type": source_type,
+        "agent_count": len(agent_entries),
+        "mapped_trial_count": sum(
+            1 for entry in agent_entries if isinstance(entry.get("trial_id"), str) and entry.get("trial_id")
+        ),
+        "agent_total_time_sum_s": round(sum(total_values), 6),
+        "llm_time_sum_s": round(sum(llm_values), 6),
+        "non_llm_time_sum_s": round(sum(non_llm_values), 6),
+        "agent_total_time_stats_s": _build_numeric_stats(total_values),
+        "llm_time_stats_s": _build_numeric_stats(llm_values),
+        "non_llm_time_stats_s": _build_numeric_stats(non_llm_values),
+        "agents": agent_entries,
+    }
+
+
 def _build_replay_summary(
     run_dir: Path,
     *,
@@ -174,11 +468,13 @@ def _build_replay_summary(
         duration_s = _duration_seconds(start_dt, finish_dt)
         start_offset_s = _duration_seconds(experiment_start_dt, start_dt)
         end_offset_s = _duration_seconds(experiment_start_dt, finish_dt)
+        api_token_hash = _hash_api_token(worker_payload.get("api_token"))
 
         trials.append(
             {
                 "trial_id": resolved_trial_id,
                 "status": worker_payload.get("status"),
+                "api_token_hash": api_token_hash,
                 "started_at": started_at,
                 "finished_at": finished_at,
                 "start_offset_s": start_offset_s,
@@ -324,6 +620,12 @@ def extract_global_trial_summary_from_run_dir(run_dir: Path) -> dict[str, Any]:
 
     trials = base["trials"]
     trial_count = len(trials)
+    agent_time_breakdown = _build_agent_time_breakdown(
+        run_dir,
+        source_type=base["source_type"],
+        trials=trials,
+        cutoff_time_utc=cutoff_time_utc,
+    )
     return {
         "source_run_dir": str(run_dir.resolve()),
         "source_type": base["source_type"],
@@ -338,6 +640,7 @@ def extract_global_trial_summary_from_run_dir(run_dir: Path) -> dict[str, Any]:
         "trial_count": trial_count,
         "trail_count": trial_count,
         "trial_duration_stats_s": _build_duration_stats(trials),
+        "agent_time_breakdown_s": agent_time_breakdown,
         "trials": trials,
         "trails": trials,
     }

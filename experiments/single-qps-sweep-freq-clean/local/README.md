@@ -5,10 +5,12 @@ This workflow extends `experiments/single-qps/local` with GPU core clock sweepin
 For each frequency range in `--freq-list`, the generated `run_replay.sh` does:
 
 1. `set-gpu-core-freq` for `--gpu-id`
-2. starts `zeus-power-reader`
-3. runs replay once
-4. stops power reader
-5. `reset-gpu-core-freq`
+2. optionally `set-gpu-mem-freq` when `--mem-freq` is provided
+3. starts `zeus-power-reader`
+4. runs replay once
+5. stops power reader
+6. `reset-gpu-core-freq`
+7. optionally `reset-gpu-mem-freq` when `--mem-freq` is provided
 
 Power logs are written to a `power/` subdirectory inside each replay output directory.
 
@@ -24,9 +26,12 @@ Default replay output root is changed from:
 
 to:
 
-- `results/replay/single-qps-sweep-freq-clean/split/<split>/<qps>/<timestamp>/<freq-slug>/`
+- `results/replay/single-qps-sweep-freq-clean/<dataset>/<agent>/split/<split>/<qps>/<timestamp>/<freq-slug>/`
+  where `<dataset>/<agent>` is inferred from `--source-run-dir` by dropping
+  the first (`<model>`) and last (`<run-dir>`) path segments.
 
 Example `freq-slug`: `core-345-1305`.
+If `--mem-freq 5000` is used, slug becomes `core-345-1305-mem-5000`.
 
 ## Generate One Frequency-Sweep Experiment
 
@@ -42,6 +47,7 @@ python3 experiments/single-qps-sweep-freq-clean/local/generate_experiment.py \
   --split rest \
   --additional-suffix qwen3_fp8 \
   --freq-list "345:1305;345:1005;345:810;345:510" \
+  --mem-freq 5000 \
   --gpu-id 0
 ```
 
@@ -73,7 +79,9 @@ bash experiments/single-qps-sweep-freq-clean/local/generated/<timestamp>/run_rep
 Install local Zeus tools so the generated script can call:
 
 - `set-gpu-core-freq`
+- `set-gpu-mem-freq`
 - `reset-gpu-core-freq`
+- `reset-gpu-mem-freq`
 - `zeus-power-reader`
 
 ```bash

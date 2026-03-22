@@ -154,6 +154,7 @@ def _build_step_commands_for_run_dir(
         "vllm-metrics/extract_run.py",
         "vllm-metrics/summarize_timeseries.py",
         "power/extract_run.py",
+        "power-sampling/extract_run.py",
     ]
     if not skip_visualization:
         steps.extend(
@@ -207,6 +208,7 @@ def _build_step_commands_for_root_dir(
         "vllm-metrics/extract_run.py",
         "vllm-metrics/summarize_timeseries.py",
         "power/extract_run.py",
+        "power-sampling/extract_run.py",
     ]
     if not skip_visualization:
         steps.extend(

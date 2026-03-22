@@ -32,7 +32,7 @@ DEFAULT_OUTPUT_CONFIG_DIR = (
     REPO_ROOT / "experiments" / "single-qps-sweep-freq-clean" / "local" / "generated"
 )
 DEFAULT_REPLAY_OUTPUT_ROOT = (
-    Path("results") / "replay" / "single-qps-sweep-freq-clean" / "split"
+    Path("results") / "replay" / "single-qps-sweep-freq-clean"
 )
 MODEL_CONFIG_PATH = REPO_ROOT / "configs" / "model_config.toml"
 
@@ -128,11 +128,23 @@ def format_qps_slug(qps: float) -> str:
     return f"qps{text}"
 
 
-def format_frequency_slug(min_mhz: int, max_mhz: int) -> str:
-    return f"core-{min_mhz}-{max_mhz}"
+def format_frequency_slug(
+    min_mhz: int,
+    max_mhz: int,
+    *,
+    mem_freq_mhz: int | None = None,
+) -> str:
+    base = f"core-{min_mhz}-{max_mhz}"
+    if mem_freq_mhz is None:
+        return base
+    return f"{base}-mem-{mem_freq_mhz}"
 
 
-def parse_frequency_ranges(raw: str) -> list[FrequencyRange]:
+def parse_frequency_ranges(
+    raw: str,
+    *,
+    mem_freq_mhz: int | None = None,
+) -> list[FrequencyRange]:
     tokens = [token.strip() for token in raw.split(";")]
     if not tokens or any(not token for token in tokens):
         raise ValueError("--freq-list must be a non-empty ';' separated list like 345:1305;345:1005")
@@ -166,7 +178,11 @@ def parse_frequency_ranges(raw: str) -> list[FrequencyRange]:
             FrequencyRange(
                 min_mhz=min_mhz,
                 max_mhz=max_mhz,
-                slug=format_frequency_slug(min_mhz, max_mhz),
+                slug=format_frequency_slug(
+                    min_mhz,
+                    max_mhz,
+                    mem_freq_mhz=mem_freq_mhz,
+                ),
             )
         )
     return parsed_ranges
@@ -189,6 +205,22 @@ def path_for_config(path: Path) -> str:
         return str(path.resolve().relative_to(REPO_ROOT))
     except ValueError:
         return str(path.resolve())
+
+
+def derive_dataset_lineage_from_source_run_dir(source_run_dir: Path) -> Path:
+    try:
+        source_relative = source_run_dir.resolve().relative_to(RESULTS_ROOT.resolve())
+    except ValueError as exc:
+        raise ValueError("--source-run-dir must live under top-level results/") from exc
+
+    # Expected source lineage: results/<model>/<dataset...>/<run-dir>
+    if len(source_relative.parts) < 3:
+        raise ValueError(
+            "--source-run-dir under results/ must include at least "
+            "<model>/<dataset>/<run-dir>"
+        )
+    dataset_lineage_parts = source_relative.parts[1:-1]
+    return Path(*dataset_lineage_parts)
 
 
 def _load_target_model_specs() -> dict[str, TargetModelSpec]:
@@ -397,8 +429,11 @@ def write_run_script(
     split: str,
     qps: float,
     gpu_id: int,
+    mem_freq_mhz: int | None,
     frequency_jobs: list[FrequencyReplayJob],
 ) -> None:
+    mem_freq_value = "" if mem_freq_mhz is None else str(mem_freq_mhz)
+    mem_freq_display = mem_freq_value if mem_freq_value else "off"
     lines = [
         "#!/usr/bin/env bash",
         "set -euo pipefail",
@@ -408,14 +443,18 @@ def write_run_script(
         f"DEFAULT_PORT_PROFILE_ID={default_port_profile}",
         "PORT_PROFILE_ID_VALUE=\"${1:-${PORT_PROFILE_ID:-${DEFAULT_PORT_PROFILE_ID}}}\"",
         f"GPU_ID={gpu_id}",
+        f"MEM_FREQ_MHZ={_shell_quote(mem_freq_value)}",
         "PYTHON_BIN=\"${PYTHON_BIN:-python3}\"",
         "SET_GPU_CORE_FREQ_BIN=\"${SET_GPU_CORE_FREQ_BIN:-set-gpu-core-freq}\"",
+        "SET_GPU_MEM_FREQ_BIN=\"${SET_GPU_MEM_FREQ_BIN:-set-gpu-mem-freq}\"",
         "RESET_GPU_CORE_FREQ_BIN=\"${RESET_GPU_CORE_FREQ_BIN:-reset-gpu-core-freq}\"",
+        "RESET_GPU_MEM_FREQ_BIN=\"${RESET_GPU_MEM_FREQ_BIN:-reset-gpu-mem-freq}\"",
         "ZEUS_POWER_READER_BIN=\"${ZEUS_POWER_READER_BIN:-zeus-power-reader}\"",
         "ZEUSD_SOCKET_PATH_VALUE=\"${ZEUSD_SOCKET_PATH:-}\"",
         "",
         "POWER_READER_PID=\"\"",
         "GPU_FREQ_LOCK_ACTIVE=0",
+        "GPU_MEM_FREQ_LOCK_ACTIVE=0",
         "",
         "stop_power_reader() {",
         "  if [[ -n \"${POWER_READER_PID}\" ]]; then",
@@ -434,10 +473,20 @@ def write_run_script(
         "  fi",
         "}",
         "",
+        "reset_gpu_mem_if_needed() {",
+        "  if [[ \"${GPU_MEM_FREQ_LOCK_ACTIVE}\" -eq 1 ]]; then",
+        "    if ! \"${RESET_GPU_MEM_FREQ_BIN}\" --gpu-index \"${GPU_ID}\"; then",
+        "      echo \"[single-qps-sweep-freq-clean] warning: failed to reset GPU ${GPU_ID} memory clocks\" >&2",
+        "    fi",
+        "    GPU_MEM_FREQ_LOCK_ACTIVE=0",
+        "  fi",
+        "}",
+        "",
         "cleanup() {",
         "  local exit_code=\"$1\"",
         "  stop_power_reader",
         "  reset_gpu_core_if_needed",
+        "  reset_gpu_mem_if_needed",
         "  return \"${exit_code}\"",
         "}",
         "",
@@ -469,6 +518,10 @@ def write_run_script(
         "  echo \"[single-qps-sweep-freq-clean] freq=${min_mhz}:${max_mhz} slug=${freq_slug} output=${replay_output_ref} port_profile=${PORT_PROFILE_ID_VALUE}\"",
         "  \"${SET_GPU_CORE_FREQ_BIN}\" --gpu-index \"${GPU_ID}\" --min-mhz \"${min_mhz}\" --max-mhz \"${max_mhz}\"",
         "  GPU_FREQ_LOCK_ACTIVE=1",
+        "  if [[ -n \"${MEM_FREQ_MHZ}\" ]]; then",
+        "    \"${SET_GPU_MEM_FREQ_BIN}\" --gpu-index \"${GPU_ID}\" --min-mhz \"${MEM_FREQ_MHZ}\" --max-mhz \"${MEM_FREQ_MHZ}\"",
+        "    GPU_MEM_FREQ_LOCK_ACTIVE=1",
+        "  fi",
         "",
         "  mkdir -p \"${power_output_dir}\"",
         "  if [[ -n \"${ZEUSD_SOCKET_PATH_VALUE}\" ]]; then",
@@ -484,11 +537,12 @@ def write_run_script(
         "",
         "  stop_power_reader",
         "  reset_gpu_core_if_needed",
+        "  reset_gpu_mem_if_needed",
         "}",
         "",
         (
             f"echo \"[single-qps-sweep-freq-clean] target_model={target_model} split={split} "
-            f"qps={qps} gpu_id={gpu_id} freq_points={len(frequency_jobs)} "
+            f"qps={qps} gpu_id={gpu_id} mem_freq={mem_freq_display} freq_points={len(frequency_jobs)} "
             "port_profile=${PORT_PROFILE_ID_VALUE}\""
         ),
         "",
@@ -557,6 +611,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="GPU index targeted by set-gpu-core-freq/reset-gpu-core-freq.",
     )
     parser.add_argument(
+        "--mem-freq",
+        type=int,
+        default=None,
+        help=(
+            "Optional memory clock in MHz. When set, each replay run also locks "
+            "memory clocks via set-gpu-mem-freq and resets with reset-gpu-mem-freq. "
+            "Frequency slugs become core-<min>-<max>-mem-<mhz>."
+        ),
+    )
+    parser.add_argument(
         "--output-config-dir",
         default=str(DEFAULT_OUTPUT_CONFIG_DIR),
         help=f"Generated bundle root (default: {DEFAULT_OUTPUT_CONFIG_DIR}).",
@@ -574,8 +638,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(DEFAULT_REPLAY_OUTPUT_ROOT),
         help=(
             "Replay output root. Default appends "
-            "<split>/<qps>/<timestamp>/<freq-slug> under "
-            "results/replay/single-qps-sweep-freq-clean/split/."
+            "<dataset-lineage>/split/<split>/<qps>/<timestamp>/<freq-slug> under "
+            "results/replay/single-qps-sweep-freq-clean/. "
+            "dataset-lineage is inferred from --source-run-dir by dropping "
+            "the first (<model>) and last (<run-dir>) path segments."
         ),
     )
     return parser
@@ -619,7 +685,16 @@ def main(argv: list[str] | None = None) -> int:
             if args.additional_suffix is not None and str(args.additional_suffix).strip()
             else None
         )
-        frequency_ranges = parse_frequency_ranges(str(args.freq_list))
+        mem_freq_mhz: int | None = None
+        if args.mem_freq is not None:
+            mem_freq_mhz = int(args.mem_freq)
+            if mem_freq_mhz <= 0:
+                raise ValueError("--mem-freq must be > 0")
+
+        frequency_ranges = parse_frequency_ranges(
+            str(args.freq_list),
+            mem_freq_mhz=mem_freq_mhz,
+        )
         gpu_id = int(args.gpu_id)
 
         output_config_root = Path(args.output_config_dir).expanduser().resolve()
@@ -628,6 +703,7 @@ def main(argv: list[str] | None = None) -> int:
             replay_output_root = (REPO_ROOT / replay_output_root).resolve()
         else:
             replay_output_root = replay_output_root.resolve()
+        source_dataset_lineage = derive_dataset_lineage_from_source_run_dir(source_run_dir)
 
         batch_timestamp = build_utc_timestamp_slug()
         qps_slug = format_qps_slug(qps)
@@ -653,7 +729,12 @@ def main(argv: list[str] | None = None) -> int:
         shutil.copy2(lookup_result.selected_plan_path, selected_plan_copy_path)
 
         replay_output_base_dir = (
-            replay_output_root / split / qps_slug / batch_timestamp
+            replay_output_root
+            / source_dataset_lineage
+            / "split"
+            / split
+            / qps_slug
+            / batch_timestamp
         ).resolve()
 
         frequency_jobs: list[FrequencyReplayJob] = []
@@ -697,6 +778,7 @@ def main(argv: list[str] | None = None) -> int:
             split=split,
             qps=qps,
             gpu_id=gpu_id,
+            mem_freq_mhz=mem_freq_mhz,
             frequency_jobs=frequency_jobs,
         )
 
@@ -715,6 +797,7 @@ def main(argv: list[str] | None = None) -> int:
             "status": "ok",
             "batch_timestamp": batch_timestamp,
             "source_run_dir": str(source_run_dir),
+            "source_dataset_lineage": str(source_dataset_lineage),
             "target_model": target_model,
             "split": split,
             "split_two_group_metric": args.split_two_group_metric,
@@ -725,6 +808,7 @@ def main(argv: list[str] | None = None) -> int:
             "time_constraint_s": time_constraint_s,
             "port_profile": int(args.port_profile),
             "gpu_id": gpu_id,
+            "mem_freq": mem_freq_mhz,
             "freq_list": str(args.freq_list),
             "additional_suffix": additional_suffix,
             "output_config_root_dir": str(output_config_root),
