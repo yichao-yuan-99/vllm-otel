@@ -12,7 +12,7 @@ The server keeps cluster partition config, loads shared model definitions, submi
 - `servers/servers-amdhpc/pyproject.toml`: Python package/dependency setup.
 - `servers/servers-amdhpc/server_config.toml`: cluster/server settings and partition config.
 - `servers/servers-amdhpc/README.remote-host.md`: using `-r/--remote-host` to override SSH target.
-- `servers/servers-amdhpc/README.start-many.md`: vectorized single-profile starts (`start-many`).
+- `servers/servers-amdhpc/README.start-many.md`: server-backed multi-node vectorized starts (`start-many`).
 - `servers/servers-amdhpc/tests/test_live_multi_profile.py`: gated live integration test for concurrent profiles `5..9`.
 - `configs/model_config.toml`: shared model definitions used by the AMD HPC control plane.
 - `servers/servers-amdhpc/run/control_state.json`: active job state (auto-generated).
@@ -63,7 +63,7 @@ python3 servers/servers-amdhpc/client.py start -r amd-hpc -P 0 -p mi3008x -m kim
 python3 servers/servers-amdhpc/client.py start -r amd-hpc -P 0 -p mi3008x -m kimi_k2_5 -b
 python3 servers/servers-amdhpc/client.py start -r amd-hpc -P 0 -p mi3008x -m kimi_k2_5 --lmcache 100
 python3 servers/servers-amdhpc/client.py start -r amd-hpc -P 0 -p mi3008x -m kimi_k2_5 --extra-vllm-args "--enable-expert-parallel"
-python3 servers/servers-amdhpc/client.py start-many -r amd-hpc -L 0,1,2,3 -p mi3008x -m qwen3_coder_30b
+python3 servers/servers-amdhpc/client.py start-many -r amd-hpc -g bench_many_a -L 0,1,2,3 -p mi3008x -m qwen3_coder_30b
 python3 servers/servers-amdhpc/client.py start-group -r amd-hpc -g bench_a -L 0,1,2,3 -p mi3008x -m kimi_k2_5
 python3 servers/servers-amdhpc/client.py start-group -r amd-hpc -g bench_a -L 0,1,2,3 -p mi3008x -m kimi_k2_5 --lmcache 100
 python3 servers/servers-amdhpc/client.py start-group -r amd-hpc -g bench_a -L 0,1,2,3 -p mi3008x -m kimi_k2_5 --extra-vllm-args "--enable-expert-parallel"
@@ -82,7 +82,7 @@ python3 servers/servers-amdhpc/client.py stop-group -r amd-hpc -g bench_a
 `-r` / `--remote-host` is an alias for `--ssh-target` and is accepted by all client commands; see `servers/servers-amdhpc/README.remote-host.md`.
 Client default server URL is derived from the selected local tunnel record. By default the local control port is `23971 + <port_profile>` (for example: profile `0` -> `23971`, profile `1` -> `23972`).
 Client `start` now also launches a per-profile local gateway daemon in the background after services are up, and `stop` tears it down first.
-For vectorized independent starts across many profiles (one start job per profile), see `servers/servers-amdhpc/README.start-many.md`.
+For server-backed multi-node vectorized starts across many profiles (one grouped Slurm job; one node per profile), see `servers/servers-amdhpc/README.start-many.md`.
 
 ## Render sbatch only (no submit)
 

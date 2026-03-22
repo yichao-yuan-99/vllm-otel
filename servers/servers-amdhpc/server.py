@@ -78,6 +78,7 @@ class RequestHandler(BaseHTTPRequestHandler):
     POST_ROUTE_HANDLERS = {
         "/start": "_start_command",
         "/stop": "_stop_command",
+        "/many/start": "_many_start_command",
         "/group/start": "_group_start_command",
         "/group/stop": "_group_stop_command",
         "/group/status": "_group_status_command",
@@ -90,6 +91,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         "/status": "_status_command",
         "/command/start": "_start_command",
         "/command/stop": "_stop_command",
+        "/command/many/start": "_many_start_command",
         "/command/group/start": "_group_start_command",
         "/command/group/stop": "_group_stop_command",
         "/command/group/status": "_group_status_command",
@@ -451,6 +453,44 @@ class RequestHandler(BaseHTTPRequestHandler):
                 http_status=400,
             )
         return self.control_plane.start_group(
+            group_name=group_name,
+            port_profile_ids=profile_list,
+            partition=partition,
+            model=model,
+            block=block,
+            extra_env=extra_env,
+            lmcache_max_local_cpu_size=lmcache_size,
+            extra_vllm_args=extra_vllm_args,
+        )
+
+    def _many_start_command(self, payload: dict[str, Any]) -> CommandResult:
+        group_name = self._require_group_name(payload, command_name="many/start")
+        profile_list = self._require_profile_list(payload, command_name="many/start")
+        partition = payload.get("partition")
+        model = payload.get("model")
+        block = payload.get("block", True)
+        extra_env = self._optional_extra_env(payload, command_name="many/start")
+        lmcache_size = self._optional_lmcache_size(payload, command_name="many/start")
+        extra_vllm_args = self._optional_extra_vllm_args(payload, command_name="many/start")
+        if not isinstance(partition, str) or not partition:
+            raise ControlPlaneError(
+                message="many/start requires 'partition'",
+                code=240,
+                http_status=400,
+            )
+        if not isinstance(model, str) or not model:
+            raise ControlPlaneError(
+                message="many/start requires 'model'",
+                code=241,
+                http_status=400,
+            )
+        if not isinstance(block, bool):
+            raise ControlPlaneError(
+                message="many/start.block must be a boolean",
+                code=242,
+                http_status=400,
+            )
+        return self.control_plane.start_many(
             group_name=group_name,
             port_profile_ids=profile_list,
             partition=partition,

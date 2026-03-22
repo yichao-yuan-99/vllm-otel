@@ -1732,6 +1732,12 @@ def start(
 def start_many(
     ctx: typer.Context,
     ssh_target: str = _remote_host_option(),
+    group_name: str | None = typer.Option(
+        None,
+        "--group-name",
+        "-g",
+        help="Optional logical group name. Defaults to an auto-generated value.",
+    ),
     profile_list: str = typer.Option(
         ...,
         "--profile-list",
@@ -1744,7 +1750,7 @@ def start_many(
         False,
         "--block",
         "-b",
-        help="Block per profile until services are fully up before advancing.",
+        help="Compatibility flag; server-backed start-many currently always blocks until services are ready.",
     ),
     server_port: int = typer.Option(
         DEFAULT_SERVER_PORT,
@@ -1780,10 +1786,15 @@ def start_many(
     continue_on_error: bool = typer.Option(
         True,
         "--continue-on-error/--fail-fast",
-        help="Continue starting remaining profiles when one profile fails.",
+        help="Compatibility flag kept for CLI stability; ignored by server-backed start-many.",
+    ),
+    clientd_timeout_seconds: float = typer.Option(
+        10.0,
+        "--clientd-timeout-seconds",
+        help="Seconds to wait before forcing local gateway/client-d shutdown.",
     ),
 ) -> None:
-    """Vectorized start: run single-profile starts across a list of profiles."""
+    """Server-backed vectorized start: one multi-node sbatch, one profile per node."""
     try:
         profile_ids = _parse_profile_list(profile_list)
     except ValueError as exc:
@@ -1804,83 +1815,333 @@ def start_many(
             param_hint="--lmcache",
         )
 
-    total = len(profile_ids)
-    results: dict[str, dict[str, Any]] = {}
-    started_profile_ids: list[int] = []
-    failed_profile_ids: list[int] = []
-    attempted_profile_ids: list[int] = []
-
-    for index, profile_id in enumerate(profile_ids, start=1):
-        typer.echo(f"[start-many] ({index}/{total}) starting profile={profile_id}")
-        try:
-            payload = _start_single_profile_flow(
-                ctx,
-                ssh_target=ssh_target,
-                port_profile=profile_id,
-                partition=partition,
-                model=model,
-                block=block,
-                server_port=server_port,
-                ssh_option=ssh_option,
-                extra_env=extra_env,
-                lmcache=lmcache,
-                extra_vllm_args=parsed_extra_vllm_args,
-                progress_tag=f"start:p{profile_id}",
-            )
-        except KeyboardInterrupt:
-            _cleanup_after_start_interrupt(ctx, port_profile=profile_id)
-            raise typer.Exit(code=130)
-        except Exception as exc:  # noqa: BLE001
-            payload = {
-                "ok": False,
-                "code": 1,
-                "message": f"profile {profile_id} start failed with exception: {exc}",
-                "data": {"port_profile": profile_id},
-            }
-
-        attempted_profile_ids.append(profile_id)
-        results[str(profile_id)] = payload
-        if _is_ok(payload):
-            started_profile_ids.append(profile_id)
-            typer.echo(f"[start-many] profile={profile_id} ready")
-            continue
-
-        failed_profile_ids.append(profile_id)
+    if not continue_on_error:
         typer.echo(
-            f"[start-many] profile={profile_id} failed: {payload.get('message', 'start failed')}",
+            "[start-many] note: --fail-fast is ignored in server-backed start-many mode.",
             err=True,
         )
-        if not continue_on_error:
-            break
+    if not block:
+        typer.echo(
+            "[start-many] note: non-block mode is currently not supported for server-backed start-many; forcing --block.",
+            err=True,
+        )
+        block = True
 
-    pending_profile_ids = [profile_id for profile_id in profile_ids if profile_id not in attempted_profile_ids]
-    ok = not failed_profile_ids
-    summary = {
-        "ok": ok,
-        "code": 0 if ok else 1,
-        "message": (
-            f"started {len(started_profile_ids)} profiles"
-            if ok
-            else (
-                f"started {len(started_profile_ids)} profiles; "
-                f"failed {len(failed_profile_ids)}"
-            )
-        ),
-        "data": {
-            "partition": partition,
-            "model": model,
-            "profile_list": profile_ids,
-            "attempted_profile_ids": attempted_profile_ids,
-            "started_profile_ids": started_profile_ids,
-            "failed_profile_ids": failed_profile_ids,
-            "pending_profile_ids": pending_profile_ids,
-            "continue_on_error": bool(continue_on_error),
-            "results": results,
-        },
+    if group_name is None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        first_profile = profile_ids[0]
+        last_profile = profile_ids[-1]
+        effective_group_name = (
+            f"many-{timestamp}-n{len(profile_ids)}-p{first_profile}-{last_profile}"
+        )
+    else:
+        effective_group_name = group_name.strip()
+        if not effective_group_name:
+            raise typer.BadParameter("--group-name cannot be empty", param_hint="--group-name")
+
+    many_start_payload: dict[str, Any] = {
+        "group_name": effective_group_name,
+        "profile_list": profile_ids,
+        "partition": partition,
+        "model": model,
+        "block": bool(block),
+        "extra_env": extra_env,
+        "extra_vllm_args": list(parsed_extra_vllm_args),
     }
-    _print_json(summary)
-    if not ok:
+    if lmcache is not None:
+        many_start_payload["lmcache"] = lmcache
+
+    clientd_payloads: dict[str, dict[str, Any]] = {}
+    started_profiles: list[int] = []
+    for profile_id in profile_ids:
+        typer.echo(f"[start-many] starting client-d for profile={profile_id}")
+        payload = start_client_d(
+            ssh_target=ssh_target,
+            port_profile_id=profile_id,
+            runtime_dir=_clientd_runtime_dir(ctx),
+            remote_server_port=server_port,
+            ssh_options=ssh_option or None,
+        )
+        clientd_payloads[str(profile_id)] = payload
+        if _is_ok(payload):
+            started_profiles.append(profile_id)
+            typer.echo(f"[start-many] client-d ready for profile={profile_id}")
+            continue
+
+        cleanup_payloads, cleanup_failures = _stop_local_profile_daemons(
+            ctx,
+            profile_ids=started_profiles,
+            clientd_timeout_seconds=clientd_timeout_seconds,
+        )
+        _print_json(
+            {
+                "ok": False,
+                "code": int(payload.get("code", 1)),
+                "message": str(payload.get("message", "failed to start client-d for start-many")),
+                "data": {
+                    "group_name": effective_group_name,
+                    "profile_list": profile_ids,
+                    "failed_profile": profile_id,
+                    "clientd": clientd_payloads,
+                    "local_cleanup": {
+                        "failed_profiles": cleanup_failures,
+                        "results": cleanup_payloads,
+                    },
+                },
+            }
+        )
         raise typer.Exit(code=1)
+
+    preferred_control_profile = profile_ids[0]
+    try:
+        if block:
+            server_payload = _run_group_blocking_with_progress(
+                ctx,
+                endpoint="/many/start",
+                payload=many_start_payload,
+                progress_endpoint="/start/status",
+                progress_profiles=profile_ids,
+                progress_tag="start-many",
+                timeout_seconds=START_BLOCKING_TIMEOUT_SECONDS,
+                preferred_control_profile=preferred_control_profile,
+            )
+        else:
+            server_payload = _run_group_command_with_timeout(
+                ctx,
+                "/many/start",
+                payload=many_start_payload,
+                timeout_seconds=None,
+                preferred_control_profile=preferred_control_profile,
+            )
+    except KeyboardInterrupt:
+        cleanup_payloads, _ = _stop_local_profile_daemons(
+            ctx,
+            profile_ids=profile_ids,
+            clientd_timeout_seconds=clientd_timeout_seconds,
+        )
+        _print_json(
+            {
+                "ok": False,
+                "code": 130,
+                "message": "start-many interrupted",
+                "data": {
+                    "group_name": effective_group_name,
+                    "profile_list": profile_ids,
+                    "local_cleanup": cleanup_payloads,
+                },
+            }
+        )
+        raise typer.Exit(code=130)
+    except Exception as exc:  # noqa: BLE001
+        local_cleanup_payloads, cleanup_failures = _stop_local_profile_daemons(
+            ctx,
+            profile_ids=profile_ids,
+            clientd_timeout_seconds=clientd_timeout_seconds,
+        )
+        _print_json(
+            {
+                "ok": False,
+                "code": 1,
+                "message": f"failed to issue start-many command: {exc}",
+                "data": {
+                    "group_name": effective_group_name,
+                    "profile_list": profile_ids,
+                    "clientd": clientd_payloads,
+                    "local_cleanup": {
+                        "failed_profiles": cleanup_failures,
+                        "results": local_cleanup_payloads,
+                    },
+                },
+            }
+        )
+        raise typer.Exit(code=1)
+
+    if not _is_ok(server_payload):
+        try:
+            server_cleanup_payload = _run_group_command_with_timeout(
+                ctx,
+                "/group/stop",
+                payload={"group_name": effective_group_name, "block": True},
+                timeout_seconds=STOP_BLOCKING_TIMEOUT_SECONDS,
+                preferred_control_profile=preferred_control_profile,
+            )
+        except Exception as exc:  # noqa: BLE001
+            server_cleanup_payload = {
+                "ok": False,
+                "code": 1,
+                "message": f"failed to run grouped stop cleanup: {exc}",
+                "data": {"group_name": effective_group_name},
+            }
+
+        local_cleanup_payloads, cleanup_failures = _stop_local_profile_daemons(
+            ctx,
+            profile_ids=profile_ids,
+            clientd_timeout_seconds=clientd_timeout_seconds,
+        )
+        _print_json(
+            {
+                "ok": False,
+                "code": int(server_payload.get("code", 1)),
+                "message": str(server_payload.get("message", "start-many failed")),
+                "data": {
+                    "group_name": effective_group_name,
+                    "profile_list": profile_ids,
+                    "server_start": server_payload,
+                    "server_cleanup": server_cleanup_payload,
+                    "clientd": clientd_payloads,
+                    "local_cleanup": {
+                        "failed_profiles": cleanup_failures,
+                        "results": local_cleanup_payloads,
+                    },
+                },
+            }
+        )
+        raise typer.Exit(code=1)
+
+    wait_up_payloads: dict[str, dict[str, Any]] = {}
+    failed_wait_profiles: list[int] = []
+    if not block:
+        for profile_id in profile_ids:
+            typer.echo(f"[start-many] waiting for readiness profile={profile_id}")
+            wait_up_payload = _run_command_with_timeout(
+                ctx,
+                "/wait-up",
+                payload={
+                    "port_profile": profile_id,
+                    "timeout_seconds": GATEWAY_WAIT_UP_TIMEOUT_SECONDS,
+                    "poll_interval_seconds": GATEWAY_WAIT_UP_POLL_INTERVAL_SECONDS,
+                    "defer_timeout_until_running": True,
+                },
+                timeout_seconds=START_BLOCKING_TIMEOUT_SECONDS,
+            )
+            wait_up_payloads[str(profile_id)] = wait_up_payload
+            if _is_ok(wait_up_payload):
+                typer.echo(f"[start-many] profile={profile_id} reached readiness barrier")
+            else:
+                failed_wait_profiles.append(profile_id)
+
+    if failed_wait_profiles:
+        try:
+            server_cleanup_payload = _run_group_command_with_timeout(
+                ctx,
+                "/group/stop",
+                payload={"group_name": effective_group_name, "block": True},
+                timeout_seconds=STOP_BLOCKING_TIMEOUT_SECONDS,
+                preferred_control_profile=preferred_control_profile,
+            )
+        except Exception as exc:  # noqa: BLE001
+            server_cleanup_payload = {
+                "ok": False,
+                "code": 1,
+                "message": f"failed to run grouped stop cleanup after wait-up failure: {exc}",
+                "data": {"group_name": effective_group_name},
+            }
+
+        local_cleanup_payloads, cleanup_failures = _stop_local_profile_daemons(
+            ctx,
+            profile_ids=profile_ids,
+            clientd_timeout_seconds=clientd_timeout_seconds,
+        )
+        _print_json(
+            {
+                "ok": False,
+                "code": 1,
+                "message": "start-many failed while waiting for readiness barrier",
+                "data": {
+                    "group_name": effective_group_name,
+                    "profile_list": profile_ids,
+                    "failed_wait_profiles": failed_wait_profiles,
+                    "server_start": server_payload,
+                    "server_cleanup": server_cleanup_payload,
+                    "wait_up": wait_up_payloads,
+                    "clientd": clientd_payloads,
+                    "local_cleanup": {
+                        "failed_profiles": cleanup_failures,
+                        "results": local_cleanup_payloads,
+                    },
+                },
+            }
+        )
+        raise typer.Exit(code=1)
+
+    gateway_payloads: dict[str, dict[str, Any]] = {}
+    failed_gateway_profiles: list[int] = []
+    for profile_id in profile_ids:
+        typer.echo(f"[start-many] starting gateway for profile={profile_id}")
+        gateway_payload = start_gateway_daemon(
+            port_profile_id=profile_id,
+            runtime_dir=_clientd_runtime_dir(ctx),
+        )
+        gateway_payloads[str(profile_id)] = gateway_payload
+        if not _is_ok(gateway_payload):
+            failed_gateway_profiles.append(profile_id)
+        else:
+            typer.echo(f"[start-many] gateway ready for profile={profile_id}")
+
+    if failed_gateway_profiles:
+        try:
+            server_cleanup_payload = _run_group_command_with_timeout(
+                ctx,
+                "/group/stop",
+                payload={"group_name": effective_group_name, "block": True},
+                timeout_seconds=STOP_BLOCKING_TIMEOUT_SECONDS,
+                preferred_control_profile=preferred_control_profile,
+            )
+        except Exception as exc:  # noqa: BLE001
+            server_cleanup_payload = {
+                "ok": False,
+                "code": 1,
+                "message": f"failed to run grouped stop cleanup after gateway failure: {exc}",
+                "data": {"group_name": effective_group_name},
+            }
+
+        local_cleanup_payloads, cleanup_failures = _stop_local_profile_daemons(
+            ctx,
+            profile_ids=profile_ids,
+            clientd_timeout_seconds=clientd_timeout_seconds,
+        )
+        _print_json(
+            {
+                "ok": False,
+                "code": 1,
+                "message": "start-many failed while launching local gateways",
+                "data": {
+                    "group_name": effective_group_name,
+                    "profile_list": profile_ids,
+                    "failed_gateway_profiles": failed_gateway_profiles,
+                    "server_start": server_payload,
+                    "server_cleanup": server_cleanup_payload,
+                    "wait_up": wait_up_payloads,
+                    "clientd": clientd_payloads,
+                    "gateway": gateway_payloads,
+                    "local_cleanup": {
+                        "failed_profiles": cleanup_failures,
+                        "results": local_cleanup_payloads,
+                    },
+                },
+            }
+        )
+        raise typer.Exit(code=1)
+
+    _print_json(
+        {
+            "ok": True,
+            "code": 0,
+            "message": str(server_payload.get("message", "start-many services are up")),
+            "data": {
+                "group_name": effective_group_name,
+                "profile_list": profile_ids,
+                "blocked": bool(block),
+                "server": server_payload.get("data"),
+                "wait_up": {
+                    profile_id: payload.get("data")
+                    for profile_id, payload in wait_up_payloads.items()
+                },
+                "clientd": {key: value.get("data") for key, value in clientd_payloads.items()},
+                "gateway": {key: value.get("data") for key, value in gateway_payloads.items()},
+            },
+        }
+    )
 
 
 @app.command()
