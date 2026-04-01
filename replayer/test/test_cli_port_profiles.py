@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from replayer.cli import build_planned_request
+from replayer.cli import build_launch_policy_from_config
 from replayer.cli import cmd_compile
 from replayer.cli import cmd_replay
 from replayer.cli import discover_gateway_run_dirs
@@ -210,6 +211,28 @@ def test_parse_launch_policy_override_json_accepts_top_level_launch_policy() -> 
     }
 
 
+def test_build_launch_policy_from_config_supports_uniform_pattern() -> None:
+    launch_policy = build_launch_policy_from_config(
+        {
+            "run": {
+                "pattern": "uniform",
+                "pattern_args": ["--mean-interval-s", "5"],
+                "max_concurrent": 3,
+                "seed": 7,
+            }
+        }
+    )
+
+    assert launch_policy["max_concurrent"] == 3
+    assert launch_policy["seed"] == 7
+    assert launch_policy["pattern"] == {
+        "name": "uniform",
+        "rate_per_second": 0.2,
+        "mean_interval_s": 5.0,
+    }
+    assert launch_policy["pattern_args"] == {"mean-interval-s": "5"}
+
+
 def test_resolve_replay_launch_policy_accepts_json_overlay() -> None:
     (
         launch_strategy,
@@ -309,6 +332,40 @@ def test_resolve_replay_launch_policy_poisson_override_keeps_explicit_max_concur
     assert launch_pattern_name == "poisson"
     assert launch_pattern_rate_per_second == 2.0
     assert effective_launch_policy["max_concurrent"] == 3
+
+
+def test_resolve_replay_launch_policy_reads_uniform_rate_from_pattern_args() -> None:
+    (
+        _launch_strategy,
+        launch_max_concurrent,
+        launch_seed,
+        launch_pattern_name,
+        launch_pattern_rate_per_second,
+        next_launch_delay_s,
+        _overrides,
+        effective_launch_policy,
+    ) = resolve_replay_launch_policy(
+        launch_policy_payload={
+            "strategy": "config_ordered",
+            "max_concurrent": 5,
+            "pattern": {"name": "eager"},
+            "pattern_args": {},
+        },
+        launch_policy_override={
+            "seed": 11,
+            "pattern": {"name": "uniform"},
+            "pattern_args": {"rate": 2.0},
+        },
+    )
+
+    assert launch_max_concurrent is None
+    assert launch_seed == 11
+    assert launch_pattern_name == "uniform"
+    assert launch_pattern_rate_per_second == 2.0
+    assert "max_concurrent" not in effective_launch_policy
+    assert effective_launch_policy["pattern_args"] == {"rate": 2.0}
+    delay_samples = [next_launch_delay_s() for _ in range(10)]
+    assert delay_samples == [0.5] * 10
 
 
 def test_extract_response_text_rejects_reasoning_only_shape() -> None:
@@ -1313,6 +1370,54 @@ def test_cmd_compile_split_two_group_plans_uses_context_metric(
     ] == ["run_alpha", "profile-2/run_beta"]
 
 
+def test_cmd_compile_single_trail_writes_single_worker_plan_with_default_suffix(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    job_dir = tmp_path / "job"
+    _write_split_two_group_compile_job(job_dir)
+
+    exit_code = cmd_compile(
+        argparse.Namespace(
+            job_dir=str(job_dir),
+            port_profile_id=1,
+            single_trail="profile-2/run_beta",
+        )
+    )
+
+    assert exit_code == 0
+    summary = _load_last_json_from_output(capsys.readouterr().out)
+    plan_path = job_dir / "replay-plan.trail-profile-2_run_beta.json"
+    assert summary["single_trail"] == "profile-2/run_beta"
+    assert summary["plan_path"] == str(plan_path.resolve())
+    assert summary["worker_count"] == 1
+    assert summary["request_count"] == 0
+
+    plan_payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert len(plan_payload["workers"]) == 1
+    assert plan_payload["workers"][0]["source_trail_name"] == "profile-2/run_beta"
+    assert plan_payload["compile_options"]["single_trail"] == "profile-2/run_beta"
+
+
+def test_cmd_compile_single_trail_rejects_split_two_group_plans(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job"
+    _write_split_two_group_compile_job(job_dir)
+
+    with pytest.raises(
+        ValueError,
+        match="--single-trail cannot be combined with --split-two-group-plans",
+    ):
+        cmd_compile(
+            argparse.Namespace(
+                job_dir=str(job_dir),
+                port_profile_id=1,
+                single_trail="run_alpha",
+                split_two_group_plans=True,
+                split_two_group_metric="token_usage",
+            )
+        )
+
+
 def test_cmd_compile_clean_requires_split_two_group_plans(tmp_path: Path) -> None:
     job_dir = tmp_path / "job"
     _write_minimal_compile_job(job_dir)
@@ -1593,6 +1698,47 @@ def test_cmd_compile_reuses_existing_plan_when_compile_version_empty(
     summary = _load_last_json_from_output(capsys.readouterr().out)
     assert summary["reused_existing_plan"] is True
     assert summary["compile_version"] == REPLAY_PLAN_COMPILE_VERSION
+
+
+def test_cmd_compile_reuses_existing_plan_for_matching_single_trail(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    job_dir = tmp_path / "job"
+    job_dir.mkdir(parents=True)
+    plan_path = tmp_path / "replay-plan.trail-run_alpha.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "compile_version": REPLAY_PLAN_COMPILE_VERSION,
+                "backend": "harbor",
+                "launch_policy": {"strategy": "config_ordered"},
+                "workers": [{"requests": [{}]}],
+                "compile_options": {
+                    "exclude_unranked_trails": False,
+                    "clean": False,
+                    "single_trail": "run_alpha",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = cmd_compile(
+        argparse.Namespace(
+            job_dir=str(job_dir),
+            plan_out=str(plan_path),
+            port_profile_id=1,
+            single_trail="run_alpha",
+        )
+    )
+
+    assert exit_code == 0
+    summary = _load_last_json_from_output(capsys.readouterr().out)
+    assert summary["reused_existing_plan"] is True
+    assert summary["single_trail"] == "run_alpha"
+    assert summary["worker_count"] == 1
+    assert summary["request_count"] == 1
 
 
 def test_cmd_compile_recompiles_when_compile_version_mismatches(tmp_path: Path) -> None:
@@ -2495,6 +2641,149 @@ def test_cmd_replay_poisson_override_drops_plan_max_concurrent(
     assert summary["launch_pattern"] == "poisson"
     assert summary["launch_max_concurrent"] is None
     assert summary["launch_seed"] == 11
+    assert "max_concurrent" not in summary["effective_launch_policy"]
+
+
+def test_cmd_replay_uniform_override_drops_plan_max_concurrent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plan_path = tmp_path / "replay-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "replay_target": {
+                    "port_profile_id": "1",
+                    "api_base": "http://127.0.0.1:9999/v1",
+                    "gateway_url": "http://127.0.0.1:9999",
+                    "tokenize_endpoint": "http://127.0.0.1:9998/tokenize",
+                },
+                "launch_policy": {
+                    "strategy": "config_ordered",
+                    "max_concurrent": 1,
+                    "pattern": {"name": "eager"},
+                },
+                "workers": [
+                    {
+                        "worker_id": "worker-1",
+                        "launch_priority": 0,
+                        "delta_agent_start_s": 0.0,
+                        "delta_first_request_s": 0.0,
+                        "requests": [
+                            {
+                                "method": "POST",
+                                "path": "v1/chat/completions",
+                                "body": {
+                                    "model": "Test-Model",
+                                    "messages": [{"role": "user", "content": "marker-1"}],
+                                },
+                                "expected_response_text": "ok",
+                                "delta_agent_action_after_s": 0.0,
+                            }
+                        ],
+                    },
+                    {
+                        "worker_id": "worker-2",
+                        "launch_priority": 1,
+                        "delta_agent_start_s": 0.0,
+                        "delta_first_request_s": 0.0,
+                        "requests": [
+                            {
+                                "method": "POST",
+                                "path": "v1/chat/completions",
+                                "body": {
+                                    "model": "Test-Model",
+                                    "messages": [{"role": "user", "content": "marker-2"}],
+                                },
+                                "expected_response_text": "ok",
+                                "delta_agent_action_after_s": 0.0,
+                            }
+                        ],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "replay-output"
+    config_path = tmp_path / "replayer-config.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[replay]",
+                f'plan = "{plan_path}"',
+                f'output_dir = "{output_dir}"',
+                "num_tasks = 2",
+                "vllm_log_interval_s = 1.0",
+                "vllm_log_timeout_s = 5.0",
+                "",
+                "[replay.launch_policy_override]",
+                "seed = 11",
+                "",
+                "[replay.launch_policy_override.pattern]",
+                'name = "uniform"',
+                "",
+                "[replay.launch_policy_override.pattern_args]",
+                "rate = 100.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    observed_markers: list[str] = []
+
+    def fake_http_json(
+        *,
+        method: str,
+        url: str,
+        payload: object,
+        timeout_s: float | None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, object]:
+        del method, timeout_s, headers
+        if (
+            url.endswith("/job/start")
+            or url.endswith("/agent/start")
+            or url.endswith("/agent/end")
+            or url.endswith("/job/end")
+        ):
+            return 200, {}
+        assert isinstance(payload, dict)
+        messages = payload.get("messages")
+        assert isinstance(messages, list) and messages
+        first_message = messages[0]
+        assert isinstance(first_message, dict)
+        content = first_message.get("content")
+        assert isinstance(content, str)
+        observed_markers.append(content)
+        return 200, {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr("replayer.cli.http_json", fake_http_json)
+    monkeypatch.setattr("replayer.cli.sleep_with_stop", lambda stop_event, seconds: True)
+
+    exit_code = cmd_replay(
+        argparse.Namespace(
+            config=str(config_path),
+            plan=None,
+            output_dir=None,
+            num_tasks=None,
+            port_profile_id=1,
+            launch_policy_override_json=None,
+            vllm_log=None,
+            vllm_log_interval_s=None,
+            vllm_log_timeout_s=None,
+        )
+    )
+
+    assert exit_code == 0
+    assert observed_markers == ["marker-1", "marker-2"]
+
+    summary = json.loads((output_dir / "replay" / "summary.json").read_text(encoding="utf-8"))
+    assert summary["launch_pattern"] == "uniform"
+    assert summary["launch_max_concurrent"] is None
+    assert summary["launch_seed"] == 11
+    assert summary["launch_pattern_rate_per_second"] == 100.0
     assert "max_concurrent" not in summary["effective_launch_policy"]
 
 

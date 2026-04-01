@@ -78,6 +78,15 @@ python3 -m replayer compile \
   --plan-out "$RUN_DIR/replay-plan.json"
 ```
 
+Optional single-trail compile:
+
+```bash
+python3 -m replayer compile \
+  --job-dir "$RUN_DIR" \
+  --port-profile-id 0 \
+  --single-trail profile-2/run_beta
+```
+
 Important:
 
 - input is the full job directory, not only `gateway-output`

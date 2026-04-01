@@ -571,6 +571,17 @@ def extract_plan_compile_clean(plan_payload: dict[str, Any]) -> bool:
     return bool(compile_options.get("clean"))
 
 
+def extract_plan_compile_single_trail(plan_payload: dict[str, Any]) -> str | None:
+    compile_options = plan_payload.get("compile_options")
+    if not isinstance(compile_options, dict):
+        return None
+    single_trail = compile_options.get("single_trail")
+    if not isinstance(single_trail, str):
+        return None
+    stripped = single_trail.strip()
+    return stripped or None
+
+
 def extract_plan_replay_model(plan_payload: dict[str, Any]) -> str | None:
     replay_target = plan_payload.get("replay_target")
     if not isinstance(replay_target, dict):
@@ -775,6 +786,33 @@ def parse_pattern_args_tokens(tokens: Any) -> dict[str, str]:
     return args
 
 
+def _extract_rate_per_second_from_pattern_args(
+    pattern_args_payload: Any,
+    *,
+    pattern_label: str,
+) -> float | None:
+    if not isinstance(pattern_args_payload, dict):
+        return None
+
+    rate_keys = ("rate", "arrival-rate", "arrival_rate", "lambda")
+    for key in rate_keys:
+        rate_value = _coerce_pattern_arg_float(pattern_args_payload.get(key))
+        if rate_value is not None:
+            if rate_value <= 0:
+                raise ValueError(f"{pattern_label} rate must be > 0")
+            return rate_value
+
+    mean_keys = ("mean-interval-s", "mean_interval_s", "interval-s", "interval_s")
+    for key in mean_keys:
+        mean_value = _coerce_pattern_arg_float(pattern_args_payload.get(key))
+        if mean_value is not None:
+            if mean_value <= 0:
+                raise ValueError(f"{pattern_label} mean interval must be > 0")
+            return 1.0 / mean_value
+
+    return None
+
+
 def build_launch_policy_from_config(config: dict[str, Any]) -> dict[str, Any]:
     run_section = config.get("run")
     if not isinstance(run_section, dict):
@@ -799,41 +837,30 @@ def build_launch_policy_from_config(config: dict[str, Any]) -> dict[str, Any]:
 
     if pattern_name == "eager":
         pattern_payload: dict[str, Any] = {"name": "eager"}
-    elif pattern_name in {"poisson", "possion"}:
-        rate_value = (
-            pattern_args.get("rate")
-            or pattern_args.get("arrival-rate")
-            or pattern_args.get("arrival_rate")
-            or pattern_args.get("lambda")
+    elif pattern_name in {"poisson", "possion", "uniform"}:
+        normalized_pattern_name = (
+            "poisson" if pattern_name in {"poisson", "possion"} else "uniform"
         )
-        if rate_value is None:
-            mean_value = (
-                pattern_args.get("mean-interval-s")
-                or pattern_args.get("mean_interval_s")
-                or pattern_args.get("interval-s")
-                or pattern_args.get("interval_s")
+        pattern_label = (
+            "Poisson" if normalized_pattern_name == "poisson" else "Uniform"
+        )
+        rate_per_second = _extract_rate_per_second_from_pattern_args(
+            pattern_args,
+            pattern_label=pattern_label,
+        )
+        if rate_per_second is None:
+            raise ValueError(
+                f"{pattern_label} pattern requires one of: "
+                "--rate=<arrivals_per_second> or --mean-interval-s=<seconds>"
             )
-            if mean_value is None:
-                raise ValueError(
-                    "Poisson pattern requires one of: "
-                    "--rate=<arrivals_per_second> or --mean-interval-s=<seconds>"
-                )
-            mean_interval = float(mean_value)
-            if mean_interval <= 0:
-                raise ValueError("Poisson mean interval must be > 0")
-            rate_per_second = 1.0 / mean_interval
-        else:
-            rate_per_second = float(rate_value)
-            if rate_per_second <= 0:
-                raise ValueError("Poisson rate must be > 0")
         pattern_payload = {
-            "name": "poisson",
+            "name": normalized_pattern_name,
             "rate_per_second": rate_per_second,
             "mean_interval_s": 1.0 / rate_per_second,
         }
     else:
         raise ValueError(
-            f"Unsupported run.pattern={pattern_name!r}; supported: eager, poisson"
+            f"Unsupported run.pattern={pattern_name!r}; supported: eager, poisson, uniform"
         )
 
     return {
@@ -1024,6 +1051,7 @@ def _build_job_root_child_compile_command(
     port_profile_id: int,
     request_timeout_s: float | None,
     model_override: str | None,
+    single_trail: str | None,
     split_two_group_plans: bool,
     split_two_group_metric: str,
     exclude_unranked_trails: bool,
@@ -1043,6 +1071,8 @@ def _build_job_root_child_compile_command(
         command.extend(["--request-timeout-s", str(request_timeout_s)])
     if model_override is not None:
         command.extend(["--model", model_override])
+    if single_trail is not None:
+        command.extend(["--single-trail", single_trail])
     if split_two_group_plans:
         command.append("--split-two-group-plans")
         command.extend(["--split-two-group-metric", split_two_group_metric])
@@ -1059,6 +1089,7 @@ def _run_job_root_child_compile(
     port_profile_id: int,
     request_timeout_s: float | None,
     model_override: str | None,
+    single_trail: str | None,
     split_two_group_plans: bool,
     split_two_group_metric: str,
     exclude_unranked_trails: bool,
@@ -1069,6 +1100,7 @@ def _run_job_root_child_compile(
         port_profile_id=port_profile_id,
         request_timeout_s=request_timeout_s,
         model_override=model_override,
+        single_trail=single_trail,
         split_two_group_plans=split_two_group_plans,
         split_two_group_metric=split_two_group_metric,
         exclude_unranked_trails=exclude_unranked_trails,
@@ -1862,6 +1894,15 @@ def cmd_compile(args: argparse.Namespace) -> int:
         if compile_model_override_value is not None
         else None
     )
+    single_trail_value = parse_optional_str(
+        (
+            args.single_trail
+            if getattr(args, "single_trail", None) is not None
+            else compile_config.get("single_trail")
+        ),
+        field_name="single_trail",
+    )
+    single_trail = single_trail_value.strip() if single_trail_value is not None else None
     compile_model_override_key: str | None = None
     compile_model_override_resolved: str | None = None
     if compile_model_override is not None:
@@ -1938,6 +1979,8 @@ def cmd_compile(args: argparse.Namespace) -> int:
             "--exclude-unranked-trails cannot be combined with "
             "--split-two-group-plans"
         )
+    if single_trail is not None and split_two_group_plans:
+        raise ValueError("--single-trail cannot be combined with --split-two-group-plans")
     if compile_clean and not split_two_group_plans:
         raise ValueError("--clean can only be combined with --split-two-group-plans")
     if split_two_group_plans and not split_two_group_metric_explicit:
@@ -1987,6 +2030,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
                         port_profile_id=compile_port_profile_id,
                         request_timeout_s=request_timeout_s_override,
                         model_override=compile_model_override,
+                        single_trail=single_trail,
                         split_two_group_plans=split_two_group_plans,
                         split_two_group_metric=split_two_group_metric,
                         exclude_unranked_trails=exclude_unranked_trails,
@@ -2040,6 +2084,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
             "model_override": compile_model_override,
             "model_override_key": compile_model_override_key,
             "model_override_resolved": compile_model_override_resolved,
+            "single_trail": single_trail,
             "split_two_group_plans": split_two_group_plans,
             "exclude_unranked_trails": exclude_unranked_trails,
             "clean": compile_clean,
@@ -2071,6 +2116,11 @@ def cmd_compile(args: argparse.Namespace) -> int:
             )
         else:
             plan_path = default_plan_path
+        if single_trail is not None:
+            plan_path = with_plan_name_suffix(
+                plan_path,
+                f"trail-{safe_name(single_trail)}",
+            )
 
     if compile_clean:
         plan_path = with_plan_name_suffix(plan_path, COMPILE_CLEAN_PLAN_SUFFIX)
@@ -2126,6 +2176,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
         existing_exclude_unranked = False
         existing_model_override: str | None = None
         existing_clean = False
+        existing_single_trail: str | None = None
         if existing_plan_payload is not None:
             existing_compile_options = existing_plan_payload.get("compile_options")
             if isinstance(existing_compile_options, dict):
@@ -2136,11 +2187,15 @@ def cmd_compile(args: argparse.Namespace) -> int:
                 existing_plan_payload
             )
             existing_clean = extract_plan_compile_clean(existing_plan_payload)
+            existing_single_trail = extract_plan_compile_single_trail(
+                existing_plan_payload
+            )
         if (
             existing_plan_payload is not None
             and is_replay_plan_compile_version_current(existing_plan_payload)
             and existing_exclude_unranked == exclude_unranked_trails
             and existing_clean == compile_clean
+            and existing_single_trail == single_trail
             and existing_model_override == compile_model_override_resolved
             and (
                 compile_model_override_resolved is None
@@ -2168,6 +2223,8 @@ def cmd_compile(args: argparse.Namespace) -> int:
                 "exclude_unranked_trails": exclude_unranked_trails,
                 "clean": compile_clean,
             }
+            if single_trail is not None:
+                summary["single_trail"] = single_trail
             if compile_model_override is not None:
                 summary["model_override"] = compile_model_override
                 summary["model_override_key"] = compile_model_override_key
@@ -2493,6 +2550,27 @@ def cmd_compile(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
 
+    if single_trail is not None:
+        selected_run_infos = [
+            run_info for run_info in run_infos if run_info[4] == single_trail
+        ]
+        if not selected_run_infos:
+            if single_trail in excluded_unranked_trails:
+                raise ValueError(
+                    f"--single-trail {single_trail!r} was excluded by "
+                    "--exclude-unranked-trails"
+                )
+            available_trails = sorted({run_info[4] for run_info in run_infos})
+            available_preview = ", ".join(available_trails[:20]) if available_trails else "<none>"
+            if len(available_trails) > 20:
+                available_preview += f", ... ({len(available_trails)} total)"
+            raise ValueError(
+                f"--single-trail {single_trail!r} did not match any discovered trail. "
+                f"Available trails: {available_preview}"
+            )
+        run_infos = selected_run_infos
+        total_requests = sum(run_info[2] for run_info in run_infos)
+
     worker_plans: list[dict[str, Any]] = []
     cleaned_499_request_count = 0
     cleaned_499_count_by_trail: dict[str, int] = {}
@@ -2735,6 +2813,8 @@ def cmd_compile(args: argparse.Namespace) -> int:
                 "clean": compile_clean,
             },
         }
+        if single_trail is not None:
+            payload["compile_options"]["single_trail"] = single_trail
         if compile_clean:
             payload["compile_options"]["clean_removed_499_request_count"] = (
                 cleaned_499_request_count
@@ -2787,6 +2867,8 @@ def cmd_compile(args: argparse.Namespace) -> int:
             "clean": compile_clean,
             "model": configured_model,
         }
+        if single_trail is not None:
+            summary["single_trail"] = single_trail
         if compile_clean:
             summary["clean_removed_499_request_count"] = cleaned_499_request_count
         if compile_model_override is not None:
@@ -3206,7 +3288,7 @@ def _normalize_launch_pattern_name(value: Any) -> str:
     return "eager"
 
 
-def _launch_policy_override_selects_poisson(
+def _launch_policy_override_selects_uncapped_arrival_pattern(
     launch_policy_override: dict[str, Any] | None,
 ) -> bool:
     if not isinstance(launch_policy_override, dict):
@@ -3217,6 +3299,7 @@ def _launch_policy_override_selects_poisson(
     return _normalize_launch_pattern_name(pattern_payload.get("name")) in {
         "poisson",
         "possion",
+        "uniform",
     }
 
 
@@ -3241,31 +3324,34 @@ def _coerce_pattern_arg_float(value: Any) -> float | None:
     return None
 
 
-def _extract_poisson_rate_per_second(
+def _extract_launch_pattern_rate_per_second(
     pattern_payload: dict[str, Any],
     pattern_args_payload: Any,
+    *,
+    pattern_label: str,
 ) -> float | None:
     direct_rate = _coerce_pattern_arg_float(pattern_payload.get("rate_per_second"))
     if direct_rate is not None:
+        if direct_rate <= 0:
+            raise ValueError(
+                f"{pattern_label} replay launch pattern rate_per_second must be > 0"
+            )
         return direct_rate
 
-    if not isinstance(pattern_args_payload, dict):
-        return None
+    direct_mean_interval = _coerce_pattern_arg_float(
+        pattern_payload.get("mean_interval_s")
+    )
+    if direct_mean_interval is not None:
+        if direct_mean_interval <= 0:
+            raise ValueError(
+                f"{pattern_label} replay launch pattern mean interval must be > 0"
+            )
+        return 1.0 / direct_mean_interval
 
-    rate_keys = ("rate", "arrival-rate", "arrival_rate", "lambda")
-    for key in rate_keys:
-        rate_value = _coerce_pattern_arg_float(pattern_args_payload.get(key))
-        if rate_value is not None:
-            return rate_value
-
-    mean_keys = ("mean-interval-s", "mean_interval_s", "interval-s", "interval_s")
-    for key in mean_keys:
-        mean_value = _coerce_pattern_arg_float(pattern_args_payload.get(key))
-        if mean_value is not None:
-            if mean_value <= 0:
-                raise ValueError("Replay launch pattern mean interval must be > 0")
-            return 1.0 / mean_value
-    return None
+    return _extract_rate_per_second_from_pattern_args(
+        pattern_args_payload,
+        pattern_label=pattern_label,
+    )
 
 
 def merge_dict_overlay(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -3361,14 +3447,19 @@ def resolve_replay_launch_policy(
     pattern_name = _normalize_launch_pattern_name(pattern_payload.get("name"))
     launch_pattern_name = pattern_name
 
-    override_selects_poisson = _launch_policy_override_selects_poisson(
-        launch_policy_override,
+    override_selects_uncapped_arrival_pattern = (
+        _launch_policy_override_selects_uncapped_arrival_pattern(
+            launch_policy_override,
+        )
     )
     override_declares_max_concurrent = (
         isinstance(launch_policy_override, dict)
         and "max_concurrent" in launch_policy_override
     )
-    if override_selects_poisson and not override_declares_max_concurrent:
+    if (
+        override_selects_uncapped_arrival_pattern
+        and not override_declares_max_concurrent
+    ):
         launch_max_concurrent: int | None = None
         effective_launch_policy.pop("max_concurrent", None)
     else:
@@ -3381,28 +3472,36 @@ def resolve_replay_launch_policy(
     launch_pattern_rate_per_second: float | None = None
     if pattern_name == "eager":
         next_launch_delay_s = lambda: 0.0
-    elif pattern_name in {"poisson", "possion"}:
-        rate_value = _extract_poisson_rate_per_second(
+    elif pattern_name in {"poisson", "possion", "uniform"}:
+        normalized_pattern_name = (
+            "poisson" if pattern_name in {"poisson", "possion"} else "uniform"
+        )
+        pattern_label = (
+            "Poisson" if normalized_pattern_name == "poisson" else "Uniform"
+        )
+        rate_value = _extract_launch_pattern_rate_per_second(
             pattern_payload,
             effective_launch_policy.get("pattern_args"),
+            pattern_label=pattern_label,
         )
         if rate_value is None:
             raise ValueError(
-                "Poisson replay launch pattern requires rate_per_second; "
+                f"{pattern_label} replay launch pattern requires rate_per_second; "
                 "set it in launch_policy.pattern.rate_per_second or launch_policy.pattern_args"
             )
         rate_per_second = rate_value
         if rate_per_second <= 0:
             raise ValueError("Replay launch pattern rate_per_second must be > 0")
         launch_pattern_rate_per_second = rate_per_second
-
-        def _next_poisson_delay() -> float:
-            return rng.expovariate(rate_per_second)
-
-        next_launch_delay_s = _next_poisson_delay
+        launch_pattern_name = normalized_pattern_name
+        if normalized_pattern_name == "poisson":
+            next_launch_delay_s = lambda: rng.expovariate(rate_per_second)
+        else:
+            fixed_interval_s = 1.0 / rate_per_second
+            next_launch_delay_s = lambda: fixed_interval_s
     else:
         raise ValueError(
-            f"Unsupported replay launch pattern {pattern_name!r}; supported: eager, poisson"
+            f"Unsupported replay launch pattern {pattern_name!r}; supported: eager, poisson, uniform"
         )
 
     overrides = launch_policy_override
@@ -4449,7 +4548,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Output path for replay plan. Default: <job-dir>/replay-plan.json "
             "(or <job-dir>/replay-plan.exclude-unranked.json when "
-            "--exclude-unranked-trails is set)."
+            "--exclude-unranked-trails is set, or "
+            "<job-dir>/replay-plan.trail-<safe-trail>.json when "
+            "--single-trail is set)."
         ),
     )
     compile_parser.add_argument(
@@ -4478,6 +4579,16 @@ def build_parser() -> argparse.ArgumentParser:
             "Must match a name configured in configs/model_config.toml "
             "(model key, served_model_name, or vllm_model_name). "
             "When set, compile rewrites replay_target.model and each request body model."
+        ),
+    )
+    compile_parser.add_argument(
+        "--single-trail",
+        default=None,
+        help=(
+            "Non-split mode only. Compile only the specified source trail name "
+            "(for example run_alpha or profile-2/run_beta). Unless --plan-out is "
+            "set, the default output becomes "
+            "<job-dir>/replay-plan.trail-<safe-trail>.json."
         ),
     )
     compile_parser.add_argument(

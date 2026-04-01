@@ -3,4 +3,4 @@ description = "Docker image settings for the local vLLM + Jaeger stack."
 
 [images]
 jaeger = "jaegertracing/all-in-one:1.57"
-vllm = "yichaoyuan/vllm-openai-otel-lp:v0.14.0-otel-lp"
+vllm = "yichaoyuan/vllm-vllm-openai:v0.14.0-otel-lp-lmcache"

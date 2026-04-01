@@ -32,15 +32,7 @@ sbatch-orchestrator/logs/
 tests/output/
 experiments/results/
 results/
-experiments/sweep-qps-local/single/generated/
-experiments/sweep-qps-local/split/generated/
-experiments/sweep-qps-local/group/split/generated/
-experiments/sweep-qps-local/exclude-unranked/generated/
-experiments/sweep-qps/generated/
-experiments/single-qps/local/generated/
-experiments/single-qps-sweep-freq/local/generated/
-experiments/sweep-qps-docker-power-clean/generated/
-experiments/sweep-qps-docker-power/generated/
+experiments/**/generated/
 con-driver/.cache/
 con-driver-test*/
 gateway-output/
@@ -51,6 +43,5 @@ tmp-concurrency-check*/
 
 analysis/gram-freq/output
 analysis/gram-freq-fine/output
-experiments/single-qps-sweep-freq-clean/local/generated/
 
 tmp/

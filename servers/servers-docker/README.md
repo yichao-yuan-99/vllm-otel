@@ -45,6 +45,8 @@ Start one environment:
 
 ```bash
 python3 servers/servers-docker/client.py start -m qwen3_coder_30b -p 0 -l h100_nvl_gpu23 -b
+python3 servers/servers-docker/client.py start -m qwen3_coder_30b -p 0 -l h100_nvl_gpu23 --lmcache 100 -b
+python3 servers/servers-docker/client.py start -m qwen3_coder_30b_fp8 -p 2 -l h100_nvl_gpu2_single --gpu-memory-utilization 0.75 -b
 ```
 
 Runtime names are suffixed with `<model>-<launch-profile>` (from `-m` and `-l`),
@@ -60,6 +62,13 @@ Gateway is started automatically for the selected `-p` port profile and stopped 
 
 GPU selection from the launch profile is enforced through Docker Compose GPU
 `device_ids`, not only by `NVIDIA_VISIBLE_DEVICES`.
+Optional `--lmcache <size>` mirrors the AMD HPC client behavior: it sets
+`LMCACHE_MAX_LOCAL_CPU_SIZE=<size>` and appends
+`--kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'`
+to the vLLM startup args.
+Optional `--gpu-memory-utilization <value>` (`0 < value <= 1`) appends
+`--gpu-memory-utilization <value>` to the vLLM startup args and overrides any
+model-config value for that same flag.
 
 Change the Docker tags in `servers/servers-docker/service_images.toml` if you need a different Jaeger or vLLM image.
 
@@ -114,6 +123,8 @@ curl http://localhost:18171/healthz
 ```
 
 Use ports from your selected port profile if changed.
+When `--lmcache` is enabled, LMCache metrics are exposed on the selected
+profile's `lmcache_port` from `configs/port_profiles.toml`.
 
 If you change the launch profile GPU selection, restart the environment so the
 generated Docker Compose GPU override is re-materialized and applied.
@@ -141,6 +152,9 @@ curl -s "http://localhost:11451/v1/chat/completions" \
 Prompt token details are enabled in the vLLM container (`--enable-prompt-tokens-details`).
 Custom logits processor loading is enabled via `VLLM_LOGITS_PROCESSORS` (default: `forceSeq.force_sequence_logits_processor:ForceSequenceAdapter`).
 Model `extra_args` from `configs/model_config.toml` are forwarded into the Docker vLLM launch command automatically.
+Docker startup always injects `LMCACHE_INTERNAL_API_SERVER_ENABLED=1`,
+`LMCACHE_INTERNAL_API_SERVER_PORT_START=<profile.lmcache_port>`, and
+`PYTHONHASHSEED=0` into the vLLM container env.
 The force-sequence processor only activates for requests that include `vllm_xargs.forced_token_ids`.
 At vLLM startup, `servers/docker/vllm_entrypoint.sh` resolves `eos_token_id` from `VLLM_MODEL_NAME` and exports `VLLM_FORCE_SEQUENCE_EOS_TOKEN_ID` automatically for the processor.
 If a model `extra_args` entry includes `--trust-remote-code`, Docker startup now sets `VLLM_FORCE_SEQ_TRUST_REMOTE_CODE=true` automatically so the tokenizer bootstrap uses remote code as well.

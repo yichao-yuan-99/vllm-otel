@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -65,6 +66,7 @@ DEFAULT_GATEWAY_HOST = "0.0.0.0"
 DEFAULT_GATEWAY_PID_FILE_PREFIX = "gateway_d"
 DEFAULT_GATEWAY_LOG_FILE_PREFIX = "gateway_d"
 VLLM_CRASH_LOOP_RESTART_THRESHOLD = 3
+LMCACHE_KV_TRANSFER_CONFIG = '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}'
 COMPOSE_MANAGED_ENV_KEYS = frozenset(
     {
         "COMPOSE_PROJECT_NAME",
@@ -82,6 +84,10 @@ COMPOSE_MANAGED_ENV_KEYS = frozenset(
         "VLLM_SERVED_MODEL_NAME",
         "VLLM_SERVICE_PORT",
         "VLLM_TENSOR_PARALLEL_SIZE",
+        "LMCACHE_INTERNAL_API_SERVER_ENABLED",
+        "LMCACHE_INTERNAL_API_SERVER_PORT_START",
+        "LMCACHE_MAX_LOCAL_CPU_SIZE",
+        "PYTHONHASHSEED",
     }
 )
 
@@ -906,6 +912,7 @@ def _load_port_profiles() -> tuple[str | None, dict[str, dict[str, Any]]]:
         )
         jaeger_api_port = _parse_port(value.get("jaeger_api_port"), f"profiles.{key}.jaeger_api_port")
         jaeger_otlp_port = _parse_port(value.get("jaeger_otlp_port"), f"profiles.{key}.jaeger_otlp_port")
+        lmcache_port = _parse_port(value.get("lmcache_port"), f"profiles.{key}.lmcache_port")
         out[key] = {
             "label": value.get("label"),
             "vllm_port": vllm_port,
@@ -913,6 +920,7 @@ def _load_port_profiles() -> tuple[str | None, dict[str, dict[str, Any]]]:
             "gateway_parse_port": gateway_parse_port,
             "jaeger_api_port": jaeger_api_port,
             "jaeger_otlp_port": jaeger_otlp_port,
+            "lmcache_port": lmcache_port,
         }
     default_profile = payload.get("default_profile")
     if default_profile is not None and not isinstance(default_profile, str):
@@ -995,6 +1003,103 @@ def _model_requests_trust_remote_code(extra_args: list[Any]) -> bool:
     return False
 
 
+def _normalize_lmcache_size(lmcache_max_local_cpu_size: int | None) -> int | None:
+    if lmcache_max_local_cpu_size is None:
+        return None
+    if isinstance(lmcache_max_local_cpu_size, bool) or not isinstance(lmcache_max_local_cpu_size, int):
+        raise ValueError("lmcache must be a positive integer")
+    if lmcache_max_local_cpu_size <= 0:
+        raise ValueError("lmcache must be a positive integer")
+    return lmcache_max_local_cpu_size
+
+
+def _normalize_gpu_memory_utilization(gpu_memory_utilization: float | None) -> float | None:
+    if gpu_memory_utilization is None:
+        return None
+    if isinstance(gpu_memory_utilization, bool) or not isinstance(gpu_memory_utilization, (int, float)):
+        raise ValueError("gpu-memory-utilization must be > 0 and <= 1")
+    normalized = float(gpu_memory_utilization)
+    if not math.isfinite(normalized) or normalized <= 0 or normalized > 1:
+        raise ValueError("gpu-memory-utilization must be > 0 and <= 1")
+    return normalized
+
+
+def _extract_vllm_option_value(args: list[str], option_name: str) -> str | None:
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == option_name:
+            index += 1
+            if index >= len(args):
+                raise ValueError(f"{option_name} requires a value")
+            return args[index]
+        if arg.startswith(f"{option_name}="):
+            return arg.split("=", 1)[1]
+        index += 1
+    return None
+
+
+def _apply_lmcache_option(
+    *,
+    extra_args: list[Any],
+    lmcache_max_local_cpu_size: int | None,
+) -> tuple[list[str], bool]:
+    if not all(isinstance(arg, str) for arg in extra_args):
+        raise ValueError("model extra_args must contain only strings")
+
+    normalized_lmcache = _normalize_lmcache_size(lmcache_max_local_cpu_size)
+    normalized_args = list(extra_args)
+    if normalized_lmcache is None:
+        return normalized_args, False
+
+    existing_kv_transfer = _extract_vllm_option_value(normalized_args, "--kv-transfer-config")
+    if existing_kv_transfer is not None:
+        if existing_kv_transfer != LMCACHE_KV_TRANSFER_CONFIG:
+            raise ValueError(
+                "model extra_args already configure --kv-transfer-config with a different value"
+            )
+        return normalized_args, True
+
+    normalized_args.extend(["--kv-transfer-config", LMCACHE_KV_TRANSFER_CONFIG])
+    return normalized_args, True
+
+
+def _apply_gpu_memory_utilization_option(
+    *,
+    extra_args: list[Any],
+    gpu_memory_utilization: float | None,
+) -> tuple[list[str], bool]:
+    if not all(isinstance(arg, str) for arg in extra_args):
+        raise ValueError("model extra_args must contain only strings")
+
+    normalized_gpu_memory_utilization = _normalize_gpu_memory_utilization(gpu_memory_utilization)
+    normalized_args: list[str] = []
+    if normalized_gpu_memory_utilization is None:
+        return list(extra_args), False
+
+    skip_next = False
+    for index, arg in enumerate(extra_args):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--gpu-memory-utilization":
+            if index + 1 >= len(extra_args):
+                raise ValueError("--gpu-memory-utilization requires a value")
+            skip_next = True
+            continue
+        if arg.startswith("--gpu-memory-utilization="):
+            continue
+        normalized_args.append(arg)
+
+    normalized_args.extend(
+        [
+            "--gpu-memory-utilization",
+            str(normalized_gpu_memory_utilization),
+        ]
+    )
+    return normalized_args, True
+
+
 def _encode_model_extra_args(extra_args: list[Any]) -> str:
     if not all(isinstance(arg, str) for arg in extra_args):
         raise ValueError("model extra_args must contain only strings")
@@ -1032,7 +1137,25 @@ def _compose_env_values(selection: dict[str, Any]) -> dict[str, str]:
     port_profile_id = selection.get("port_profile_id")
     port_profile_id_text = str(port_profile_id) if port_profile_id is not None else ""
     model_extra_args = model.get("extra_args", [])
+    raw_lmcache = selection.get("lmcache")
+    if raw_lmcache is None:
+        lmcache_max_local_cpu_size = None
+    else:
+        coerced_lmcache = _coerce_int(raw_lmcache)
+        if coerced_lmcache is None:
+            raise ValueError("selection.lmcache must be a positive integer")
+        lmcache_max_local_cpu_size = _normalize_lmcache_size(coerced_lmcache)
+    gpu_memory_utilization = _normalize_gpu_memory_utilization(selection.get("gpu_memory_utilization"))
+    effective_extra_args, _ = _apply_lmcache_option(
+        extra_args=model_extra_args,
+        lmcache_max_local_cpu_size=lmcache_max_local_cpu_size,
+    )
+    effective_extra_args, _ = _apply_gpu_memory_utilization_option(
+        extra_args=effective_extra_args,
+        gpu_memory_utilization=gpu_memory_utilization,
+    )
     trust_remote_code = _model_requests_trust_remote_code(model_extra_args)
+    lmcache_port = _parse_port(ports.get("lmcache_port"), "resolved.ports.lmcache_port")
     runtime_names = selection.get("runtime_names")
     if not isinstance(runtime_names, dict):
         model_key = str(selection.get("model_key", "default-model"))
@@ -1046,14 +1169,20 @@ def _compose_env_values(selection: dict[str, Any]) -> dict[str, str]:
         "VLLM_CONTAINER_NAME": str(runtime_names["vllm_container_name"]),
         "PORT_PROFILE_ID": port_profile_id_text,
         "VLLM_FORCE_SEQ_TRUST_REMOTE_CODE": "true" if trust_remote_code else "false",
-        "VLLM_MODEL_EXTRA_ARGS_B64": _encode_model_extra_args(model_extra_args),
+        "VLLM_MODEL_EXTRA_ARGS_B64": _encode_model_extra_args(effective_extra_args),
         "VLLM_MODEL_NAME": str(model["vllm_model_name"]),
         "VLLM_SERVED_MODEL_NAME": str(model["served_model_name"]),
         "VLLM_SERVICE_PORT": str(ports["vllm_port"]),
         "VLLM_TENSOR_PARALLEL_SIZE": str(launch["tensor_parallel_size"]),
         "JAEGER_API_PORT": str(ports["jaeger_api_port"]),
         "JAEGER_OTLP_PORT": str(ports["jaeger_otlp_port"]),
+        "LMCACHE_INTERNAL_API_SERVER_ENABLED": "1",
+        "LMCACHE_INTERNAL_API_SERVER_PORT_START": str(lmcache_port),
+        "LMCACHE_MAX_LOCAL_CPU_SIZE": (
+            str(lmcache_max_local_cpu_size) if lmcache_max_local_cpu_size is not None else ""
+        ),
         "OTEL_SERVICE_NAME": str(runtime_names["otel_service_name"]),
+        "PYTHONHASHSEED": "0",
     }
 
 
@@ -1255,10 +1384,13 @@ def _service_urls_from_ports(ports: dict[str, Any]) -> dict[str, str]:
     }
     gateway_port = _coerce_int(ports.get("gateway_port"))
     gateway_parse_port = _coerce_int(ports.get("gateway_parse_port"))
+    lmcache_port = _coerce_int(ports.get("lmcache_port"))
     if gateway_port is not None:
         urls["gateway"] = f"http://127.0.0.1:{gateway_port}"
     if gateway_parse_port is not None:
         urls["gateway_parse"] = f"http://127.0.0.1:{gateway_parse_port}"
+    if lmcache_port is not None:
+        urls["lmcache_metrics"] = f"http://127.0.0.1:{lmcache_port}/metrics"
     return urls
 
 
@@ -1892,6 +2024,8 @@ def _validate_start_selection(
     model_key: str,
     port_profile_id: int,
     launch_profile_key: str,
+    lmcache: int | None = None,
+    gpu_memory_utilization: float | None = None,
     enforce_weight_limit: bool = True,
 ) -> tuple[bool, dict[str, Any]]:
     try:
@@ -1901,6 +2035,11 @@ def _validate_start_selection(
         _, launch_profiles = _load_launch_profiles()
     except Exception as exc:
         return False, _payload(ok=False, code=410, message=f"failed loading configs: {exc}")
+    try:
+        normalized_lmcache = _normalize_lmcache_size(lmcache)
+        normalized_gpu_memory_utilization = _normalize_gpu_memory_utilization(gpu_memory_utilization)
+    except ValueError as exc:
+        return False, _payload(ok=False, code=414, message=str(exc))
 
     port_key = str(port_profile_id)
     model = models.get(model_key)
@@ -1938,6 +2077,8 @@ def _validate_start_selection(
         "model_key": model_key,
         "port_profile_id": port_key,
         "launch_profile_key": launch_profile_key,
+        "lmcache": normalized_lmcache,
+        "gpu_memory_utilization": normalized_gpu_memory_utilization,
         "images": images,
         "model": model,
         "ports": port_profile,
@@ -1978,6 +2119,7 @@ def _resolve_stop_selection(
         model_key=normalized_model,
         port_profile_id=port_profile_id,
         launch_profile_key=normalized_launch,
+        lmcache=None,
         enforce_weight_limit=False,
     )
     if not valid:
@@ -2280,6 +2422,8 @@ def _start_impl(
     model_key: str,
     port_profile_id: int,
     launch_profile_key: str,
+    lmcache: int | None,
+    gpu_memory_utilization: float | None,
     block: bool,
     timeout_seconds: float,
     startup_log_path: Path,
@@ -2295,6 +2439,8 @@ def _start_impl(
         model_key=model_key,
         port_profile_id=port_profile_id,
         launch_profile_key=launch_profile_key,
+        lmcache=lmcache,
+        gpu_memory_utilization=gpu_memory_utilization,
     )
     if not valid:
         return selection_payload
@@ -2332,6 +2478,8 @@ def _start_impl(
             f" model={selection['model_key']}"
             f" launch={selection['launch_profile_key']}"
             f" port_profile={selection['port_profile_id']}"
+            f" lmcache={selection['lmcache'] if selection.get('lmcache') is not None else 'disabled'}"
+            f" gpu_memory_utilization={selection['gpu_memory_utilization'] if selection.get('gpu_memory_utilization') is not None else 'default'}"
             f" vllm_port={selection['ports']['vllm_port']}"
             f" image={selection['images']['vllm_image_name']}",
             log_path=startup_log_path,
@@ -2413,12 +2561,17 @@ def _start_impl(
                 "model_key": selection["model_key"],
                 "port_profile_id": selection["port_profile_id"],
                 "launch_profile_key": selection["launch_profile_key"],
+                "lmcache": selection.get("lmcache"),
+                "gpu_memory_utilization": selection.get("gpu_memory_utilization"),
             },
             "resolved": {
                 "images": selection["images"],
                 "model": selection["model"],
                 "ports": selection["ports"],
                 "launch": selection["launch"],
+                "lmcache_enabled": selection.get("lmcache") is not None,
+                "lmcache_max_local_cpu_size": selection.get("lmcache"),
+                "gpu_memory_utilization": selection.get("gpu_memory_utilization"),
                 "service_urls": selection["service_urls"],
                 "runtime_names": selection["runtime_names"],
             },
@@ -2717,6 +2870,19 @@ def start(
     model: str = typer.Option(..., "--model", "-m", help="Model key from configs/model_config.toml."),
     port_profile: int = typer.Option(..., "--port-profile", "-p", help="Port profile numeric ID."),
     launch_profile: str = typer.Option(..., "--launch-profile", "-l", help="Launch profile key."),
+    lmcache: int | None = typer.Option(
+        None,
+        "--lmcache",
+        help=(
+            "Enable LMCache with a maximum local CPU size. "
+            "Sets LMCACHE_MAX_LOCAL_CPU_SIZE and enables kv-transfer-config."
+        ),
+    ),
+    gpu_memory_utilization: float | None = typer.Option(
+        None,
+        "--gpu-memory-utilization",
+        help="Pass through to vLLM as --gpu-memory-utilization <value> (0 < value <= 1).",
+    ),
     block: bool = typer.Option(False, "--block", "-b", help="Block until endpoints are healthy."),
     timeout_seconds: float = typer.Option(
         DEFAULT_WAIT_UP_TIMEOUT_SECONDS,
@@ -2725,6 +2891,12 @@ def start(
     ),
 ) -> None:
     """Start one environment (auto-start daemon if needed)."""
+    if lmcache is not None and lmcache <= 0:
+        raise typer.BadParameter("--lmcache must be a positive integer", param_hint="--lmcache")
+    try:
+        _normalize_gpu_memory_utilization(gpu_memory_utilization)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--gpu-memory-utilization") from exc
     startup_log_path = _new_startup_log_path(
         model_key=model,
         port_profile_id=port_profile,
@@ -2737,6 +2909,8 @@ def start(
                 model_key=model,
                 port_profile_id=port_profile,
                 launch_profile_key=launch_profile,
+                lmcache=lmcache,
+                gpu_memory_utilization=gpu_memory_utilization,
                 block=block,
                 timeout_seconds=timeout_seconds,
                 startup_log_path=startup_log_path,

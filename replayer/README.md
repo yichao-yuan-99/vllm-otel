@@ -27,10 +27,11 @@ python -m replayer --help
 - `--config <path>`: TOML config path (`[compile]` or `[replayer.compile]`).
 - `--job-dir <path>`: profiled con-driver job directory.
 - `--job-root <path>`: recursively discover all profiled job dirs under this root and compile them in parallel with live batch progress (cannot be combined with `--job-dir` or `--plan-out`).
-- `--plan-out <path>`: output replay plan path (default: `<job-dir>/replay-plan.json`; with `--exclude-unranked-trails`, default: `<job-dir>/replay-plan.exclude-unranked.json`).
+- `--plan-out <path>`: output replay plan path (default: `<job-dir>/replay-plan.json`; with `--exclude-unranked-trails`, default: `<job-dir>/replay-plan.exclude-unranked.json`; with `--single-trail`, default: `<job-dir>/replay-plan.trail-<safe-trail>.json`).
 - `--port-profile-id <int>`: required; resolve compile-time tokenizer endpoint from `configs/port_profiles.toml`.
 - `--request-timeout-s <float>`: optional HTTP timeout for compile-time tokenizer requests (default: `3600`).
 - `--model <string>`: optional compile-time model override. Must match a name in `configs/model_config.toml` (model key, served model name, or vLLM model name). When set, compile rewrites `replay_target.model` and each request body `model`.
+- `--single-trail <trail_name>`: non-split compile only; compile exactly one `source_trail_name` such as `run_alpha` or `profile-2/run_beta`.
 - `--split-two-group-plans`: optional; write three split plans (`top`, `rest`, and `exclude-unranked` union) based on precomputed grouping from `<job-dir>/original-analysis/split/`.
 - `--split-two-group-metric <token_usage|context_usage>`: grouping metric file for `--split-two-group-plans`. If omitted, compile generates both metric variants.
   - `token_usage` reads `top-p-token-usage-two-groups.json`
@@ -127,6 +128,18 @@ python -m replayer compile \
 Default output for that command is:
 `<job-dir>/replay-plan.exclude-unranked.json`.
 
+Compile a single trail into its own replay plan:
+
+```bash
+python -m replayer compile \
+  --job-dir tests/output/con-driver/job-20260225T035758Z \
+  --port-profile-id 1 \
+  --single-trail profile-2/run_beta
+```
+
+Default output for that command is:
+`<job-dir>/replay-plan.trail-profile-2_run_beta.json`.
+
 `replayer compile` shows a live progress bar while it builds worker plans and
 deterministic request payloads. The bar advances by recorded request and also
 shows completed workers.
@@ -170,6 +183,9 @@ per-request details). See `replayer/README.clean-499.md`.
 
 If you want to drop split-unranked trails from a non-split plan, use
 `--exclude-unranked-trails`.
+
+If you want a replay plan for just one recorded worker trail, use
+`--single-trail <source_trail_name>`.
 
 Replay:
 
@@ -233,9 +249,9 @@ Replay can also override the compiled `launch_policy` while preserving the
 compiled worker/request structure. Pass a JSON object with the fields you want
 to overlay onto the plan's `launch_policy`.
 
-If the override switches the launch pattern to `poisson` and does not also set
-`max_concurrent`, replay treats the launch stream as unbounded instead of
-inheriting the plan's recorded concurrency cap.
+If the override switches the launch pattern to `poisson` or `uniform` and does
+not also set `max_concurrent`, replay treats the launch stream as unbounded
+instead of inheriting the plan's recorded concurrency cap.
 
 For example, to replay the same workers with `max_concurrent = 10` instead of
 the value stored in the plan:
@@ -294,7 +310,7 @@ Launch behavior:
 
 - replay preserves original worker launch ordering (`launch_priority`)
 - worker launch timing is driven by recorded con-driver scheduling config (`max_concurrent`, `pattern`, `pattern_args`, `seed`)
-- a replay-side Poisson override does not inherit the plan's `max_concurrent` unless the override explicitly sets its own `max_concurrent`
+- a replay-side `poisson` or `uniform` override does not inherit the plan's `max_concurrent` unless the override explicitly sets its own `max_concurrent`
 - replay does not require exact original absolute launch offsets
 - replay requires plans that include `launch_policy` (`config_ordered`)
 - replay targets the raw gateway listener, not `gateway_parse_port`

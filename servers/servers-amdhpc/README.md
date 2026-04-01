@@ -74,6 +74,7 @@ python3 servers/servers-amdhpc/client.py wait-up -r amd-hpc -P 0 --timeout-secon
 python3 servers/servers-amdhpc/client.py logs -r amd-hpc -P 0 -n 200
 python3 servers/servers-amdhpc/client.py alive-profiles -r amd-hpc
 python3 servers/servers-amdhpc/client.py stop-alive-profiles -r amd-hpc
+python3 servers/servers-amdhpc/client.py clear-clientd -r amd-hpc
 python3 servers/servers-amdhpc/client.py stop -r amd-hpc -P 0
 python3 servers/servers-amdhpc/client.py stop-group -r amd-hpc -g bench_a
 ```
@@ -230,6 +231,7 @@ Optional overrides:
 - `alive-profiles`: per-profile output is compact (status summary fields) and no longer embeds full raw `/status` payloads.
 - `alive-profiles --verbose`: include full raw per-profile payloads under `profiles[*].raw`.
 - `stop-alive-profiles`: group-aware stop; grouped profiles are stopped through one `group/stop` call per group.
+- `clear-clientd`: local orphan cleanup helper; stops/cleans `client-d` for all configured profiles plus runtime pid-file orphans.
 - `status`: show the selected port profile status plus the full active-profile map and configured partitions/models.
 - Single-profile commands (`-P`) are rejected for profiles that belong to an active group (`start`, `stop`, `stop-poll`, `up`, `wait-up`, `logs`).
 

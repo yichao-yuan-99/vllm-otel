@@ -36,12 +36,17 @@ If any required file is missing, compile fails immediately.
 
 ## Compile Short-Circuit Behavior
 
-Before reading source artifacts, compile checks `--plan-out` (default `<job-dir>/replay-plan.json`):
+Before reading source artifacts, compile checks the target output path:
 
-- if the file exists and `compile_version` is current (`"1"`)
-- or `compile_version` is missing/empty (treated as v1)
+- default: `<job-dir>/replay-plan.json`
+- with `--exclude-unranked-trails`: `<job-dir>/replay-plan.exclude-unranked.json`
+- with `--single-trail <trail>`: `<job-dir>/replay-plan.trail-<safe-trail>.json`
 
-then compile reuses that plan and exits without rebuilding.
+If that file already exists, compile reuses it only when all of these match:
+
+- `compile_version` is current (`"1"`) or missing/empty (treated as v1)
+- requested compile options that affect plan contents still match the file
+  (`--model`, `--clean`, `--exclude-unranked-trails`, `--single-trail`)
 
 If you expect fresh extraction from run artifacts, delete the existing plan or force a path with no existing plan file.
 
@@ -72,8 +77,9 @@ Supported pattern names:
 
 - `"eager"`
 - `"poisson"` (and typo alias `"possion"`)
+- `"uniform"`
 
-For Poisson, rate must be derivable from `pattern_args` via one of:
+For Poisson and Uniform, rate must be derivable from `pattern_args` via one of:
 
 - `rate`, `arrival-rate`, `arrival_rate`, `lambda`
 - or inverse of `mean-interval-s`, `mean_interval_s`, `interval-s`, `interval_s`
@@ -252,12 +258,14 @@ From plan `launch_policy` (plus optional replay override):
 - `pattern.name`:
   - `eager`: next launch delay is always `0`
   - `poisson`: delay sampled from exponential distribution (`expovariate(rate_per_second)`)
+  - `uniform`: next launch delay is always exactly `1 / rate_per_second`
 - `seed`:
   - int seed => deterministic Poisson samples
   - missing seed => non-deterministic Poisson stream each replay run
+  - `uniform` does not use randomness, so seed has no effect
 - `max_concurrent`:
   - caps concurrently active workers
-  - if Poisson override is provided without explicit `max_concurrent`, replay removes cap (unbounded launch stream)
+  - if Poisson/Uniform override is provided without explicit `max_concurrent`, replay removes cap (unbounded launch stream)
 
 Replay launch loop is capacity-gated:
 
@@ -347,7 +355,7 @@ If compile fails:
 If replay timing looks wrong:
 
 1. inspect `launch_policy` and any replay override
-2. verify whether Poisson is seeded or unseeded
-3. check if `max_concurrent` was dropped by a Poisson override
+2. verify whether Poisson is seeded or unseeded (`uniform` ignores seed)
+3. check if `max_concurrent` was dropped by a Poisson/Uniform override
 4. check whether `--randomize-seed`, `--num-tasks`, or `--time-constraint-s` changed worker stream shape
 5. inspect request latencies and deadline-triggered cancellations/timeouts in replay worker logs

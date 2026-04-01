@@ -30,6 +30,15 @@ python -m replayer compile \
   --plan-out tests/output/replay-plan.json
 ```
 
+Or compile a single recorded trail:
+
+```bash
+python -m replayer compile \
+  --job-dir tests/output/con-driver/job-<timestamp> \
+  --port-profile-id 0 \
+  --single-trail profile-2/run_beta
+```
+
 Replay from compiled plan:
 
 ```bash
@@ -61,6 +70,7 @@ Behavior:
 - discover gateway traces from both:
   - `gateway-output/run_*`
   - `gateway-output/profile-*/run_*` (cluster mode)
+- optionally filter compile to one `source_trail_name` with `--single-trail`
 - resolve backend-aware replay target fields
 - for `harbor`, extract model from `meta/config.toml` and fallback to `meta/results.json` command parsing when needed
 - resolve compile-time tokenizer endpoint from `--port-profile-id`

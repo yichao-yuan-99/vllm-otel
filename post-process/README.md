@@ -18,6 +18,7 @@ outputs.
 - `gateway/stack`: recover stacked per-second gateway token throughput from request ranges
 - `gateway/stack-context`: recover stacked per-second agent context usage from request history
 - `gateway/stack-kv`: recover stacked per-second request-lifetime KV usage from request history
+- `key-stats`: consolidate a small set of headline summary stats into one JSON
 - `gateway/usage`: aggregate gateway token usage per run and per agent
 
 ## Quick Navigation
@@ -37,6 +38,7 @@ outputs.
 - `post-process/gateway/stack/README.md`
 - `post-process/gateway/stack-context/README.md`
 - `post-process/gateway/stack-kv/README.md`
+- `post-process/key-stats/README.md`
 - `post-process/gateway/usage/README.md`
 - `post-process/visualization/gateway-stack/README.md`
 - `post-process/visualization/gateway-stack-context/README.md`
@@ -81,15 +83,16 @@ Pipeline order:
 14. `vllm-metrics/summarize_timeseries.py`
 15. `power/extract_run.py`
 16. `power-sampling/extract_run.py`
-17. `visualization/job-throughput/generate_all_figures.py`
-18. `visualization/job-concurrency/generate_all_figures.py`
-19. `visualization/prefill-concurrency/generate_all_figures.py`
-20. `visualization/gateway-stack/generate_all_figures.py`
-21. `visualization/gateway-stack-context/generate_all_figures.py`
-22. `visualization/gateway-stack-kv/generate_all_figures.py`
-23. `visualization/vllm-metrics/generate_all_figures.py`
-24. `visualization/power/generate_all_figures.py`
-25. `global/aggregate_runs_csv.py` (root-dir mode only, skipped in dry-run)
+17. `key-stats/extract_run.py`
+18. `visualization/job-throughput/generate_all_figures.py`
+19. `visualization/job-concurrency/generate_all_figures.py`
+20. `visualization/prefill-concurrency/generate_all_figures.py`
+21. `visualization/gateway-stack/generate_all_figures.py`
+22. `visualization/gateway-stack-context/generate_all_figures.py`
+23. `visualization/gateway-stack-kv/generate_all_figures.py`
+24. `visualization/vllm-metrics/generate_all_figures.py`
+25. `visualization/power/generate_all_figures.py`
+26. `global/aggregate_runs_csv.py` (root-dir mode only, skipped in dry-run)
 
 ### `global-progress`
 

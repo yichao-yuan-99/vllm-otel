@@ -22,9 +22,13 @@ services:
       HF_HOME: ${HF_HOME:?Set HF_HOME in current shell}
       HF_HUB_CACHE: ${HF_HUB_CACHE:?Set HF_HUB_CACHE in current shell}
       HF_TOKEN: ${HF_TOKEN-}
+      LMCACHE_INTERNAL_API_SERVER_ENABLED: ${LMCACHE_INTERNAL_API_SERVER_ENABLED:-1}
+      LMCACHE_INTERNAL_API_SERVER_PORT_START: ${LMCACHE_INTERNAL_API_SERVER_PORT_START:?Set via servers/servers-docker/client.py start}
+      LMCACHE_MAX_LOCAL_CPU_SIZE: ${LMCACHE_MAX_LOCAL_CPU_SIZE-}
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-vllm-server}
       OTEL_EXPORTER_OTLP_TRACES_INSECURE: true
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: grpc://jaeger:4317
+      PYTHONHASHSEED: ${PYTHONHASHSEED:-0}
       VLLM_FORCE_SEQ_TRUST_REMOTE_CODE: ${VLLM_FORCE_SEQ_TRUST_REMOTE_CODE:-false}
       VLLM_MODEL_EXTRA_ARGS_B64: ${VLLM_MODEL_EXTRA_ARGS_B64-}
     volumes:
@@ -32,6 +36,7 @@ services:
       - ${HF_HUB_CACHE:?Set HF_HUB_CACHE in current shell}:${HF_HUB_CACHE:?Set HF_HUB_CACHE in current shell}
     ports:
       - "${VLLM_SERVICE_PORT}:${VLLM_SERVICE_PORT}"
+      - "${LMCACHE_INTERNAL_API_SERVER_PORT_START}:${LMCACHE_INTERNAL_API_SERVER_PORT_START}"
     entrypoint:
       - /opt/vllm-plugins/vllm_entrypoint.sh
     command:

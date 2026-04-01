@@ -23,6 +23,7 @@ import typer
 
 try:
     from .client_d import (
+        DEFAULT_PID_FILE_PREFIX as CLIENT_D_PID_FILE_PREFIX,
         DEFAULT_RUNTIME_DIR as CLIENT_D_RUNTIME_DIR,
         DEFAULT_SERVER_PORT,
         client_d_status,
@@ -32,6 +33,7 @@ try:
     )
 except ImportError:  # pragma: no cover
     from client_d import (  # type: ignore[no-redef]
+        DEFAULT_PID_FILE_PREFIX as CLIENT_D_PID_FILE_PREFIX,
         DEFAULT_RUNTIME_DIR as CLIENT_D_RUNTIME_DIR,
         DEFAULT_SERVER_PORT,
         client_d_status,
@@ -456,6 +458,36 @@ def _clientd_runtime_dir(ctx: typer.Context) -> Path:
     if isinstance(raw, Path):
         return raw
     return Path(raw)
+
+
+def _clientd_pid_profile_ids_from_runtime_dir(runtime_dir: Path | str) -> list[int]:
+    runtime_path = _expand_path(runtime_dir)
+    if not runtime_path.exists() or not runtime_path.is_dir():
+        return []
+
+    pattern = re.compile(rf"^{re.escape(CLIENT_D_PID_FILE_PREFIX)}\.(\d+)\.pid$")
+    profile_ids: list[int] = []
+    for pid_file in runtime_path.glob(f"{CLIENT_D_PID_FILE_PREFIX}.*.pid"):
+        match = pattern.fullmatch(pid_file.name)
+        if match is None:
+            continue
+        profile_ids.append(int(match.group(1)))
+    return _sorted_unique_profile_ids(profile_ids)
+
+
+def _collect_clientd_cleanup_profile_ids(
+    ctx: typer.Context,
+) -> tuple[list[int], list[int], list[int], str | None]:
+    configured_profile_ids: list[int] = []
+    profile_load_error: str | None = None
+    try:
+        configured_profile_ids = _sorted_unique_profile_ids(list(load_port_profiles().keys()))
+    except Exception as exc:  # noqa: BLE001
+        profile_load_error = str(exc)
+
+    runtime_profile_ids = _clientd_pid_profile_ids_from_runtime_dir(_clientd_runtime_dir(ctx))
+    target_profile_ids = _sorted_unique_profile_ids(configured_profile_ids + runtime_profile_ids)
+    return configured_profile_ids, runtime_profile_ids, target_profile_ids, profile_load_error
 
 
 def _has_server_url_override(ctx: typer.Context) -> bool:
@@ -2915,6 +2947,100 @@ def stop_alive_profiles(
             "failed_profile_ids": failed_profile_list,
             "results": results,
         },
+    }
+    _print_json(payload)
+    if not ok:
+        raise typer.Exit(code=1)
+
+
+@app.command(name="clear-clientd")
+def clear_clientd(
+    ctx: typer.Context,
+    ssh_target: str = _remote_host_option(),
+    clientd_timeout_seconds: float = typer.Option(
+        10.0,
+        "--clientd-timeout-seconds",
+        help="Seconds to wait before forcing client-d shutdown.",
+    ),
+) -> None:
+    """Stop/clean local client-d daemons for all known profiles, including runtime orphans."""
+    _ = ssh_target
+    configured_profile_ids, runtime_profile_ids, target_profile_ids, profile_load_error = (
+        _collect_clientd_cleanup_profile_ids(ctx)
+    )
+    if not target_profile_ids:
+        data = {
+            "runtime_dir": str(_expand_path(_clientd_runtime_dir(ctx))),
+            "configured_profile_ids": configured_profile_ids,
+            "runtime_profile_ids": runtime_profile_ids,
+            "target_profile_ids": [],
+            "cleared_profile_ids": [],
+            "failed_profile_ids": [],
+            "results": {},
+        }
+        if profile_load_error is not None:
+            data["profile_load_error"] = profile_load_error
+        _print_json(
+            {
+                "ok": True,
+                "code": 0,
+                "message": "no client-d profiles found to clear",
+                "data": data,
+            }
+        )
+        return
+
+    results: dict[str, dict[str, Any]] = {}
+    cleared_profile_ids: list[int] = []
+    failed_profile_ids: list[int] = []
+    for profile_id in target_profile_ids:
+        try:
+            payload = _stop_clientd_for_profile(
+                ctx,
+                port_profile=profile_id,
+                timeout_seconds=clientd_timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001
+            payload = {
+                "ok": False,
+                "code": 1,
+                "message": f"failed to stop client-d for port profile {profile_id}: {exc}",
+                "data": {"port_profile_id": profile_id},
+            }
+        results[str(profile_id)] = payload
+        if _is_ok(payload):
+            cleared_profile_ids.append(profile_id)
+        else:
+            failed_profile_ids.append(profile_id)
+
+    ok = not failed_profile_ids
+    configured_profile_id_set = set(configured_profile_ids)
+    data = {
+        "runtime_dir": str(_expand_path(_clientd_runtime_dir(ctx))),
+        "configured_profile_ids": configured_profile_ids,
+        "runtime_profile_ids": runtime_profile_ids,
+        "runtime_only_profile_ids": [
+            profile_id for profile_id in runtime_profile_ids if profile_id not in configured_profile_id_set
+        ],
+        "target_profile_ids": target_profile_ids,
+        "cleared_profile_ids": cleared_profile_ids,
+        "failed_profile_ids": failed_profile_ids,
+        "results": results,
+    }
+    if profile_load_error is not None:
+        data["profile_load_error"] = profile_load_error
+    payload = {
+        "ok": ok,
+        "code": 0 if ok else 1,
+        "message": (
+            f"cleared client-d for {len(cleared_profile_ids)} profiles"
+            if ok
+            else (
+                f"failed to clear client-d for {len(failed_profile_ids)} of "
+                f"{len(target_profile_ids)} profiles"
+            )
+        ),
+        "data": data,
     }
     _print_json(payload)
     if not ok:

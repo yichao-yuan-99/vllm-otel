@@ -37,6 +37,14 @@ Build and push from the official ROCm vLLM image tag:
 python3 servers/docker/build_image.py build-push --base-image vllm/vllm-openai-rocm:v0.17.1
 ```
 
+Build and push with `lmcache` preinstalled in the Docker image:
+
+```bash
+python3 servers/docker/build_image.py build-push \
+  --base-image vllm/vllm-openai:v0.14.0 \
+  --add-lmcache
+```
+
 Build and push with deprecated `--gfx` flag (no LMCache runtime bootstrap; kept for compatibility):
 
 ```bash
@@ -79,6 +87,7 @@ If you do not pass `--image`, the CLI derives the pushed image name automaticall
 - Default repo: `<target-namespace>/<base-image-repo-slug>` (repo path with `/` replaced by `-`)
 - Standard tag: `<base-image-tag>-otel-lp`
 - ROCm tag: `<base-image-tag>-otel-lp-rocm`
+- `--add-lmcache`: appends `-lmcache` to the default derived tag
 
 ROCm defaults are auto-detected when `--base-image` contains `rocm`.
 You can force ROCm default naming with `--rocm`.
@@ -87,8 +96,10 @@ Default namespace is `yichaoyuan` (override with `--target-namespace`, or fully 
 Examples:
 
 - `--base-image vllm/vllm-openai:v0.14.0` -> `yichaoyuan/vllm-vllm-openai:v0.14.0-otel-lp`
+- `--base-image vllm/vllm-openai:v0.14.0 --add-lmcache` -> `yichaoyuan/vllm-vllm-openai:v0.14.0-otel-lp-lmcache`
 - `--base-image vllm/vllm-openai:nightly` -> `yichaoyuan/vllm-vllm-openai:nightly-otel-lp`
 - `--base-image vllm/vllm-openai-rocm:v0.17.1` -> `yichaoyuan/vllm-vllm-openai-rocm:v0.17.1-otel-lp-rocm`
+- `--base-image vllm/vllm-openai-rocm:v0.17.1 --add-lmcache` -> `yichaoyuan/vllm-vllm-openai-rocm:v0.17.1-otel-lp-rocm-lmcache`
 - `--base-image rocm/vllm-dev:upstream_preview_releases_v0.17.0_20260303` -> `yichaoyuan/rocm-vllm-dev:upstream_preview_releases_v0.17.0_20260303-otel-lp-rocm`
 
 You can override the defaults with either `--target-repo` and `--target-tag`, or with `--image`.
@@ -97,7 +108,9 @@ You can override the defaults with either `--target-repo` and `--target-tag`, or
 
 `--gfx` in `servers/docker/build_image.py` is deprecated and no longer injects LMCache install logic into the image entrypoint.
 
-LMCache install is now handled by SIF build-time tooling in `servers/sif`.
+Use `--add-lmcache` if you want the generated Docker image to run `pip install lmcache` at build time.
+
+For ROCm-specific LMCache bake-in, use SIF build-time tooling in `servers/sif`.
 
 Use:
 
@@ -116,6 +129,7 @@ The generated Dockerfile always:
 
 - starts from the selected vLLM base image
 - installs the OpenTelemetry Python packages used by this repo
+- optionally installs `lmcache` when `--add-lmcache` is passed
 - copies `servers/docker/forceSeq`
 - copies `servers/docker/vllm_entrypoint.sh`
 - sets `PYTHONPATH=/opt/vllm-plugins`

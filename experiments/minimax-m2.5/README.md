@@ -19,7 +19,7 @@ MiniMax-M2.5 across:
 - `configs/config.dabstep.mswe.toml`: dabstep with mini-swe-agent.
 - `configs/config.dabstep.terminus2.toml`: dabstep with terminus-2.
 - `start.py`: Python start script for one benchmark + one agent run.
-- `batch_benchmarks.sh`: very naive batch runner with hardcoded benchmarks.
+- `batch_benchmarks.sh`: batch runner with hardcoded benchmarks and selectable agents.
 
 Note: the terminus swebench config filename intentionally keeps `verfied`.
 `start.py` accepts both `terminal-bench@2.0` and `terminalbench@2.0`.
@@ -64,9 +64,26 @@ python experiments/minimax-m2.5/start.py \
 ## Run Batch (Hardcoded Benchmarks)
 
 ```bash
-# Hardcoded benchmarks: swebench-verified, terminal-bench@2.0, livecodebench, dabstep
-# For each benchmark: mini-swe-agent then terminus-2
+# Hardcoded benchmarks: terminal-bench@2.0, livecodebench, dabstep
+# Default agents: mini-swe-agent and terminus-2
 bash experiments/minimax-m2.5/batch_benchmarks.sh \
+  --per-profile-conc 5
+```
+
+Run only one agent:
+
+```bash
+bash experiments/minimax-m2.5/batch_benchmarks.sh \
+  --agent mini-swe-agent \
+  --per-profile-conc 5
+```
+
+You can repeat `--agent` to run multiple selected agents:
+
+```bash
+bash experiments/minimax-m2.5/batch_benchmarks.sh \
+  --agent mini-swe-agent \
+  --agent terminus-2 \
   --per-profile-conc 5
 ```
 

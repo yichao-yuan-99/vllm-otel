@@ -34,13 +34,18 @@ DEFAULT_TARGET_NAMESPACE = "yichaoyuan"
 class BuildSpec:
     base_image: str
     gfx: str | None
+    add_lmcache: bool
     target_image: str
 
 
-def _default_target_tag(base_tag: str, *, rocm: bool) -> str:
+def _default_target_tag(base_tag: str, *, rocm: bool, add_lmcache: bool) -> str:
     if rocm:
-        return f"{base_tag}-otel-lp-rocm"
-    return f"{base_tag}-otel-lp"
+        tag = f"{base_tag}-otel-lp-rocm"
+    else:
+        tag = f"{base_tag}-otel-lp"
+    if add_lmcache:
+        return f"{tag}-lmcache"
+    return tag
 
 
 def _strip_image_tag_and_digest(image_ref: str) -> str:
@@ -109,8 +114,11 @@ def _is_rocm_base_image(base_image: str) -> bool:
     return "rocm" in base_image.lower()
 
 
-def _render_dockerfile(base_image: str) -> str:
-    requirements = " \\\n  ".join(OTEL_REQUIREMENTS)
+def _render_dockerfile(base_image: str, *, add_lmcache: bool) -> str:
+    requirements_list = list(OTEL_REQUIREMENTS)
+    if add_lmcache:
+        requirements_list.append("'lmcache'")
+    requirements = " \\\n  ".join(requirements_list)
 
     return (
         f"FROM {base_image}\n\n"
@@ -138,6 +146,7 @@ def _resolve_spec(args: argparse.Namespace) -> BuildSpec:
         raise SystemExit("error: --base-image must be non-empty")
     base_image_tag = _extract_base_image_tag(base_image)
     rocm_mode = bool(args.rocm) or _is_rocm_base_image(base_image)
+    add_lmcache = bool(args.add_lmcache)
     gfx = str(args.gfx).strip() if args.gfx else None
     if gfx is not None and not re.fullmatch(r"[A-Za-z0-9_.-]+", gfx):
         raise SystemExit("error: --gfx must match [A-Za-z0-9_.-]+ (for example gfx942)")
@@ -149,12 +158,17 @@ def _resolve_spec(args: argparse.Namespace) -> BuildSpec:
             base_image,
             target_namespace=args.target_namespace,
         )
-        target_tag = args.target_tag or _default_target_tag(base_image_tag, rocm=rocm_mode)
+        target_tag = args.target_tag or _default_target_tag(
+            base_image_tag,
+            rocm=rocm_mode,
+            add_lmcache=add_lmcache,
+        )
         target_image = f"{target_repo}:{target_tag}"
 
     return BuildSpec(
         base_image=base_image,
         gfx=gfx,
+        add_lmcache=add_lmcache,
         target_image=target_image,
     )
 
@@ -174,7 +188,7 @@ def _build_push(args: argparse.Namespace) -> int:
     _require_command("docker")
 
     spec = _resolve_spec(args)
-    dockerfile_content = _render_dockerfile(spec.base_image)
+    dockerfile_content = _render_dockerfile(spec.base_image, add_lmcache=spec.add_lmcache)
 
     if args.dockerfile_output:
         dockerfile_path = Path(args.dockerfile_output).expanduser().resolve()
@@ -189,7 +203,8 @@ def _build_push(args: argparse.Namespace) -> int:
     if spec.gfx:
         print(
             "warning: --gfx is deprecated in servers/docker/build_image.py and no longer "
-            "injects LMCache runtime bootstrap; use servers/sif tooling to bake LMCache into SIF."
+            "controls LMCache install in Docker images; use --add-lmcache to pip install LMCache "
+            "or use servers/sif tooling to bake LMCache into SIF."
         )
     print(f"target image: {spec.target_image}")
     print(f"dockerfile: {dockerfile_path}")
@@ -218,7 +233,7 @@ def _build_push(args: argparse.Namespace) -> int:
 
 def _render(args: argparse.Namespace) -> int:
     spec = _resolve_spec(args)
-    dockerfile_content = _render_dockerfile(spec.base_image)
+    dockerfile_content = _render_dockerfile(spec.base_image, add_lmcache=spec.add_lmcache)
 
     if args.output:
         output_path = Path(args.output).expanduser().resolve()
@@ -277,14 +292,24 @@ def _build_parser() -> argparse.ArgumentParser:
             "--target-tag",
             help=(
                 "Override the default pushed image tag. "
-                "Defaults to <base-image-tag>-otel-lp or <base-image-tag>-otel-lp-rocm."
+                "Defaults to <base-image-tag>-otel-lp or <base-image-tag>-otel-lp-rocm, "
+                "with -lmcache appended when --add-lmcache is set."
+            ),
+        )
+        command_parser.add_argument(
+            "--add-lmcache",
+            action="store_true",
+            help=(
+                "Install the lmcache Python package in the generated image and append "
+                "-lmcache to the default derived target tag."
             ),
         )
         command_parser.add_argument(
             "--gfx",
             help=(
                 "Deprecated in docker image build flow. "
-                "Use servers/sif tooling to bake LMCache into the SIF."
+                "Use --add-lmcache for Docker builds, or servers/sif tooling to bake "
+                "LMCache into the SIF."
             ),
         )
         command_parser.add_argument(
