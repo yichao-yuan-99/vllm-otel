@@ -118,6 +118,15 @@ def install_fake_visualization_modules(module: object) -> callable:
             function_name="generate_figure_for_run_dir",
             input_arg_name="timeseries_input_path",
         ),
+        "post-process/visualization/agent-output-throughput/generate_all_figures.py": _FakeVisualizationModule(
+            manifest_name="figures-manifest.json",
+            figure_file_names=[
+                "agent-output-throughput-histogram.png",
+                "agent-output-throughput-vs-output-tokens.png",
+            ],
+            function_name="generate_figures_for_run_dir",
+            input_arg_name="agent_output_input_path",
+        ),
         "post-process/visualization/job-concurrency/generate_all_figures.py": _FakeVisualizationModule(
             manifest_name="figures-manifest.json",
             figure_file_names=["job-concurrency.png"],
@@ -344,6 +353,87 @@ def build_sample_run(tmp_path: Path) -> Path:
             "max_concurrency": 1,
             "avg_concurrency": 0.7,
             "concurrency_points": [],
+        },
+    )
+
+    write_json(
+        post_processed_dir / "agent-output-throughput" / "agent-output-throughput.json",
+        {
+            "source_run_dir": str(run_dir),
+            "source_gateway_output_dir": str(run_dir / "gateway-output"),
+            "service_failure_detected": False,
+            "service_failure_cutoff_time_utc": None,
+            "agent_count": 3,
+            "request_count": 3,
+            "requests_with_output_tokens": 3,
+            "requests_with_llm_request_duration": 3,
+            "requests_with_output_tokens_and_llm_request_duration": 3,
+            "output_tokens": 45,
+            "completion_tokens": 45,
+            "llm_request_duration_s": 5.0,
+            "output_throughput_tokens_per_s": 9.0,
+            "agent_output_throughput_tokens_per_s_summary": {
+                "sample_count": 3,
+                "avg": 9.166667,
+                "min": 7.5,
+                "max": 10.0,
+                "std": 1.178511,
+            },
+            "agent_output_throughput_tokens_per_s_histogram": {
+                "metric": "output_throughput_tokens_per_s",
+                "bin_size": 1.0,
+                "sample_count": 3,
+                "bin_count": 4,
+                "min": 7.5,
+                "max": 10.0,
+                "bins": [
+                    {"bin_start": 7.0, "bin_end": 8.0, "count": 1},
+                    {"bin_start": 8.0, "bin_end": 9.0, "count": 0},
+                    {"bin_start": 9.0, "bin_end": 10.0, "count": 0},
+                    {"bin_start": 10.0, "bin_end": 11.0, "count": 2},
+                ],
+            },
+            "agents": [
+                {
+                    "gateway_run_id": "run-a",
+                    "gateway_profile_id": None,
+                    "api_token_hash": "hash-a",
+                    "request_count": 1,
+                    "requests_with_output_tokens": 1,
+                    "requests_with_llm_request_duration": 1,
+                    "requests_with_output_tokens_and_llm_request_duration": 1,
+                    "output_tokens": 10,
+                    "completion_tokens": 10,
+                    "llm_request_duration_s": 1.0,
+                    "output_throughput_tokens_per_s": 10.0,
+                },
+                {
+                    "gateway_run_id": "run-b",
+                    "gateway_profile_id": None,
+                    "api_token_hash": "hash-b",
+                    "request_count": 1,
+                    "requests_with_output_tokens": 1,
+                    "requests_with_llm_request_duration": 1,
+                    "requests_with_output_tokens_and_llm_request_duration": 1,
+                    "output_tokens": 20,
+                    "completion_tokens": 20,
+                    "llm_request_duration_s": 2.0,
+                    "output_throughput_tokens_per_s": 10.0,
+                },
+                {
+                    "gateway_run_id": "run-c",
+                    "gateway_profile_id": None,
+                    "api_token_hash": "hash-c",
+                    "request_count": 1,
+                    "requests_with_output_tokens": 1,
+                    "requests_with_llm_request_duration": 1,
+                    "requests_with_output_tokens_and_llm_request_duration": 1,
+                    "output_tokens": 15,
+                    "completion_tokens": 15,
+                    "llm_request_duration_s": 2.0,
+                    "output_throughput_tokens_per_s": 7.5,
+                },
+            ],
         },
     )
 
@@ -736,6 +826,43 @@ def test_select_post_processed_rewrites_supported_outputs(tmp_path: Path) -> Non
         {"second": 2, "concurrency": 1},
     ]
 
+    agent_output_payload = read_json(
+        output_dir / "agent-output-throughput" / "agent-output-throughput.json"
+    )
+    assert agent_output_payload["agent_count"] == 2
+    assert agent_output_payload["request_count"] == 2
+    assert agent_output_payload["output_tokens"] == 35
+    assert agent_output_payload["completion_tokens"] == 35
+    assert agent_output_payload["llm_request_duration_s"] == 3.0
+    assert agent_output_payload["output_throughput_tokens_per_s"] == 11.666667
+    assert [agent["gateway_run_id"] for agent in agent_output_payload["agents"]] == [
+        "run-b",
+        "run-c",
+    ]
+    assert [agent["api_token_hash"] for agent in agent_output_payload["agents"]] == [
+        "hash-b",
+        "hash-c",
+    ]
+    assert [
+        agent["output_throughput_tokens_per_s"]
+        for agent in agent_output_payload["agents"]
+    ] == [20.0, 7.5]
+    histogram_payload = agent_output_payload[
+        "agent_output_throughput_tokens_per_s_histogram"
+    ]
+    assert histogram_payload["sample_count"] == 2
+    assert histogram_payload["bin_size"] == 1.0
+    assert histogram_payload["bins"][0] == {
+        "bin_start": 7.0,
+        "bin_end": 8.0,
+        "count": 1,
+    }
+    assert histogram_payload["bins"][-1] == {
+        "bin_start": 20.0,
+        "bin_end": 21.0,
+        "count": 1,
+    }
+
     requests_payload = read_json(
         output_dir / "gateway" / "llm-requests" / "llm-requests.json"
     )
@@ -864,6 +991,32 @@ def test_select_post_processed_rewrites_supported_outputs(tmp_path: Path) -> Non
     assert Path(job_throughput_manifest["figure_path"]).name == "job-throughput.png"
     assert (output_dir / "visualization" / "job-throughput" / "job-throughput.png").is_file()
 
+    agent_output_manifest = read_json(
+        output_dir
+        / "visualization"
+        / "agent-output-throughput"
+        / "figures-manifest.json"
+    )
+    assert agent_output_manifest["figure_count"] == 2
+    assert [
+        figure["figure_file_name"] for figure in agent_output_manifest["figures"]
+    ] == [
+        "agent-output-throughput-histogram.png",
+        "agent-output-throughput-vs-output-tokens.png",
+    ]
+    assert (
+        output_dir
+        / "visualization"
+        / "agent-output-throughput"
+        / "agent-output-throughput-histogram.png"
+    ).is_file()
+    assert (
+        output_dir
+        / "visualization"
+        / "agent-output-throughput"
+        / "agent-output-throughput-vs-output-tokens.png"
+    ).is_file()
+
     selection_summary = read_json(output_dir / "selection-summary.json")
     assert (
         "visualization/job-throughput/job-throughput.png"
@@ -879,6 +1032,22 @@ def test_select_post_processed_rewrites_supported_outputs(tmp_path: Path) -> Non
     )
     assert (
         "visualization/job-throughput/figures-manifest.json"
+        in selection_summary["generated_visualization_manifests"]
+    )
+    assert (
+        "visualization/agent-output-throughput/agent-output-throughput-histogram.png"
+        in selection_summary["written_non_json_files"]
+    )
+    assert (
+        "visualization/agent-output-throughput/agent-output-throughput-vs-output-tokens.png"
+        in selection_summary["written_non_json_files"]
+    )
+    assert (
+        "visualization/agent-output-throughput/figures-manifest.json"
+        in selection_summary["written_json_files"]
+    )
+    assert (
+        "visualization/agent-output-throughput/figures-manifest.json"
         in selection_summary["generated_visualization_manifests"]
     )
     assert selection_summary["skipped_visualizations"] == [

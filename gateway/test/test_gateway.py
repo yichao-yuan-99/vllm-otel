@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
+import stat
 import sys
 import tarfile
 from pathlib import Path
@@ -21,8 +23,14 @@ from gateway.app import (
     GatewayService,
     create_app,
     create_gateway_service,
+    sha256_hex,
 )
-from gateway.cli import resolve_listener_ports
+from gateway.cli import (
+    _create_unix_listen_socket,
+    _default_ipc_socket_path,
+    _resolve_ipc_socket_path,
+    resolve_listener_ports,
+)
 from gateway.model_configs import load_model_registry
 from gateway.port_profiles import load_port_profile
 from gateway.runtime_config import GatewayRuntimeSettings, load_runtime_settings
@@ -34,6 +42,7 @@ def build_client(
     job_end_trace_wait_seconds: float = 0.0,
     base_url: str = "http://testserver",
     response_json_factory: Any | None = None,
+    forwarder: Any | None = None,
 ) -> TestClient:
     captured: dict[str, str | None] = {"traceparent": None}
 
@@ -70,7 +79,7 @@ def build_client(
             artifact_compression=artifact_compression,
             job_end_trace_wait_seconds=job_end_trace_wait_seconds,
         ),
-        forwarder=fake_forward,
+        forwarder=forwarder or fake_forward,
         jaeger_fetcher=fake_jaeger_fetch,
         service_name="gateway-test",
     )
@@ -223,6 +232,7 @@ def test_job_start_rejects_when_job_active(tmp_path: Path) -> None:
     response = client.post("/job/start", json={"output_location": str(second_output)})
     assert response.status_code == 409
     assert "job already active" in response.json()["detail"]
+
 
 def test_job_end_blocks_for_configured_wait(monkeypatch, tmp_path: Path) -> None:
     observed_sleep: list[float] = []
@@ -430,6 +440,358 @@ def test_gateway_parse_port_is_noop_without_configured_reasoning_parser(tmp_path
     assert message["content"] == "plain answer"
     assert message["reasoning"] is None
     assert message["reasoning_content"] is None
+
+
+def test_ipc_context_reports_active_agent_context_usage(tmp_path: Path) -> None:
+    def response_json_factory(request_json: dict[str, Any]) -> dict[str, Any]:
+        usage = request_json["test_usage"]
+        return {
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "model": request_json["model"],
+            "usage": usage,
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
+        }
+
+    client = build_client(response_json_factory=response_json_factory)
+    token_a = "agent-token-a"
+    token_b = "agent-token-b"
+
+    assert client.post("/job/start", json={"output_location": str(tmp_path / "ipc-out")}).status_code == 200
+    assert client.post("/agent/start", json={"api_token": token_a}).status_code == 200
+    assert client.post("/agent/start", json={"api_token": token_b}).status_code == 200
+
+    response = client.get("/ipc/context")
+    assert response.status_code == 200
+    assert response.json()["agent_count"] == 2
+    assert response.json()["total_context_tokens"] == 0
+
+    assert client.post(
+        "/v1/chat/completions",
+        headers={"x-api-key": token_a},
+        json={
+            "model": "Qwen3-Coder-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "hi"}],
+            "test_usage": {"prompt_tokens": 1000, "completion_tokens": 200},
+        },
+    ).status_code == 200
+    assert client.post(
+        "/v1/chat/completions",
+        headers={"x-api-key": token_b},
+        json={
+            "model": "Qwen3-Coder-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "hi"}],
+            "test_usage": {"prompt_tokens": 400, "completion_tokens": 100},
+        },
+    ).status_code == 200
+
+    response = client.get("/ipc/context")
+    assert response.status_code == 200
+    payload = response.json()
+    active_runs = client.app.state.gateway_service.active_runs
+    assert payload["agent_count"] == 2
+    assert payload["total_context_tokens"] == 1700
+    assert payload["agents"] == [
+        {
+            "api_token_hash": sha256_hex(token_a),
+            "trace_id": active_runs[token_a].trace_id,
+            "run_start_time": active_runs[token_a].run_start_time,
+            "context_tokens": 1200,
+        },
+        {
+            "api_token_hash": sha256_hex(token_b),
+            "trace_id": active_runs[token_b].trace_id,
+            "run_start_time": active_runs[token_b].run_start_time,
+            "context_tokens": 500,
+        },
+    ]
+
+    assert client.post(
+        "/v1/chat/completions",
+        headers={"x-api-key": token_a},
+        json={
+            "model": "Qwen3-Coder-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "again"}],
+            "test_usage": {"prompt_tokens": 1300, "completion_tokens": 300},
+        },
+    ).status_code == 200
+
+    response = client.get("/ipc/context")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["agent_count"] == 2
+    assert payload["total_context_tokens"] == 2100
+
+    assert client.post("/agent/end", json={"api_token": token_b, "return_code": 0}).status_code == 200
+    response = client.get("/ipc/context")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["agent_count"] == 1
+    assert payload["total_context_tokens"] == 1600
+    assert payload["agents"] == [
+        {
+            "api_token_hash": sha256_hex(token_a),
+            "trace_id": active_runs[token_a].trace_id,
+            "run_start_time": active_runs[token_a].run_start_time,
+            "context_tokens": 1600,
+        }
+    ]
+
+
+def test_ipc_context_keeps_last_known_value_when_usage_is_missing(tmp_path: Path) -> None:
+    def response_json_factory(request_json: dict[str, Any]) -> dict[str, Any]:
+        if request_json.get("omit_usage"):
+            return {
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "model": request_json["model"],
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
+            }
+        return {
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "model": request_json["model"],
+            "usage": request_json["test_usage"],
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
+        }
+
+    client = build_client(response_json_factory=response_json_factory)
+    token = "agent-token-ipc-missing"
+
+    assert client.post("/job/start", json={"output_location": str(tmp_path / "ipc-missing")}).status_code == 200
+    assert client.post("/agent/start", json={"api_token": token}).status_code == 200
+
+    assert client.post(
+        "/v1/chat/completions",
+        headers={"x-api-key": token},
+        json={
+            "model": "Qwen3-Coder-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "hi"}],
+            "test_usage": {"prompt_tokens": 1000, "completion_tokens": 200},
+        },
+    ).status_code == 200
+    assert client.get("/ipc/context").json()["total_context_tokens"] == 1200
+
+    assert client.post(
+        "/v1/chat/completions",
+        headers={"x-api-key": token},
+        json={
+            "model": "Qwen3-Coder-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "hi again"}],
+            "omit_usage": True,
+        },
+    ).status_code == 200
+    assert client.get("/ipc/context").json()["total_context_tokens"] == 1200
+
+
+def test_ipc_output_throughput_reports_summary_and_details(tmp_path: Path) -> None:
+    async def fake_forward(
+        method: str,
+        path: str,
+        headers: dict[str, str],
+        body: bytes,
+    ) -> ForwardResult:
+        request_json = json.loads(body.decode("utf-8")) if body else {}
+        await asyncio.sleep(float(request_json.get("test_delay_s", 0.0)))
+        response_json = {
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "model": request_json["model"],
+            "usage": request_json["test_usage"],
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
+        }
+        return ForwardResult(
+            status_code=200,
+            content=json.dumps(response_json).encode("utf-8"),
+            content_type="application/json",
+            response_json=response_json,
+        )
+
+    client = build_client(forwarder=fake_forward)
+    token_a = "agent-token-throughput-a"
+    token_b = "agent-token-throughput-b"
+
+    assert client.post("/job/start", json={"output_location": str(tmp_path / "ipc-throughput")}).status_code == 200
+    assert client.post("/agent/start", json={"api_token": token_a}).status_code == 200
+    assert client.post("/agent/start", json={"api_token": token_b}).status_code == 200
+
+    response = client.get("/ipc/output-throughput")
+    assert response.status_code == 200
+    assert response.json()["agent_count"] == 2
+    assert response.json()["throughput_agent_count"] == 0
+    assert response.json()["min_output_tokens_per_s"] is None
+    assert response.json()["max_output_tokens_per_s"] is None
+    assert response.json()["avg_output_tokens_per_s"] is None
+
+    response = client.get("/ipc/output-throughput/agents")
+    assert response.status_code == 200
+    payload = response.json()
+    active_runs = client.app.state.gateway_service.active_runs
+    expected_agents = [
+        {
+            "api_token_hash": run.api_token_hash,
+            "output_tokens_per_s": None,
+        }
+        for run in sorted(
+            active_runs.values(),
+            key=lambda run: (run.run_start_time, run.api_token_hash, run.trace_id),
+        )
+    ]
+    assert payload["agent_count"] == 2
+    assert payload["agents"] == expected_agents
+
+    assert client.post(
+        "/v1/chat/completions",
+        headers={"x-api-key": token_a},
+        json={
+            "model": "Qwen3-Coder-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "hi"}],
+            "test_delay_s": 0.04,
+            "test_usage": {"prompt_tokens": 1000, "completion_tokens": 120},
+        },
+    ).status_code == 200
+    assert client.post(
+        "/v1/chat/completions",
+        headers={"x-api-key": token_b},
+        json={
+            "model": "Qwen3-Coder-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "hi"}],
+            "test_delay_s": 0.01,
+            "test_usage": {"prompt_tokens": 400, "completion_tokens": 80},
+        },
+    ).status_code == 200
+
+    active_runs = client.app.state.gateway_service.active_runs
+    expected_agents = [
+        {
+            "api_token_hash": run.api_token_hash,
+            "output_tokens_per_s": (
+                round(run.current_output_tokens_per_s, 6)
+                if run.current_output_tokens_per_s is not None
+                else None
+            ),
+        }
+        for run in sorted(
+            active_runs.values(),
+            key=lambda run: (run.run_start_time, run.api_token_hash, run.trace_id),
+        )
+    ]
+    expected_values = [
+        agent["output_tokens_per_s"]
+        for agent in expected_agents
+        if agent["output_tokens_per_s"] is not None
+    ]
+
+    response = client.get("/ipc/output-throughput")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["agent_count"] == 2
+    assert payload["throughput_agent_count"] == 2
+    assert payload["min_output_tokens_per_s"] == min(expected_values)
+    assert payload["max_output_tokens_per_s"] == max(expected_values)
+    assert payload["avg_output_tokens_per_s"] == round(
+        sum(expected_values) / len(expected_values),
+        6,
+    )
+
+    response = client.get("/ipc/output-throughput/agents")
+    assert response.status_code == 200
+    assert response.json()["agents"] == expected_agents
+
+    assert client.post("/agent/end", json={"api_token": token_b, "return_code": 0}).status_code == 200
+
+    response = client.get("/ipc/output-throughput")
+    assert response.status_code == 200
+    payload = response.json()
+    remaining_run = client.app.state.gateway_service.active_runs[token_a]
+    remaining_throughput = round(remaining_run.current_output_tokens_per_s, 6)
+    assert payload["agent_count"] == 1
+    assert payload["throughput_agent_count"] == 1
+    assert payload["min_output_tokens_per_s"] == remaining_throughput
+    assert payload["max_output_tokens_per_s"] == remaining_throughput
+    assert payload["avg_output_tokens_per_s"] == remaining_throughput
+
+    response = client.get("/ipc/output-throughput/agents")
+    assert response.status_code == 200
+    assert response.json()["agents"] == [
+        {
+            "api_token_hash": remaining_run.api_token_hash,
+            "output_tokens_per_s": remaining_throughput,
+        }
+    ]
+
+
+def test_ipc_output_throughput_keeps_last_known_value_when_usage_is_missing(
+    tmp_path: Path,
+) -> None:
+    async def fake_forward(
+        method: str,
+        path: str,
+        headers: dict[str, str],
+        body: bytes,
+    ) -> ForwardResult:
+        request_json = json.loads(body.decode("utf-8")) if body else {}
+        await asyncio.sleep(float(request_json.get("test_delay_s", 0.0)))
+        response_json = {
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "model": request_json["model"],
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
+        }
+        if not request_json.get("omit_usage"):
+            response_json["usage"] = request_json["test_usage"]
+        return ForwardResult(
+            status_code=200,
+            content=json.dumps(response_json).encode("utf-8"),
+            content_type="application/json",
+            response_json=response_json,
+        )
+
+    client = build_client(forwarder=fake_forward)
+    token = "agent-token-throughput-missing"
+
+    assert client.post(
+        "/job/start",
+        json={"output_location": str(tmp_path / "ipc-throughput-missing")},
+    ).status_code == 200
+    assert client.post("/agent/start", json={"api_token": token}).status_code == 200
+
+    assert client.post(
+        "/v1/chat/completions",
+        headers={"x-api-key": token},
+        json={
+            "model": "Qwen3-Coder-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "hi"}],
+            "test_delay_s": 0.02,
+            "test_usage": {"prompt_tokens": 1000, "completion_tokens": 120},
+        },
+    ).status_code == 200
+
+    first_detail = client.get("/ipc/output-throughput/agents").json()
+    assert first_detail["agent_count"] == 1
+    first_value = first_detail["agents"][0]["output_tokens_per_s"]
+    assert first_value is not None
+
+    assert client.post(
+        "/v1/chat/completions",
+        headers={"x-api-key": token},
+        json={
+            "model": "Qwen3-Coder-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "hi again"}],
+            "test_delay_s": 0.02,
+            "omit_usage": True,
+        },
+    ).status_code == 200
+
+    second_detail = client.get("/ipc/output-throughput/agents").json()
+    assert second_detail["agents"] == first_detail["agents"]
+
+    summary = client.get("/ipc/output-throughput").json()
+    assert summary["agent_count"] == 1
+    assert summary["throughput_agent_count"] == 1
+    assert summary["min_output_tokens_per_s"] == first_value
+    assert summary["max_output_tokens_per_s"] == first_value
+    assert summary["avg_output_tokens_per_s"] == first_value
 
 
 def test_gateway_forward_to_vllm_uses_no_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -661,12 +1023,45 @@ def test_listener_ports_preserve_parse_port_when_model_has_reasoning_parser() ->
     assert parse_port == 28171
 
 
+def test_default_ipc_socket_path_uses_port_profile_id() -> None:
+    assert _default_ipc_socket_path(0) == Path("/tmp/vllm-gateway-profile-0.sock")
+    assert _default_ipc_socket_path("3") == Path("/tmp/vllm-gateway-profile-3.sock")
+
+
+def test_resolve_ipc_socket_path_defaults_to_profile_specific_path() -> None:
+    assert _resolve_ipc_socket_path(
+        ipc_enabled=True,
+        configured_socket_path=None,
+        profile_id=2,
+    ) == Path("/tmp/vllm-gateway-profile-2.sock")
+
+
+def test_resolve_ipc_socket_path_respects_disable_and_override(tmp_path: Path) -> None:
+    custom_socket_path = tmp_path / "custom.sock"
+
+    assert _resolve_ipc_socket_path(
+        ipc_enabled=False,
+        configured_socket_path=None,
+        profile_id=2,
+    ) is None
+    assert _resolve_ipc_socket_path(
+        ipc_enabled=True,
+        configured_socket_path=str(custom_socket_path),
+        profile_id=2,
+    ) == custom_socket_path.resolve()
+
+
 def test_gateway_config_reads_runtime_settings() -> None:
     settings = GatewayRuntimeSettings(
         artifact_compression="tar.gz",
         job_end_trace_wait_seconds=2.5,
         service_name="gateway-custom",
         otlp_traces_insecure=False,
+        ipc_enabled=True,
+        ipc_socket_path="/tmp/vllm-gateway.sock",
+        ipc_socket_permissions=0o666,
+        ipc_socket_uid=1234,
+        ipc_socket_gid=5678,
     )
 
     cfg = GatewayConfig.from_port_profile(0, runtime_settings=settings)
@@ -700,6 +1095,13 @@ def test_runtime_settings_load_from_toml(tmp_path: Path) -> None:
                 'artifact_compression = "tar.gz"',
                 "job_end_trace_wait_seconds = 3.5",
                 "",
+                "[ipc]",
+                "enabled = false",
+                'socket_path = "/tmp/vllm-gateway.sock"',
+                'socket_permissions = "666"',
+                "socket_uid = 1234",
+                "socket_gid = 5678",
+                "",
             ]
         ),
         encoding="utf-8",
@@ -712,3 +1114,89 @@ def test_runtime_settings_load_from_toml(tmp_path: Path) -> None:
     assert settings.otlp_traces_insecure is False
     assert settings.artifact_compression == "tar.gz"
     assert settings.job_end_trace_wait_seconds == 3.5
+    assert settings.ipc_enabled is False
+    assert settings.ipc_socket_path == "/tmp/vllm-gateway.sock"
+    assert settings.ipc_socket_permissions == 0o666
+    assert settings.ipc_socket_uid == 1234
+    assert settings.ipc_socket_gid == 5678
+
+
+def test_runtime_settings_default_ipc_is_enabled(tmp_path: Path) -> None:
+    config_path = tmp_path / "gateway-default-ipc.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "schema_version = 1",
+                "",
+                "[run]",
+                "port_profile_id = 2",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_runtime_settings(config_path, allow_missing=False)
+    assert settings.ipc_enabled is True
+    assert settings.ipc_socket_path is None
+
+
+def test_create_unix_listen_socket_creates_socket_with_permissions(tmp_path: Path) -> None:
+    socket_path = tmp_path / "gateway.sock"
+
+    listen_socket = _create_unix_listen_socket(
+        socket_path,
+        permissions=0o660,
+        uid=None,
+        gid=None,
+    )
+    try:
+        assert socket_path.exists()
+        assert listen_socket.family == socket.AF_UNIX
+        assert stat.S_IMODE(socket_path.stat().st_mode) == 0o660
+    finally:
+        listen_socket.close()
+        if socket_path.exists():
+            socket_path.unlink()
+
+
+def test_create_unix_listen_socket_reuses_stale_socket_path(tmp_path: Path) -> None:
+    socket_path = tmp_path / "gateway.sock"
+    stale_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stale_socket.bind(str(socket_path))
+    stale_socket.close()
+
+    listen_socket = _create_unix_listen_socket(
+        socket_path,
+        permissions=0o660,
+        uid=None,
+        gid=None,
+    )
+    try:
+        assert socket_path.exists()
+        assert listen_socket.family == socket.AF_UNIX
+        assert stat.S_IMODE(socket_path.stat().st_mode) == 0o660
+    finally:
+        listen_socket.close()
+        if socket_path.exists():
+            socket_path.unlink()
+
+
+def test_create_unix_listen_socket_rejects_active_socket(tmp_path: Path) -> None:
+    socket_path = tmp_path / "gateway.sock"
+    active_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        active_socket.bind(str(socket_path))
+        active_socket.listen(1)
+
+        with pytest.raises(RuntimeError, match="IPC socket path already exists and is active"):
+            _create_unix_listen_socket(
+                socket_path,
+                permissions=0o660,
+                uid=None,
+                gid=None,
+            )
+    finally:
+        active_socket.close()
+        if socket_path.exists():
+            socket_path.unlink()

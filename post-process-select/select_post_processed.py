@@ -567,6 +567,26 @@ class Selector:
                 },
             )
 
+        if self._has_output_file("agent-output-throughput/agent-output-throughput.json"):
+            self._run_visualization_generator(
+                name="agent-output-throughput",
+                module_cache_key="visualization_agent_output_throughput",
+                module_relative_path=(
+                    "post-process/visualization/agent-output-throughput/generate_all_figures.py"
+                ),
+                function_name="generate_figures_for_run_dir",
+                kwargs={
+                    "agent_output_input_path": self._output_path(
+                        "agent-output-throughput/agent-output-throughput.json"
+                    ),
+                    "output_dir": self._output_path(
+                        "visualization/agent-output-throughput"
+                    ),
+                    "image_format": DEFAULT_VISUALIZATION_FORMAT,
+                    "dpi": DEFAULT_VISUALIZATION_DPI,
+                },
+            )
+
         if self._has_output_file("job-concurrency/job-concurrency-timeseries.json"):
             self._run_visualization_generator(
                 name="job-concurrency",
@@ -958,6 +978,120 @@ class Selector:
             "avg_concurrency": avg_concurrency,
             "concurrency_points": concurrency_points,
         }
+
+    def build_agent_output_throughput_payload(self) -> dict[str, Any]:
+        source_payload = self._load_source_json(
+            "agent-output-throughput/agent-output-throughput.json"
+        )
+        if not isinstance(source_payload, dict):
+            raise ValueError(
+                "agent-output-throughput/agent-output-throughput.json must be a JSON object"
+            )
+
+        helper = _load_helper_module(
+            "agent_output_throughput_extract",
+            "post-process/agent-output-throughput/extract_run.py",
+        )
+
+        api_token_hash_by_run_id: dict[str, Any] = {}
+        gateway_profile_id_by_run_id: dict[str, Any] = {}
+        raw_agents = source_payload.get("agents")
+        if isinstance(raw_agents, list):
+            for agent in raw_agents:
+                if not isinstance(agent, dict):
+                    continue
+                gateway_run_id = agent.get("gateway_run_id")
+                if not isinstance(gateway_run_id, str) or not gateway_run_id:
+                    continue
+                api_token_hash_by_run_id[gateway_run_id] = agent.get("api_token_hash")
+                gateway_profile_id_by_run_id[gateway_run_id] = agent.get(
+                    "gateway_profile_id"
+                )
+
+        run_accumulator = helper._new_throughput_accumulator()
+        agent_accumulators: dict[str, dict[str, Any]] = {}
+
+        for record in self._selected_request_records():
+            completion_tokens = _int_or_none(record.get("completion_tokens"))
+            if completion_tokens is not None and completion_tokens < 0:
+                completion_tokens = None
+            request_duration_s = helper._extract_request_duration_s(record)
+            helper._add_request_to_accumulator(
+                run_accumulator,
+                completion_tokens=completion_tokens,
+                request_duration_s=request_duration_s,
+            )
+
+            gateway_run_id = record.get("gateway_run_id")
+            if not isinstance(gateway_run_id, str) or not gateway_run_id:
+                continue
+
+            agent_payload = agent_accumulators.get(gateway_run_id)
+            if agent_payload is None:
+                gateway_profile_id = record.get("gateway_profile_id")
+                if gateway_profile_id is None:
+                    gateway_profile_id = gateway_profile_id_by_run_id.get(
+                        gateway_run_id
+                    )
+                agent_payload = {
+                    "gateway_run_id": gateway_run_id,
+                    "gateway_profile_id": gateway_profile_id,
+                    "api_token_hash": api_token_hash_by_run_id.get(gateway_run_id),
+                    "_throughput_accumulator": helper._new_throughput_accumulator(),
+                }
+                agent_accumulators[gateway_run_id] = agent_payload
+
+            helper._add_request_to_accumulator(
+                agent_payload["_throughput_accumulator"],
+                completion_tokens=completion_tokens,
+                request_duration_s=request_duration_s,
+            )
+
+        agents: list[dict[str, Any]] = []
+        for gateway_run_id in sorted(agent_accumulators):
+            agent_payload = agent_accumulators[gateway_run_id]
+            throughput_payload = helper._payload_from_accumulator(
+                agent_payload.pop("_throughput_accumulator")
+            )
+            throughput_payload.update(
+                {
+                    "gateway_run_id": agent_payload["gateway_run_id"],
+                    "gateway_profile_id": agent_payload.get("gateway_profile_id"),
+                    "api_token_hash": agent_payload.get("api_token_hash"),
+                }
+            )
+            agents.append(throughput_payload)
+
+        throughput_values = [
+            float(agent["output_throughput_tokens_per_s"])
+            for agent in agents
+            if isinstance(agent.get("output_throughput_tokens_per_s"), (int, float))
+        ]
+
+        result = helper._payload_from_accumulator(run_accumulator)
+        result.update(
+            {
+                "source_run_dir": source_payload.get("source_run_dir"),
+                "source_gateway_output_dir": source_payload.get(
+                    "source_gateway_output_dir"
+                ),
+                "service_failure_detected": bool(
+                    source_payload.get("service_failure_detected", False)
+                ),
+                "service_failure_cutoff_time_utc": source_payload.get(
+                    "service_failure_cutoff_time_utc"
+                ),
+                "agent_count": len(agents),
+                "agent_output_throughput_tokens_per_s_summary": helper._summarize_values(
+                    throughput_values
+                ),
+                "agent_output_throughput_tokens_per_s_histogram": (
+                    helper.build_agent_output_throughput_histogram(throughput_values)
+                ),
+                "agents": agents,
+            }
+        )
+        return result
 
     def _load_source_requests_payload(self) -> dict[str, Any]:
         if self._source_requests_payload is not None:
@@ -1866,6 +2000,14 @@ class Selector:
             for relative_path, payload in sorted(llm_payloads.items()):
                 if relative_path in self.source_json_paths:
                     self._write_output(relative_path, payload)
+
+        if self._has_source_json(
+            "agent-output-throughput/agent-output-throughput.json"
+        ) and self._has_source_json("gateway/llm-requests/llm-requests.json"):
+            self._write_output(
+                "agent-output-throughput/agent-output-throughput.json",
+                self.build_agent_output_throughput_payload(),
+            )
 
         if self._has_source_json("gateway/usage/usage-summary.json") and self._has_source_json(
             "gateway/llm-requests/llm-requests.json"

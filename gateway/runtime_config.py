@@ -22,6 +22,11 @@ class GatewayRuntimeSettings:
     otlp_traces_insecure: bool = True
     artifact_compression: str = "none"
     job_end_trace_wait_seconds: float = 10.0
+    ipc_enabled: bool = True
+    ipc_socket_path: str | None = None
+    ipc_socket_permissions: int = 0o660
+    ipc_socket_uid: int | None = None
+    ipc_socket_gid: int | None = None
 
 
 def _load_toml(path: Path) -> dict[str, Any]:
@@ -73,6 +78,27 @@ def _parse_float(value: object, key: str, *, default: float) -> float:
     return float(value)
 
 
+def _parse_octal_permissions(value: object, key: str, *, default: int) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be an octal permission string")
+    if isinstance(value, int):
+        raw = str(value)
+    elif isinstance(value, str):
+        raw = value.strip()
+    else:
+        raise ValueError(f"{key} must be an octal permission string")
+    if not raw:
+        raise ValueError(f"{key} cannot be empty")
+    try:
+        return int(raw, 8)
+    except ValueError as exc:
+        raise ValueError(
+            f"{key} must be an octal permission string like '660'"
+        ) from exc
+
+
 def load_runtime_settings(
     config_path: Path | None = None,
     *,
@@ -88,6 +114,7 @@ def load_runtime_settings(
     run_table = _require_table(payload.get("run"), "run")
     gateway_table = _require_table(payload.get("gateway"), "gateway")
     telemetry_table = _require_table(payload.get("telemetry"), "telemetry")
+    ipc_table = _require_table(payload.get("ipc"), "ipc")
 
     return GatewayRuntimeSettings(
         port_profile_id=_parse_optional_int(run_table.get("port_profile_id"), "run.port_profile_id"),
@@ -107,4 +134,17 @@ def load_runtime_settings(
             "gateway.job_end_trace_wait_seconds",
             default=10.0,
         ),
+        ipc_enabled=_parse_bool(
+            ipc_table.get("enabled"),
+            "ipc.enabled",
+            default=True,
+        ),
+        ipc_socket_path=_parse_optional_str(ipc_table.get("socket_path"), "ipc.socket_path"),
+        ipc_socket_permissions=_parse_octal_permissions(
+            ipc_table.get("socket_permissions"),
+            "ipc.socket_permissions",
+            default=0o660,
+        ),
+        ipc_socket_uid=_parse_optional_int(ipc_table.get("socket_uid"), "ipc.socket_uid"),
+        ipc_socket_gid=_parse_optional_int(ipc_table.get("socket_gid"), "ipc.socket_gid"),
     )

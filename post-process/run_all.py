@@ -145,6 +145,7 @@ def _build_step_commands_for_run_dir(
         "job-throughput/extract_run.py",
         "job-concurrency/extract_run.py",
         "gateway/llm-requests/extract_run.py",
+        "agent-output-throughput/extract_run.py",
         "prefill-concurrency/extract_run.py",
         "gateway/stack/extract_run.py",
         "gateway/stack-context/extract_run.py",
@@ -155,12 +156,15 @@ def _build_step_commands_for_run_dir(
         "vllm-metrics/summarize_timeseries.py",
         "power/extract_run.py",
         "power-sampling/extract_run.py",
+        "freq-control/extract_run.py",
+        "slo-decision/extract_run.py",
         "key-stats/extract_run.py",
     ]
     if not skip_visualization:
         steps.extend(
             [
                 "visualization/job-throughput/generate_all_figures.py",
+                "visualization/agent-output-throughput/generate_all_figures.py",
                 "visualization/job-concurrency/generate_all_figures.py",
                 "visualization/prefill-concurrency/generate_all_figures.py",
                 "visualization/gateway-stack/generate_all_figures.py",
@@ -168,6 +172,8 @@ def _build_step_commands_for_run_dir(
                 "visualization/gateway-stack-kv/generate_all_figures.py",
                 "visualization/vllm-metrics/generate_all_figures.py",
                 "visualization/power/generate_all_figures.py",
+                "visualization/freq-control/generate_all_figures.py",
+                "visualization/slo-decision/generate_all_figures.py",
             ]
         )
 
@@ -200,6 +206,7 @@ def _build_step_commands_for_root_dir(
         "job-throughput/extract_run.py",
         "job-concurrency/extract_run.py",
         "gateway/llm-requests/extract_run.py",
+        "agent-output-throughput/extract_run.py",
         "prefill-concurrency/extract_run.py",
         "gateway/stack/extract_run.py",
         "gateway/stack-context/extract_run.py",
@@ -210,12 +217,15 @@ def _build_step_commands_for_root_dir(
         "vllm-metrics/summarize_timeseries.py",
         "power/extract_run.py",
         "power-sampling/extract_run.py",
+        "freq-control/extract_run.py",
+        "slo-decision/extract_run.py",
         "key-stats/extract_run.py",
     ]
     if not skip_visualization:
         steps.extend(
             [
                 "visualization/job-throughput/generate_all_figures.py",
+                "visualization/agent-output-throughput/generate_all_figures.py",
                 "visualization/job-concurrency/generate_all_figures.py",
                 "visualization/prefill-concurrency/generate_all_figures.py",
                 "visualization/gateway-stack/generate_all_figures.py",
@@ -223,6 +233,8 @@ def _build_step_commands_for_root_dir(
                 "visualization/gateway-stack-kv/generate_all_figures.py",
                 "visualization/vllm-metrics/generate_all_figures.py",
                 "visualization/power/generate_all_figures.py",
+                "visualization/freq-control/generate_all_figures.py",
+                "visualization/slo-decision/generate_all_figures.py",
             ]
         )
 

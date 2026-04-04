@@ -9,10 +9,13 @@ outputs.
 - `global-progress`: run-level replay completion milestone timing
 - `job-throughput`: moving replay/job throughput over time for each run
 - `job-concurrency`: per-second active job concurrency over time for each run
+- `agent-output-throughput`: per-agent output-token throughput from gateway request logs
+- `slo-decision`: SLO-triggered controller decisions from the SLO linespace controller
 - `split/duration`: context-usage percentile split tables for per-job duration/turn/token metrics
 - `vllm-metrics`: parse/extract/summarize vLLM Prometheus metrics
 - `power`: summarize GPU power traces and estimate total run energy
 - `power-sampling`: sample interpolated power at prefill-concurrency ticks
+- `freq-control`: summarize freq-controller query/decision logs and recover the control timeline
 - `gateway/llm-requests`: flatten and summarize gateway LLM request traces
 - `prefill-concurrency`: 10ms prefill-phase concurrency series from LLM request spans
 - `gateway/stack`: recover stacked per-second gateway token throughput from request ranges
@@ -27,12 +30,17 @@ outputs.
 - `post-process/global-progress/README.md`
 - `post-process/job-throughput/README.md`
 - `post-process/job-concurrency/README.md`
+- `post-process/agent-output-throughput/README.md`
+- `post-process/slo-decision/README.md`
 - `post-process/visualization/job-throughput/README.md`
+- `post-process/visualization/agent-output-throughput/README.md`
+- `post-process/visualization/slo-decision/README.md`
 - `post-process/visualization/job-concurrency/README.md`
 - `post-process/split/duration/README.md`
 - `post-process/vllm-metrics/README.md`
 - `post-process/power/README.md`
 - `post-process/power-sampling/README.md`
+- `post-process/freq-control/README.md`
 - `post-process/gateway/llm-requests/README.md`
 - `post-process/prefill-concurrency/README.md`
 - `post-process/gateway/stack/README.md`
@@ -46,6 +54,7 @@ outputs.
 - `post-process/visualization/vllm-metrics/README.md`
 - `post-process/visualization/power/README.md`
 - `post-process/visualization/prefill-concurrency/README.md`
+- `post-process/visualization/freq-control/README.md`
 
 ## Script Index
 
@@ -73,26 +82,32 @@ Pipeline order:
 4. `job-throughput/extract_run.py`
 5. `job-concurrency/extract_run.py`
 6. `gateway/llm-requests/extract_run.py`
-7. `prefill-concurrency/extract_run.py`
-8. `gateway/stack/extract_run.py`
-9. `gateway/stack-context/extract_run.py`
-10. `gateway/stack-kv/extract_run.py`
-11. `gateway/usage/extract_run.py`
-12. `split/duration/extract_run.py`
-13. `vllm-metrics/extract_run.py`
-14. `vllm-metrics/summarize_timeseries.py`
-15. `power/extract_run.py`
-16. `power-sampling/extract_run.py`
-17. `key-stats/extract_run.py`
-18. `visualization/job-throughput/generate_all_figures.py`
-19. `visualization/job-concurrency/generate_all_figures.py`
-20. `visualization/prefill-concurrency/generate_all_figures.py`
-21. `visualization/gateway-stack/generate_all_figures.py`
-22. `visualization/gateway-stack-context/generate_all_figures.py`
-23. `visualization/gateway-stack-kv/generate_all_figures.py`
-24. `visualization/vllm-metrics/generate_all_figures.py`
-25. `visualization/power/generate_all_figures.py`
-26. `global/aggregate_runs_csv.py` (root-dir mode only, skipped in dry-run)
+7. `agent-output-throughput/extract_run.py`
+8. `prefill-concurrency/extract_run.py`
+9. `gateway/stack/extract_run.py`
+10. `gateway/stack-context/extract_run.py`
+11. `gateway/stack-kv/extract_run.py`
+12. `gateway/usage/extract_run.py`
+13. `split/duration/extract_run.py`
+14. `vllm-metrics/extract_run.py`
+15. `vllm-metrics/summarize_timeseries.py`
+16. `power/extract_run.py`
+17. `power-sampling/extract_run.py`
+18. `freq-control/extract_run.py`
+19. `slo-decision/extract_run.py`
+20. `key-stats/extract_run.py`
+21. `visualization/job-throughput/generate_all_figures.py`
+22. `visualization/agent-output-throughput/generate_all_figures.py`
+23. `visualization/job-concurrency/generate_all_figures.py`
+24. `visualization/prefill-concurrency/generate_all_figures.py`
+25. `visualization/gateway-stack/generate_all_figures.py`
+26. `visualization/gateway-stack-context/generate_all_figures.py`
+27. `visualization/gateway-stack-kv/generate_all_figures.py`
+28. `visualization/vllm-metrics/generate_all_figures.py`
+29. `visualization/power/generate_all_figures.py`
+30. `visualization/freq-control/generate_all_figures.py`
+31. `visualization/slo-decision/generate_all_figures.py`
+32. `global/aggregate_runs_csv.py` (root-dir mode only, skipped in dry-run)
 
 ### `global-progress`
 
@@ -144,6 +159,83 @@ Pipeline order:
 - dry-run: `--dry-run`
 - default output:
 - `<run-dir>/post-processed/job-concurrency/job-concurrency-timeseries.json`
+
+### `agent-output-throughput`
+
+- `post-process/agent-output-throughput/extract_run.py`
+- purpose: compute per-agent output-token throughput from gateway request logs
+- supports:
+- single run: `--run-dir <run-dir>`
+- batch discovery: `--root-dir <root-dir>`
+- parallel workers: `--max-procs`
+- dry-run: `--dry-run`
+- default output:
+- `<run-dir>/post-processed/agent-output-throughput/agent-output-throughput.json`
+
+- `post-process/visualization/agent-output-throughput/generate_all_figures.py`
+- purpose: render an output-throughput histogram and an output-tokens-vs-throughput scatter
+  plot for each run
+- supports:
+- single run: `--run-dir <run-dir>`
+- batch discovery: `--root-dir <root-dir>`
+- parallel workers: `--max-procs`
+- dry-run: `--dry-run`
+- rendering controls:
+- `--format`
+- `--dpi`
+- default output:
+- `<run-dir>/post-processed/visualization/agent-output-throughput/`
+
+### `slo-decision`
+
+- `post-process/slo-decision/extract_run.py`
+- purpose: extract SLO-triggered controller decisions from
+  `freq-controller-ls.slo-decision.*.jsonl`
+- supports:
+- single run: `--run-dir <run-dir>`
+- batch discovery: `--root-dir <root-dir>`
+- parallel workers: `--max-procs`
+- dry-run: `--dry-run`
+- default output:
+- `<run-dir>/post-processed/slo-decision/slo-decision-summary.json`
+
+- `post-process/visualization/slo-decision/generate_all_figures.py`
+- purpose: render an SLO-decision timeline showing throughput-triggered control
+  points and resulting frequency targets
+- supports:
+- single run: `--run-dir <run-dir>`
+- batch discovery: `--root-dir <root-dir>`
+- parallel workers: `--max-procs`
+- dry-run: `--dry-run`
+- rendering controls:
+- `--format`
+- `--dpi`
+- default output:
+- `<run-dir>/post-processed/visualization/slo-decision/`
+
+- `post-process/freq-control/extract_run.py`
+- purpose: extract freq-controller query, decision, and control-error history
+- supports:
+- single run: `--run-dir <run-dir>`
+- batch discovery: `--root-dir <root-dir>`
+- parallel workers: `--max-procs`
+- dry-run: `--dry-run`
+- default output:
+- `<run-dir>/post-processed/<freq-control|freq-control-seg|freq-control-linespace>/freq-control-summary.json`
+
+- `post-process/visualization/freq-control/generate_all_figures.py`
+- purpose: render a freq-control timeline showing context/query history,
+  applied frequencies, and both query-read and control-write failures
+- supports:
+- single run: `--run-dir <run-dir>`
+- batch discovery: `--root-dir <root-dir>`
+- parallel workers: `--max-procs`
+- dry-run: `--dry-run`
+- rendering controls:
+- `--format`
+- `--dpi`
+- default output:
+- `<run-dir>/post-processed/visualization/<freq-control|freq-control-seg|freq-control-linespace>/`
 
 - `post-process/visualization/job-concurrency/generate_all_figures.py`
 - purpose: render one concurrency line chart per run from extracted job-concurrency timeseries

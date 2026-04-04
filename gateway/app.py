@@ -109,6 +109,26 @@ def parse_json_if_possible(raw_body: bytes) -> Any:
         return {"raw_body": raw_body.decode("utf-8", errors="replace")}
 
 
+def int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value.is_integer():
+            return int(value)
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return int(stripped)
+        except ValueError:
+            return None
+    return None
+
+
 def listener_port_from_request(request: Request) -> int | None:
     scope_server = request.scope.get("server")
     if isinstance(scope_server, tuple) and len(scope_server) >= 2:
@@ -243,6 +263,10 @@ class RunState:
     active_agent_action_span: Any | None = None
     run_end_time: str | None = None
     return_code: int | None = None
+    current_context_tokens: int = 0
+    total_completion_tokens: int = 0
+    total_llm_request_duration_s: float = 0.0
+    current_output_tokens_per_s: float | None = None
 
 
 class GatewayService:
@@ -366,6 +390,51 @@ class GatewayService:
                 # Best effort flush; artifact generation should continue even if this fails.
                 pass
 
+    @staticmethod
+    def _context_tokens_from_response(response_payload: Any) -> int | None:
+        if not isinstance(response_payload, dict):
+            return None
+        usage = response_payload.get("usage")
+        if not isinstance(usage, dict):
+            return None
+        prompt_tokens = int_or_none(usage.get("prompt_tokens"))
+        if prompt_tokens is None:
+            return None
+        completion_tokens = int_or_none(usage.get("completion_tokens"))
+        if completion_tokens is None:
+            completion_tokens = 0
+        return prompt_tokens + completion_tokens
+
+    @staticmethod
+    def _completion_tokens_from_response(response_payload: Any) -> int | None:
+        if not isinstance(response_payload, dict):
+            return None
+        usage = response_payload.get("usage")
+        if not isinstance(usage, dict):
+            return None
+        return int_or_none(usage.get("completion_tokens"))
+
+    @staticmethod
+    def _output_throughput_from_totals(
+        completion_tokens: int,
+        llm_request_duration_s: float,
+    ) -> float | None:
+        if llm_request_duration_s <= 0.0:
+            return None
+        return completion_tokens / llm_request_duration_s
+
+    @staticmethod
+    def _round_metric(value: float | None) -> float | None:
+        if value is None:
+            return None
+        return round(value, 6)
+
+    def _sorted_active_runs(self) -> list[RunState]:
+        return sorted(
+            self.active_runs.values(),
+            key=lambda run: (run.run_start_time, run.api_token_hash, run.trace_id),
+        )
+
     def start_job(self, output_location: str) -> dict[str, Any]:
         output_path = parse_output_location(output_location)
         output_path.mkdir(parents=True, exist_ok=True)
@@ -456,6 +525,76 @@ class GatewayService:
 
         return {"status": "ok"}
 
+    def get_context_usage_summary(self) -> dict[str, Any]:
+        with self._lock:
+            active_runs = self._sorted_active_runs()
+            agents = [
+                {
+                    "api_token_hash": run.api_token_hash,
+                    "trace_id": run.trace_id,
+                    "run_start_time": run.run_start_time,
+                    "context_tokens": run.current_context_tokens,
+                }
+                for run in active_runs
+            ]
+            total_context_tokens = sum(
+                run.current_context_tokens for run in active_runs
+            )
+            return {
+                "status": "ok",
+                "job_active": self.job_active,
+                "job_started_at": self.job_started_at,
+                "agent_count": len(agents),
+                "total_context_tokens": total_context_tokens,
+                "agents": agents,
+            }
+
+    def get_output_throughput_summary(self) -> dict[str, Any]:
+        with self._lock:
+            active_runs = self._sorted_active_runs()
+            throughput_values = [
+                run.current_output_tokens_per_s
+                for run in active_runs
+                if run.current_output_tokens_per_s is not None
+            ]
+            avg_output_tokens_per_s: float | None = None
+            min_output_tokens_per_s: float | None = None
+            max_output_tokens_per_s: float | None = None
+            if throughput_values:
+                avg_output_tokens_per_s = sum(throughput_values) / len(throughput_values)
+                min_output_tokens_per_s = min(throughput_values)
+                max_output_tokens_per_s = max(throughput_values)
+            return {
+                "status": "ok",
+                "job_active": self.job_active,
+                "job_started_at": self.job_started_at,
+                "agent_count": len(active_runs),
+                "throughput_agent_count": len(throughput_values),
+                "min_output_tokens_per_s": self._round_metric(min_output_tokens_per_s),
+                "max_output_tokens_per_s": self._round_metric(max_output_tokens_per_s),
+                "avg_output_tokens_per_s": self._round_metric(avg_output_tokens_per_s),
+            }
+
+    def get_output_throughput_details(self) -> dict[str, Any]:
+        with self._lock:
+            active_runs = self._sorted_active_runs()
+            agents = [
+                {
+                    "api_token_hash": run.api_token_hash,
+                    "output_tokens_per_s": self._round_metric(
+                        run.current_output_tokens_per_s
+                    ),
+                }
+                for run in active_runs
+            ]
+            return {
+                "status": "ok",
+                "job_active": self.job_active,
+                "job_started_at": self.job_started_at,
+                "agent_count": len(agents),
+                "agents": agents,
+            }
+
     async def proxy_request(
         self,
         api_token: str,
@@ -544,7 +683,8 @@ class GatewayService:
         request_ended_iso = request_ended.isoformat(timespec="milliseconds").replace(
             "+00:00", "Z"
         )
-        duration_ms = round((request_ended - request_started).total_seconds() * 1000, 3)
+        duration_s = max((request_ended - request_started).total_seconds(), 0.0)
+        duration_ms = round(duration_s * 1000, 3)
 
         span_context = span.get_span_context()
         trace_id = f"{span_context.trace_id:032x}"
@@ -596,11 +736,22 @@ class GatewayService:
         }
 
         span.end()
+        updated_context_tokens = self._context_tokens_from_response(response_payload)
+        completion_tokens = self._completion_tokens_from_response(response_payload)
 
         with self._lock:
             active = self.active_runs.get(api_token)
             if active is not None:
                 active.request_records.append(record)
+                if updated_context_tokens is not None:
+                    active.current_context_tokens = updated_context_tokens
+                if completion_tokens is not None:
+                    active.total_completion_tokens += completion_tokens
+                    active.total_llm_request_duration_s += duration_s
+                    active.current_output_tokens_per_s = self._output_throughput_from_totals(
+                        active.total_completion_tokens,
+                        active.total_llm_request_duration_s,
+                    )
                 active.active_agent_action_span = self.tracer.start_span(
                     "agent_action",
                     context=active.root_context,
@@ -835,6 +986,21 @@ def create_app(
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/ipc/context")
+    async def ipc_context() -> dict[str, Any]:
+        gateway_service = get_gateway_service()
+        return gateway_service.get_context_usage_summary()
+
+    @app.get("/ipc/output-throughput")
+    async def ipc_output_throughput() -> dict[str, Any]:
+        gateway_service = get_gateway_service()
+        return gateway_service.get_output_throughput_summary()
+
+    @app.get("/ipc/output-throughput/agents")
+    async def ipc_output_throughput_agents() -> dict[str, Any]:
+        gateway_service = get_gateway_service()
+        return gateway_service.get_output_throughput_details()
 
     @app.post("/job/start")
     async def job_start(payload: JobStartRequest) -> dict[str, Any]:

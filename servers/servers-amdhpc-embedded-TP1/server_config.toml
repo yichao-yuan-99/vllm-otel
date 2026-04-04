@@ -1,0 +1,34 @@
+[server]
+host = "0.0.0.0"
+port = 23971
+
+[cluster]
+login_host = "login"
+job_name_prefix = "vllm_embedded_tp1_"
+job_nodes = 1
+startup_timeout = 900
+startup_timeout_after_running = true
+stop_wait_timeout_seconds = 180
+stop_poll_interval_seconds = 2
+wait_up_poll_interval_seconds = 2
+run_dir = "servers/servers-amdhpc-embedded-TP1/run"
+log_dir = "servers/servers-amdhpc-embedded-TP1/logs"
+state_file = "servers/servers-amdhpc-embedded-TP1/run/control_state.json"
+
+[images]
+jaeger_image = "docker://jaegertracing/all-in-one:1.57"
+vllm_image = "docker://yichaoyuan/vllm-openai-otel:v0.16.0-otel-lp-rocm"
+
+[partition.mi3001x]
+gpus_per_node = 1
+gpu_memory_gb = 192
+total_vram_gb = 192
+max_time = "04:00:00"
+sif_img = "vllm-vllm-openai-rocm:v0.17.1-otel-lp-rocm-lmcache-gfx942.sif"
+
+[partition.mi3008x]
+gpus_per_node = 8
+gpu_memory_gb = 192
+total_vram_gb = 1536
+max_time = "12:00:00"
+sif_img = "vllm-vllm-openai-rocm:v0.17.1-otel-lp-rocm-lmcache-gfx942.sif"

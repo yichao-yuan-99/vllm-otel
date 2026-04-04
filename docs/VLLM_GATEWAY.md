@@ -57,6 +57,9 @@ Build a gateway in front of vLLM to analyze multi-agent behavior with trace-leve
   - Output: status.
 - `POST /v1/*`
   - Standard OpenAI-compatible proxy path to vLLM.
+- `GET /ipc/context`
+  - Default-on local IPC endpoint over a Unix domain socket.
+  - Output: active `agent_count`, `total_context_tokens`, and per-agent `context_tokens`.
 
 ## Timestamp Format
 

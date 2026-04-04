@@ -7,6 +7,7 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import errno
 import hashlib
 import json
 import math
@@ -15,6 +16,7 @@ from pathlib import Path
 import re
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -63,6 +65,7 @@ DEFAULT_GATEWAY_CONFIG_PATH = REPO_ROOT / "gateway" / "config.toml"
 DEFAULT_GATEWAY_CONFIG_EXAMPLE_PATH = REPO_ROOT / "gateway" / "config.example.toml"
 DEFAULT_GATEWAY_VENV_DIR = REPO_ROOT / ".venv"
 DEFAULT_GATEWAY_HOST = "0.0.0.0"
+DEFAULT_GATEWAY_IPC_SOCKET_DIR = Path("/tmp")
 DEFAULT_GATEWAY_PID_FILE_PREFIX = "gateway_d"
 DEFAULT_GATEWAY_LOG_FILE_PREFIX = "gateway_d"
 VLLM_CRASH_LOOP_RESTART_THRESHOLD = 3
@@ -555,6 +558,100 @@ def _resolve_gateway_config_path() -> Path:
     return DEFAULT_GATEWAY_CONFIG_EXAMPLE_PATH
 
 
+def _resolve_repo_relative_path(path: Path) -> Path:
+    expanded = path.expanduser()
+    if expanded.is_absolute():
+        return expanded.resolve()
+    return (REPO_ROOT / expanded).resolve()
+
+
+def _default_gateway_ipc_socket_path(port_profile_id: int) -> Path:
+    return DEFAULT_GATEWAY_IPC_SOCKET_DIR / f"vllm-gateway-profile-{port_profile_id}.sock"
+
+
+def _resolve_gateway_ipc_socket_path(port_profile_id: int) -> Path | None:
+    config_path = _resolve_gateway_config_path()
+    try:
+        payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return _default_gateway_ipc_socket_path(port_profile_id)
+
+    ipc_table = payload.get("ipc")
+    if not isinstance(ipc_table, dict):
+        return _default_gateway_ipc_socket_path(port_profile_id)
+
+    if ipc_table.get("enabled") is False:
+        return None
+
+    configured_socket_path = ipc_table.get("socket_path")
+    if isinstance(configured_socket_path, str):
+        stripped = configured_socket_path.strip()
+        if stripped:
+            return _resolve_repo_relative_path(Path(stripped))
+    return _default_gateway_ipc_socket_path(port_profile_id)
+
+
+def _unix_socket_accepting_connections(socket_path: Path) -> bool:
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        probe.settimeout(0.2)
+        probe.connect(str(socket_path))
+    except FileNotFoundError:
+        return False
+    except ConnectionRefusedError:
+        return False
+    except OSError as exc:
+        if exc.errno in {errno.ENOENT, errno.ECONNREFUSED}:
+            return False
+        raise RuntimeError(f"failed to probe gateway IPC socket {socket_path}: {exc}") from exc
+    else:
+        return True
+    finally:
+        probe.close()
+
+
+def _cleanup_stale_gateway_ipc_socket(port_profile_id: int) -> dict[str, Any]:
+    socket_path = _resolve_gateway_ipc_socket_path(port_profile_id)
+    result: dict[str, Any] = {
+        "port_profile_id": port_profile_id,
+        "socket_path": str(socket_path) if socket_path is not None else None,
+        "enabled": socket_path is not None,
+        "exists": False,
+        "active_listener": False,
+        "removed": False,
+        "error": None,
+    }
+    if socket_path is None:
+        return result
+
+    try:
+        mode = socket_path.stat().st_mode
+    except FileNotFoundError:
+        return result
+    except OSError as exc:
+        result["error"] = str(exc)
+        return result
+
+    result["exists"] = True
+    if not stat.S_ISSOCK(mode):
+        result["error"] = f"path exists but is not a socket: {socket_path}"
+        return result
+
+    try:
+        active_listener = _unix_socket_accepting_connections(socket_path)
+    except Exception as exc:
+        result["error"] = str(exc)
+        return result
+
+    result["active_listener"] = active_listener
+    if active_listener:
+        return result
+
+    socket_path.unlink(missing_ok=True)
+    result["removed"] = True
+    return result
+
+
 def _gateway_record_matches_running_process(record: dict[str, Any]) -> bool:
     raw_pid = record.get("pid")
     pid = _coerce_int(raw_pid)
@@ -712,39 +809,58 @@ def _stop_gateway_for_port_profile(port_profile_id: int) -> dict[str, Any]:
     record_raw = _read_json(pid_file, None)
     if not isinstance(record_raw, dict):
         pid_file.unlink(missing_ok=True)
+        ipc_socket_cleanup = _cleanup_stale_gateway_ipc_socket(port_profile_id)
+        message = f"gateway is not running for port profile {port_profile_id}"
+        if ipc_socket_cleanup.get("removed"):
+            message += " (removed stale IPC socket)"
         return _payload(
             ok=True,
             code=0,
-            message=f"gateway is not running for port profile {port_profile_id}",
+            message=message,
             data={
                 "port_profile_id": port_profile_id,
                 "pid_file": str(pid_file),
                 "log_file": str(log_file),
+                "ipc_socket_cleanup": ipc_socket_cleanup,
             },
         )
 
     pid = _coerce_int(record_raw.get("pid"))
     if pid is None:
         pid_file.unlink(missing_ok=True)
+        ipc_socket_cleanup = _cleanup_stale_gateway_ipc_socket(port_profile_id)
+        message = "removed invalid gateway pid record"
+        if ipc_socket_cleanup.get("removed"):
+            message += " and stale IPC socket"
         return _payload(
             ok=True,
             code=0,
-            message="removed invalid gateway pid record",
-            data={"port_profile_id": port_profile_id, "pid_file": str(pid_file), "record": record_raw},
+            message=message,
+            data={
+                "port_profile_id": port_profile_id,
+                "pid_file": str(pid_file),
+                "record": record_raw,
+                "ipc_socket_cleanup": ipc_socket_cleanup,
+            },
         )
 
     if not _gateway_record_matches_running_process(record_raw):
         cmdline = _process_cmdline(pid) if _pid_is_running(pid) else ""
         pid_file.unlink(missing_ok=True)
+        ipc_socket_cleanup = _cleanup_stale_gateway_ipc_socket(port_profile_id)
+        message = f"gateway is not running for port profile {port_profile_id} (stale pid file removed)"
+        if ipc_socket_cleanup.get("removed"):
+            message += " and stale IPC socket removed"
         return _payload(
             ok=True,
             code=0,
-            message=f"gateway is not running for port profile {port_profile_id} (stale pid file removed)",
+            message=message,
             data={
                 "port_profile_id": port_profile_id,
                 "pid": pid,
                 "pid_file": str(pid_file),
                 "process_cmdline": cmdline,
+                "ipc_socket_cleanup": ipc_socket_cleanup,
             },
         )
 
@@ -762,6 +878,7 @@ def _stop_gateway_for_port_profile(port_profile_id: int) -> dict[str, Any]:
 
     pid_file.unlink(missing_ok=True)
     _append_text(log_file, f"[{_utc_now_iso()}] stopped gateway pid={pid} forced={forced}\n")
+    ipc_socket_cleanup = _cleanup_stale_gateway_ipc_socket(port_profile_id)
     return _payload(
         ok=True,
         code=0,
@@ -772,6 +889,7 @@ def _stop_gateway_for_port_profile(port_profile_id: int) -> dict[str, Any]:
             "forced": forced,
             "pid_file": str(pid_file),
             "log_file": str(log_file),
+            "ipc_socket_cleanup": ipc_socket_cleanup,
         },
     )
 
@@ -1349,19 +1467,26 @@ def _run_compose_streaming(
     )
 
 
-def _compose_running_services(
+def _compose_services(
     *,
     project_name: str | None = None,
     compose_env_file: Path = COMPOSE_ENV_FILE,
     compose_gpu_override_file: Path = COMPOSE_GPU_OVERRIDE_FILE,
     ensure_env_file: bool = True,
+    include_all: bool = False,
+    status: str | None = None,
 ) -> tuple[bool, set[str], str]:
     if ensure_env_file:
         env_ok, env_msg = _ensure_compose_env_file()
         if not env_ok:
             return False, set(), f"failed to materialize compose env file: {env_msg}"
+    compose_args = ["ps", "--services"]
+    if include_all:
+        compose_args.insert(1, "--all")
+    if status:
+        compose_args.extend(["--status", status])
     result = _run_compose(
-        ["ps", "--services", "--status", "running"],
+        compose_args,
         project_name=project_name,
         compose_env_file=compose_env_file,
         compose_gpu_override_file=compose_gpu_override_file,
@@ -1373,6 +1498,38 @@ def _compose_running_services(
         return False, set(), err or "docker compose ps failed"
     services = {line.strip() for line in result.stdout.splitlines() if line.strip()}
     return True, services, ""
+
+
+def _compose_running_services(
+    *,
+    project_name: str | None = None,
+    compose_env_file: Path = COMPOSE_ENV_FILE,
+    compose_gpu_override_file: Path = COMPOSE_GPU_OVERRIDE_FILE,
+    ensure_env_file: bool = True,
+) -> tuple[bool, set[str], str]:
+    return _compose_services(
+        project_name=project_name,
+        compose_env_file=compose_env_file,
+        compose_gpu_override_file=compose_gpu_override_file,
+        ensure_env_file=ensure_env_file,
+        status="running",
+    )
+
+
+def _compose_managed_services(
+    *,
+    project_name: str | None = None,
+    compose_env_file: Path = COMPOSE_ENV_FILE,
+    compose_gpu_override_file: Path = COMPOSE_GPU_OVERRIDE_FILE,
+    ensure_env_file: bool = True,
+) -> tuple[bool, set[str], str]:
+    return _compose_services(
+        project_name=project_name,
+        compose_env_file=compose_env_file,
+        compose_gpu_override_file=compose_gpu_override_file,
+        ensure_env_file=ensure_env_file,
+        include_all=True,
+    )
 
 
 def _service_urls_from_ports(ports: dict[str, Any]) -> dict[str, str]:
@@ -2251,7 +2408,13 @@ def _stop_environment_blocking_impl(
             compose_gpu_override_file=compose_gpu_override_file,
             ensure_env_file=ensure_env_file,
         )
-        if compose_ok and not running_before and not state.get("active"):
+        compose_managed_ok, managed_before, compose_managed_error = _compose_managed_services(
+            project_name=compose_project_name,
+            compose_env_file=compose_env_file,
+            compose_gpu_override_file=compose_gpu_override_file,
+            ensure_env_file=ensure_env_file,
+        )
+        if compose_managed_ok and not managed_before and not state.get("active"):
             if state_matches_selection:
                 state["active"] = False
                 state["lifecycle_state"] = "inactive"
@@ -2267,7 +2430,7 @@ def _stop_environment_blocking_impl(
                 }
                 _save_state(state)
             if show_progress:
-                _emit_progress("stop skipped because no managed services are running", log_path=log_path)
+                _emit_progress("stop skipped because no managed compose services are present", log_path=log_path)
             return _payload(
                 ok=bool(gateway_stop.get("ok", False)),
                 code=0 if gateway_stop.get("ok", False) else 522,
@@ -2281,7 +2444,8 @@ def _stop_environment_blocking_impl(
             )
 
         if show_progress:
-            running_text = ",".join(sorted(running_before)) if compose_ok and running_before else "none"
+            services_before = managed_before if compose_managed_ok else running_before if compose_ok else set()
+            running_text = ",".join(sorted(services_before)) if services_before else "none"
             _emit_progress(
                 f"running docker compose down --remove-orphans services_before={running_text}",
                 log_path=log_path,
@@ -2303,18 +2467,25 @@ def _stop_environment_blocking_impl(
             compose_gpu_override_file=compose_gpu_override_file,
             ensure_env_file=ensure_env_file,
         )
+        compose_managed_ok_after, managed_after, compose_managed_after_error = _compose_managed_services(
+            project_name=compose_project_name,
+            compose_env_file=compose_env_file,
+            compose_gpu_override_file=compose_gpu_override_file,
+            ensure_env_file=ensure_env_file,
+        )
         state = _load_state()
         if state_matches_selection:
             state["last_stop_reason"] = reason
             state["last_stop_completed_at"] = _utc_now_iso()
 
         still_running = compose_ok_after and bool({"jaeger", "vllm"} & running_after)
+        services_remaining = compose_managed_ok_after and bool({"jaeger", "vllm"} & managed_after)
         if state_matches_selection:
-            if not still_running:
+            if not services_remaining:
                 state["active"] = False
                 state["lifecycle_state"] = "inactive"
             else:
-                state["active"] = True
+                state["active"] = still_running
                 state["lifecycle_state"] = "stop_failed"
             _save_state(state)
         elif selection_identity is not None:
@@ -2323,7 +2494,11 @@ def _stop_environment_blocking_impl(
                 "reason": reason,
                 "stopped_at": _utc_now_iso(),
                 "compose_project_name": compose_project_name,
-                "result": "stopped" if (down.returncode == 0 and not still_running and gateway_stop.get("ok")) else "failed",
+                "result": (
+                    "stopped"
+                    if (down.returncode == 0 and compose_managed_ok_after and not services_remaining and gateway_stop.get("ok"))
+                    else "failed"
+                ),
             }
             _save_state(state)
 
@@ -2341,11 +2516,17 @@ def _stop_environment_blocking_impl(
                 "ok": compose_ok,
                 "running_services": sorted(running_before) if compose_ok else [],
                 "error": compose_error if not compose_ok else None,
+                "managed_ok": compose_managed_ok,
+                "managed_services": sorted(managed_before) if compose_managed_ok else [],
+                "managed_error": compose_managed_error if not compose_managed_ok else None,
             },
             "compose_after": {
                 "ok": compose_ok_after,
                 "running_services": sorted(running_after) if compose_ok_after else [],
                 "error": compose_after_error if not compose_ok_after else None,
+                "managed_ok": compose_managed_ok_after,
+                "managed_services": sorted(managed_after) if compose_managed_ok_after else [],
+                "managed_error": compose_managed_after_error if not compose_managed_ok_after else None,
             },
             "selection": selection_identity,
             "target_matches_active_state": state_matches_selection,
@@ -2356,14 +2537,15 @@ def _stop_environment_blocking_impl(
             if show_progress:
                 _emit_progress(f"stop failed running docker compose down: {down.error}", log_path=log_path)
             return _payload(ok=False, code=520, message=f"failed running docker compose down: {down.error}", data=data)
-        if down.returncode != 0 or still_running:
+        if down.returncode != 0 or not compose_managed_ok_after or services_remaining:
             if show_progress:
-                remaining_text = ",".join(sorted(running_after)) if compose_ok_after and running_after else "unknown"
+                remaining = managed_after if compose_managed_ok_after else running_after if compose_ok_after else set()
+                remaining_text = ",".join(sorted(remaining)) if remaining else "unknown"
                 _emit_progress(f"stop verification failed remaining_services={remaining_text}", log_path=log_path)
             return _payload(
                 ok=False,
                 code=521,
-                message="docker compose down failed or services still running",
+                message="docker compose down failed or services still present",
                 data=data,
             )
         if not gateway_stop.get("ok"):

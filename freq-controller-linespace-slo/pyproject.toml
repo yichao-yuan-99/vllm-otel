@@ -1,0 +1,24 @@
+[project]
+name = "freq-controller-linespace-slo"
+version = "0.1.0"
+description = "Linespace GPU frequency controller with output-throughput SLO precedence"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "zeus",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0,<9.0.0",
+]
+
+[project.scripts]
+freq-controller-linespace-slo = "freq_controller_linespace_slo:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["freq_controller_linespace_slo"]

@@ -12,3 +12,15 @@ otlp_traces_insecure = true
 [gateway]
 artifact_compression = "none"
 job_end_trace_wait_seconds = 10
+
+[ipc]
+# IPC is enabled by default.
+# Set enabled = false to disable it.
+# enabled = false
+#
+# Optional override for the Unix domain socket path.
+# Default: /tmp/vllm-gateway-profile-<port_profile_id>.sock
+# socket_path = "/tmp/vllm-gateway.sock"
+# socket_permissions = "660"
+# socket_uid = 1000
+# socket_gid = 1000
