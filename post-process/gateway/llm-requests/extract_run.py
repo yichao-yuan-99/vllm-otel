@@ -34,6 +34,7 @@ if str(MODULE_ROOT) not in sys.path:
 from pp_common.service_failure import cutoff_datetime_utc_from_payload
 from pp_common.service_failure import ensure_service_failure_payload
 from pp_common.service_failure import parse_iso8601_to_utc
+from pp_common.profile_id import gateway_run_profile_id_from_manifest
 
 DEFAULT_REQUESTS_OUTPUT_NAME = "llm-requests.json"
 DEFAULT_STATS_OUTPUT_NAME = "llm-request-stats.json"
@@ -142,7 +143,7 @@ def discover_gateway_run_dirs(gateway_output_dir: Path) -> list[tuple[Path, int 
 
     for run_dir in sorted(gateway_output_dir.glob("run_*")):
         if run_dir.is_dir():
-            run_dirs.append((run_dir, None))
+            run_dirs.append((run_dir, gateway_run_profile_id_from_manifest(run_dir)))
 
     for child in sorted(gateway_output_dir.iterdir()):
         if not child.is_dir():
@@ -330,7 +331,7 @@ def collect_llm_request_records(
     *,
     cutoff_time_utc: datetime | None = None,
     on_request_loaded: Callable[[int, int], None] | None = None,
-) -> tuple[list[dict[str, Any]], int]:
+) -> tuple[list[dict[str, Any]], int, list[int]]:
     gateway_output_dir = run_dir / "gateway-output"
     if not gateway_output_dir.is_dir():
         raise ValueError(f"Missing gateway-output directory: {gateway_output_dir}")
@@ -341,6 +342,13 @@ def collect_llm_request_records(
             "No run_* artifacts found under gateway-output. "
             "Expected either gateway-output/run_* or gateway-output/profile-*/run_*."
         )
+    discovered_profile_ids = sorted(
+        {
+            profile_id
+            for _gateway_run_dir, profile_id in discovered_run_dirs
+            if profile_id is not None
+        }
+    )
 
     total_requests = 0
     for gateway_run_dir, _profile_id in discovered_run_dirs:
@@ -396,7 +404,7 @@ def collect_llm_request_records(
             item.get("request_id") or "",
         )
     )
-    return all_requests, total_requests
+    return all_requests, total_requests, discovered_profile_ids
 
 
 def build_numeric_stats(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -603,7 +611,7 @@ def extract_run_dir(
             def _on_request_loaded(completed: int, total: int) -> None:
                 progress.update(task_id, completed=completed, total=max(total, 1))
 
-            request_records, total_requests = collect_llm_request_records(
+            request_records, total_requests, port_profile_ids = collect_llm_request_records(
                 run_dir,
                 cutoff_time_utc=cutoff_time_utc,
                 on_request_loaded=_on_request_loaded,
@@ -611,7 +619,7 @@ def extract_run_dir(
             if total_requests == 0:
                 progress.update(task_id, completed=1, total=1)
     else:
-        request_records, _total_requests = collect_llm_request_records(
+        request_records, _total_requests, port_profile_ids = collect_llm_request_records(
             run_dir,
             cutoff_time_utc=cutoff_time_utc,
         )
@@ -626,6 +634,8 @@ def extract_run_dir(
             service_failure_payload.get("service_failure_detected", False)
         ),
         "service_failure_cutoff_time_utc": service_failure_payload.get("cutoff_time_utc"),
+        "multi_profile": len(port_profile_ids) > 1,
+        "port_profile_ids": port_profile_ids,
         "request_count": len(request_records),
         "requests": request_records,
     }
@@ -636,6 +646,8 @@ def extract_run_dir(
             service_failure_payload.get("service_failure_detected", False)
         ),
         "service_failure_cutoff_time_utc": service_failure_payload.get("cutoff_time_utc"),
+        "multi_profile": len(port_profile_ids) > 1,
+        "port_profile_ids": port_profile_ids,
         "request_count": len(request_records),
     }
     stats_payload.update(build_numeric_stats(request_records))
@@ -648,6 +660,8 @@ def extract_run_dir(
             service_failure_payload.get("service_failure_detected", False)
         ),
         "service_failure_cutoff_time_utc": service_failure_payload.get("cutoff_time_utc"),
+        "multi_profile": len(port_profile_ids) > 1,
+        "port_profile_ids": port_profile_ids,
         "request_count": len(request_records),
         "average_stage_speed_tokens_per_s": stage_speed_summary,
     }
@@ -663,6 +677,8 @@ def extract_run_dir(
             service_failure_payload.get("service_failure_detected", False)
         ),
         "service_failure_cutoff_time_utc": service_failure_payload.get("cutoff_time_utc"),
+        "multi_profile": len(port_profile_ids) > 1,
+        "port_profile_ids": port_profile_ids,
         "request_count": len(request_records),
         "selected_count": len(longest_requests),
         "selection": "longest",
@@ -677,6 +693,8 @@ def extract_run_dir(
             service_failure_payload.get("service_failure_detected", False)
         ),
         "service_failure_cutoff_time_utc": service_failure_payload.get("cutoff_time_utc"),
+        "multi_profile": len(port_profile_ids) > 1,
+        "port_profile_ids": port_profile_ids,
         "request_count": len(request_records),
         "selected_count": len(shortest_requests),
         "selection": "shortest",

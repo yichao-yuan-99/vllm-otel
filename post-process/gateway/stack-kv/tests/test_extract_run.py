@@ -90,8 +90,19 @@ def test_extract_run_generates_kv_ranges_and_histogram(tmp_path: Path) -> None:
     )
 
     assert ranges_payload["entry_count"] == 3
+    assert ranges_payload["multi_profile"] is True
+    assert ranges_payload["port_profile_ids"] == [0, 1, 2, 3]
+    assert ranges_payload["series_keys"] == ["profile-0", "profile-1", "profile-2", "profile-3"]
     assert histogram_payload["point_count"] == 4
     assert histogram_payload["metric"] == "kv_usage_tokens"
+    assert histogram_payload["series_keys"] == [
+        "profile-0",
+        "profile-1",
+        "profile-2",
+        "profile-3",
+    ]
+    assert histogram_payload["series_by_profile"]["profile-0"]["gateway_profile_id"] == 0
+    assert histogram_payload["series_by_profile"]["profile-3"]["point_count"] == 0
 
     by_request = {
         entry["request_id"]: entry

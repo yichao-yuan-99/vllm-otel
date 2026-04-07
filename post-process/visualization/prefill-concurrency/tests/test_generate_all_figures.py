@@ -106,6 +106,85 @@ def test_generate_figure_for_run_dir_writes_manifest(tmp_path: Path, monkeypatch
     assert Path(manifest["figure_path"]).is_file()
 
 
+def test_generate_figure_for_run_dir_writes_profile_specific_figures(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_dir = tmp_path / "job"
+    processed_dir = run_dir / "post-processed" / "prefill-concurrency"
+    processed_dir.mkdir(parents=True)
+    (processed_dir / "prefill-concurrency-timeseries.json").write_text(
+        json.dumps(
+            {
+                "request_count": 2,
+                "prefill_activity_count": 2,
+                "total_duration_s": 0.05,
+                "tick_ms": 10,
+                "concurrency_points": [{"tick_index": 0, "time_offset_s": 0.0, "concurrency": 1}],
+                "multi_profile": True,
+                "port_profile_ids": [2, 13],
+                "series_keys": ["profile-2", "profile-13"],
+                "series_by_profile": {
+                    "profile-2": {
+                        "gateway_profile_id": 2,
+                        "request_count": 1,
+                        "prefill_activity_count": 1,
+                        "total_duration_s": 0.05,
+                        "tick_ms": 10,
+                        "concurrency_points": [
+                            {"tick_index": 0, "time_offset_s": 0.0, "concurrency": 1}
+                        ],
+                    },
+                    "profile-13": {
+                        "gateway_profile_id": 13,
+                        "request_count": 1,
+                        "prefill_activity_count": 1,
+                        "total_duration_s": 0.05,
+                        "tick_ms": 10,
+                        "concurrency_points": [
+                            {"tick_index": 0, "time_offset_s": 0.0, "concurrency": 1}
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_render_prefill_concurrency_figure(
+        *,
+        timeseries_payload: dict[str, object],
+        output_path: Path,
+        image_format: str,
+        dpi: int,
+    ) -> bool:
+        del timeseries_payload, image_format, dpi
+        output_path.write_text("fake-image", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(
+        generate_all_figures,
+        "_render_prefill_concurrency_figure",
+        fake_render_prefill_concurrency_figure,
+    )
+
+    manifest_path = generate_all_figures.generate_figure_for_run_dir(run_dir)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["series_count"] == 3
+    assert manifest["figure_count"] == 3
+    assert any(
+        figure["figure_file_name"] == "prefill-concurrency.png"
+        and figure["relative_output_subdir"] == "profile-2"
+        for figure in manifest["figures"]
+    )
+    assert any(
+        figure["figure_file_name"] == "prefill-concurrency.png"
+        and figure["relative_output_subdir"] == "profile-13"
+        for figure in manifest["figures"]
+    )
+
+
 def test_generate_figure_for_run_dir_rejects_missing_timeseries_file(tmp_path: Path) -> None:
     run_dir = tmp_path / "job"
     run_dir.mkdir(parents=True)

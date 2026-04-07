@@ -282,6 +282,57 @@ def test_extract_run_supports_non_cluster_gateway_layout(tmp_path: Path) -> None
     assert requests_payload["requests"][0]["gateway_profile_id"] is None
 
 
+def test_extract_run_reads_backend_port_profile_id_from_direct_gateway_run_manifest(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "job"
+    gateway_run_dir = run_dir / "gateway-output" / "run_001"
+    requests_dir = gateway_run_dir / "requests"
+    events_dir = gateway_run_dir / "events"
+    trace_dir = gateway_run_dir / "trace"
+    requests_dir.mkdir(parents=True)
+    events_dir.mkdir(parents=True)
+    trace_dir.mkdir(parents=True)
+
+    _write_jsonl(
+        events_dir / "lifecycle.jsonl",
+        [
+            {"event_type": "job_start", "timestamp": "2026-03-06T06:23:00.000Z"},
+            {"event_type": "job_end", "timestamp": "2026-03-06T06:23:01.000Z"},
+        ],
+    )
+    _write_jsonl(
+        requests_dir / "model_inference.jsonl",
+        [
+            {
+                "request_id": "req-1",
+                "model_inference_span_id": "span-1",
+                "request_start_time": "2026-03-06T06:23:00.100Z",
+                "request_end_time": "2026-03-06T06:23:00.200Z",
+                "request_duration_ms": 100.0,
+                "response": {"usage": {"prompt_tokens": 1, "total_tokens": 2, "completion_tokens": 1}},
+            }
+        ],
+    )
+    (trace_dir / "jaeger_trace.json").write_text(json.dumps({"data": [{"spans": []}]}), encoding="utf-8")
+    (gateway_run_dir / "manifest.json").write_text(
+        json.dumps({"backend_port_profile_id": "13"}),
+        encoding="utf-8",
+    )
+
+    exit_code = extract_run.main(["--run-dir", str(run_dir)])
+    assert exit_code == 0
+
+    requests_payload = json.loads(
+        (run_dir / "post-processed" / "gateway" / "llm-requests" / "llm-requests.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert requests_payload["multi_profile"] is False
+    assert requests_payload["port_profile_ids"] == [13]
+    assert requests_payload["requests"][0]["gateway_profile_id"] == 13
+
+
 def test_extract_run_updates_progress_bar(monkeypatch, tmp_path: Path) -> None:
     run_dir = tmp_path / "job"
     run_dir.mkdir(parents=True)
@@ -330,6 +381,7 @@ def test_extract_run_updates_progress_bar(monkeypatch, tmp_path: Path) -> None:
                 {"request_id": "req-2", "request_duration_ms": 200.0},
             ],
             2,
+            [],
         )
 
     monkeypatch.setattr(extract_run, "create_extract_progress", lambda: fake_progress)

@@ -1,0 +1,28 @@
+schema_version = 1
+
+[run]
+port_profile_ids = [0, 1]
+assignment_policy = "round_robin"
+output_root = "./tests/output/gateway-multi-artifacts"
+
+[telemetry]
+service_name = "vllm-gateway-multi"
+otlp_traces_insecure = true
+
+[gateway]
+artifact_compression = "none"
+job_end_trace_wait_seconds = 10
+
+[ipc]
+# IPC is enabled by default.
+# Set enabled = false to disable it.
+# enabled = false
+#
+# Optional override for the Unix domain socket path template.
+# When set, it must produce a unique path for each profile and may use
+# `{profile_id}`.
+# Default: /tmp/vllm-gateway-profile-<port_profile_id>.sock
+# socket_path_template = "/tmp/vllm-gateway-profile-{profile_id}.sock"
+# socket_permissions = "660"
+# socket_uid = 1000
+# socket_gid = 1000

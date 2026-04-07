@@ -19,6 +19,10 @@ if str(MODULE_ROOT) not in sys.path:
 from pp_common.service_failure import cutoff_datetime_utc_from_payload
 from pp_common.service_failure import ensure_service_failure_payload
 from pp_common.service_failure import parse_iso8601_to_utc
+from pp_common.profile_id import api_token_sha256
+from pp_common.profile_id import build_gateway_run_profile_id_by_api_token_hash
+from pp_common.profile_id import profile_ids_from_payload
+from pp_common.profile_id import profile_label
 
 
 DEFAULT_OUTPUT_NAME = "job-concurrency-timeseries.json"
@@ -156,16 +160,34 @@ def _clip_time_constraint_s(
     return min(time_constraint_s, cutoff_offset_s)
 
 
+def _gateway_profile_id_from_job_payload(
+    payload: Any,
+    *,
+    profile_id_by_api_token_hash: dict[str, int],
+) -> int | None:
+    declared_profile_ids = profile_ids_from_payload(payload)
+    if declared_profile_ids:
+        return declared_profile_ids[0]
+    if not isinstance(payload, dict):
+        return None
+    api_token_hash = api_token_sha256(payload.get("api_token"))
+    if api_token_hash is None:
+        return None
+    return profile_id_by_api_token_hash.get(api_token_hash)
+
+
 def _build_interval_entry(
     *,
     job_id: Any,
     status: Any,
     start_offset_s: float,
     end_offset_s: float,
+    gateway_profile_id: int | None = None,
 ) -> dict[str, Any]:
     return {
         "job_id": job_id,
         "status": status,
+        "gateway_profile_id": gateway_profile_id,
         "start_offset_s": start_offset_s,
         "end_offset_s": end_offset_s,
         "duration_s": round(end_offset_s - start_offset_s, 6),
@@ -176,7 +198,8 @@ def _extract_job_intervals_from_replay_run(
     run_dir: Path,
     *,
     cutoff_time_utc: datetime | None = None,
-) -> tuple[str, Any, Any, float | None, int, list[dict[str, Any]], float]:
+    profile_id_by_api_token_hash: dict[str, int] | None = None,
+) -> tuple[str, Any, Any, float | None, int, list[dict[str, Any]], float, list[int], dict[int, int]]:
     summary_path = run_dir / "replay" / "summary.json"
     payload = _load_json(summary_path)
     if not isinstance(payload, dict):
@@ -195,10 +218,19 @@ def _extract_job_intervals_from_replay_run(
 
     replay_count = 0
     intervals: list[dict[str, Any]] = []
+    replay_count_by_profile: dict[int, int] = {}
     for worker_id, worker_payload in worker_results.items():
         if not isinstance(worker_payload, dict):
             continue
         replay_count += 1
+        gateway_profile_id = _gateway_profile_id_from_job_payload(
+            worker_payload,
+            profile_id_by_api_token_hash=profile_id_by_api_token_hash or {},
+        )
+        if gateway_profile_id is not None:
+            replay_count_by_profile[gateway_profile_id] = (
+                replay_count_by_profile.get(gateway_profile_id, 0) + 1
+            )
 
         start_dt = _parse_iso8601(worker_payload.get("started_at"))
         finish_dt = _parse_iso8601(worker_payload.get("finished_at"))
@@ -212,6 +244,7 @@ def _extract_job_intervals_from_replay_run(
                 status=worker_payload.get("status"),
                 start_offset_s=start_offset_s,
                 end_offset_s=end_offset_s,
+                gateway_profile_id=gateway_profile_id,
             )
         )
 
@@ -242,6 +275,8 @@ def _extract_job_intervals_from_replay_run(
             end_offsets_s=end_offsets_s,
             time_constraint_s=time_constraint_s,
         ),
+        profile_ids_from_payload(payload),
+        replay_count_by_profile,
     )
 
 
@@ -249,7 +284,8 @@ def _extract_job_intervals_from_con_driver_run(
     run_dir: Path,
     *,
     cutoff_time_utc: datetime | None = None,
-) -> tuple[str, Any, Any, float | None, int, list[dict[str, Any]], float]:
+    profile_id_by_api_token_hash: dict[str, int] | None = None,
+) -> tuple[str, Any, Any, float | None, int, list[dict[str, Any]], float, list[int], dict[int, int]]:
     manifest_path = run_dir / "meta" / "run_manifest.json"
     results_path = run_dir / "meta" / "results.json"
 
@@ -269,10 +305,19 @@ def _extract_job_intervals_from_con_driver_run(
 
     replay_count = 0
     intervals: list[dict[str, Any]] = []
+    replay_count_by_profile: dict[int, int] = {}
     for entry in results_payload:
         if not isinstance(entry, dict):
             continue
         replay_count += 1
+        gateway_profile_id = _gateway_profile_id_from_job_payload(
+            entry,
+            profile_id_by_api_token_hash=profile_id_by_api_token_hash or {},
+        )
+        if gateway_profile_id is not None:
+            replay_count_by_profile[gateway_profile_id] = (
+                replay_count_by_profile.get(gateway_profile_id, 0) + 1
+            )
         start_dt = _parse_iso8601(entry.get("started_at"))
         finish_dt = _parse_iso8601(entry.get("finished_at"))
         start_offset_s = _duration_seconds(experiment_start_dt, start_dt)
@@ -285,6 +330,7 @@ def _extract_job_intervals_from_con_driver_run(
                 status=entry.get("status"),
                 start_offset_s=start_offset_s,
                 end_offset_s=end_offset_s,
+                gateway_profile_id=gateway_profile_id,
             )
         )
 
@@ -315,6 +361,8 @@ def _extract_job_intervals_from_con_driver_run(
             end_offsets_s=end_offsets_s,
             time_constraint_s=time_constraint_s,
         ),
+        profile_ids_from_payload(manifest_payload),
+        replay_count_by_profile,
     )
 
 
@@ -393,49 +441,14 @@ def _build_concurrency_points(
     return points
 
 
-def extract_job_concurrency_from_run_dir(run_dir: Path) -> dict[str, Any]:
-    service_failure_payload = ensure_service_failure_payload(run_dir)
-    cutoff_time_utc = cutoff_datetime_utc_from_payload(service_failure_payload)
-
-    replay_summary_path = run_dir / "replay" / "summary.json"
-    con_driver_results_path = run_dir / "meta" / "results.json"
-    con_driver_manifest_path = run_dir / "meta" / "run_manifest.json"
-
-    if replay_summary_path.is_file():
-        (
-            source_type,
-            experiment_started_at,
-            experiment_finished_at,
-            time_constraint_s,
-            replay_count,
-            raw_intervals,
-            total_duration_s,
-        ) = _extract_job_intervals_from_replay_run(
-            run_dir,
-            cutoff_time_utc=cutoff_time_utc,
-        )
-    elif con_driver_results_path.is_file() and con_driver_manifest_path.is_file():
-        (
-            source_type,
-            experiment_started_at,
-            experiment_finished_at,
-            time_constraint_s,
-            replay_count,
-            raw_intervals,
-            total_duration_s,
-        ) = _extract_job_intervals_from_con_driver_run(
-            run_dir,
-            cutoff_time_utc=cutoff_time_utc,
-        )
-    else:
-        raise ValueError(
-            "Unrecognized run layout. Expected either replay/summary.json "
-            "or meta/results.json + meta/run_manifest.json."
-        )
-
-    job_intervals = _clip_job_intervals(raw_intervals, total_duration_s=total_duration_s)
+def _build_job_concurrency_summary(
+    job_intervals: list[dict[str, Any]],
+    *,
+    total_duration_s: float,
+) -> dict[str, Any]:
+    clipped_intervals = _clip_job_intervals(job_intervals, total_duration_s=total_duration_s)
     concurrency_points = _build_concurrency_points(
-        job_intervals=job_intervals,
+        job_intervals=clipped_intervals,
         total_duration_s=total_duration_s,
     )
     max_concurrency = max(
@@ -450,8 +463,64 @@ def extract_job_concurrency_from_run_dir(run_dir: Path) -> dict[str, Any]:
         if concurrency_points
         else 0.0
     )
-
     return {
+        "jobs_with_valid_range_count": len(clipped_intervals),
+        "sample_count": len(concurrency_points),
+        "max_concurrency": max_concurrency,
+        "avg_concurrency": avg_concurrency,
+        "concurrency_points": concurrency_points,
+        "job_intervals_preview": clipped_intervals[:20],
+    }
+
+
+def extract_job_concurrency_from_run_dir(run_dir: Path) -> dict[str, Any]:
+    service_failure_payload = ensure_service_failure_payload(run_dir)
+    cutoff_time_utc = cutoff_datetime_utc_from_payload(service_failure_payload)
+    profile_id_by_api_token_hash = build_gateway_run_profile_id_by_api_token_hash(run_dir)
+
+    replay_summary_path = run_dir / "replay" / "summary.json"
+    con_driver_results_path = run_dir / "meta" / "results.json"
+    con_driver_manifest_path = run_dir / "meta" / "run_manifest.json"
+
+    if replay_summary_path.is_file():
+        (
+            source_type,
+            experiment_started_at,
+            experiment_finished_at,
+            time_constraint_s,
+            replay_count,
+            raw_intervals,
+            total_duration_s,
+            declared_port_profile_ids,
+            replay_count_by_profile,
+        ) = _extract_job_intervals_from_replay_run(
+            run_dir,
+            cutoff_time_utc=cutoff_time_utc,
+            profile_id_by_api_token_hash=profile_id_by_api_token_hash,
+        )
+    elif con_driver_results_path.is_file() and con_driver_manifest_path.is_file():
+        (
+            source_type,
+            experiment_started_at,
+            experiment_finished_at,
+            time_constraint_s,
+            replay_count,
+            raw_intervals,
+            total_duration_s,
+            declared_port_profile_ids,
+            replay_count_by_profile,
+        ) = _extract_job_intervals_from_con_driver_run(
+            run_dir,
+            cutoff_time_utc=cutoff_time_utc,
+            profile_id_by_api_token_hash=profile_id_by_api_token_hash,
+        )
+    else:
+        raise ValueError(
+            "Unrecognized run layout. Expected either replay/summary.json "
+            "or meta/results.json + meta/run_manifest.json."
+        )
+
+    common = {
         "source_run_dir": str(run_dir.resolve()),
         "source_type": source_type,
         "experiment_started_at": experiment_started_at,
@@ -461,14 +530,44 @@ def extract_job_concurrency_from_run_dir(run_dir: Path) -> dict[str, Any]:
             service_failure_payload.get("service_failure_detected", False)
         ),
         "service_failure_cutoff_time_utc": service_failure_payload.get("cutoff_time_utc"),
-        "replay_count": replay_count,
-        "jobs_with_valid_range_count": len(job_intervals),
         "total_duration_s": total_duration_s,
-        "sample_count": len(concurrency_points),
-        "max_concurrency": max_concurrency,
-        "avg_concurrency": avg_concurrency,
-        "concurrency_points": concurrency_points,
-        "job_intervals_preview": job_intervals[:20],
+    }
+    aggregate_summary = _build_job_concurrency_summary(
+        raw_intervals,
+        total_duration_s=total_duration_s,
+    )
+    port_profile_ids = sorted(
+        set(declared_port_profile_ids)
+        | {
+            int(interval["gateway_profile_id"])
+            for interval in raw_intervals
+            if isinstance(interval, dict) and isinstance(interval.get("gateway_profile_id"), int)
+        }
+    )
+    series_by_profile: dict[str, dict[str, Any]] = {}
+    for gateway_profile_id in port_profile_ids:
+        profile_intervals = [
+            interval
+            for interval in raw_intervals
+            if isinstance(interval, dict) and interval.get("gateway_profile_id") == gateway_profile_id
+        ]
+        series_by_profile[profile_label(gateway_profile_id)] = {
+            **common,
+            "gateway_profile_id": gateway_profile_id,
+            "replay_count": replay_count_by_profile.get(gateway_profile_id, 0),
+            **_build_job_concurrency_summary(
+                profile_intervals,
+                total_duration_s=total_duration_s,
+            ),
+        }
+    return {
+        **common,
+        "replay_count": replay_count,
+        **aggregate_summary,
+        "multi_profile": len(port_profile_ids) > 1,
+        "port_profile_ids": port_profile_ids,
+        "series_keys": list(series_by_profile.keys()),
+        "series_by_profile": series_by_profile,
     }
 
 

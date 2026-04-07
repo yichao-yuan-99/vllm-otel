@@ -240,6 +240,17 @@ def _build_figure_file_name(
     return candidate
 
 
+def _metric_output_subdir(metric_payload: dict[str, Any], *, cluster_mode: bool) -> Path:
+    if not cluster_mode:
+        return Path()
+    labels = metric_payload.get("labels")
+    if isinstance(labels, dict):
+        port_profile_id = labels.get("port_profile_id")
+        if isinstance(port_profile_id, str) and port_profile_id.strip():
+            return Path(f"profile-{port_profile_id.strip()}")
+    return Path("shared")
+
+
 def _import_matplotlib_pyplot() -> Any:
     try:
         import matplotlib
@@ -376,9 +387,11 @@ def generate_figures_for_run_dir(
             "Stats payload is missing object field metrics: "
             f"{resolved_stats_path}"
         )
+    cluster_mode = bool(timeseries_payload.get("cluster_mode", False))
+    port_profile_ids = timeseries_payload.get("port_profile_ids", [])
 
     resolved_output_dir.mkdir(parents=True, exist_ok=True)
-    used_file_names: set[str] = set()
+    used_file_names_by_subdir: dict[Path, set[str]] = {}
     figure_entries: list[dict[str, Any]] = []
     skipped_series_keys: list[str] = []
 
@@ -386,13 +399,17 @@ def generate_figures_for_run_dir(
         if not isinstance(metric_payload, dict):
             skipped_series_keys.append(series_key)
             continue
+        relative_subdir = _metric_output_subdir(metric_payload, cluster_mode=cluster_mode)
+        used_file_names = used_file_names_by_subdir.setdefault(relative_subdir, set())
         file_name = _build_figure_file_name(
             series_key,
             index=index,
             extension=image_format,
             used_names=used_file_names,
         )
-        figure_path = resolved_output_dir / file_name
+        figure_dir = (resolved_output_dir / relative_subdir).resolve()
+        figure_dir.mkdir(parents=True, exist_ok=True)
+        figure_path = figure_dir / file_name
         rendered = _render_metric_figure(
             series_key=series_key,
             metric_payload=metric_payload,
@@ -410,6 +427,7 @@ def generate_figures_for_run_dir(
             {
                 "series_key": series_key,
                 "metric_name": metric_payload.get("name"),
+                "relative_output_subdir": relative_subdir.as_posix() if relative_subdir.parts else "",
                 "figure_file_name": file_name,
                 "figure_path": str(figure_path.resolve()),
                 "sample_count": len(_extract_series_xy(metric_payload)[0]),
@@ -423,6 +441,8 @@ def generate_figures_for_run_dir(
         "output_dir": str(resolved_output_dir),
         "image_format": image_format,
         "dpi": dpi,
+        "cluster_mode": cluster_mode,
+        "port_profile_ids": port_profile_ids,
         "metric_count": len(timeseries_metrics),
         "figure_count": len(figure_entries),
         "skipped_metric_count": len(skipped_series_keys),

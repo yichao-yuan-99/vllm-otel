@@ -224,12 +224,20 @@ Replay uses the same defaults. Because `--port-profile-id` is required, replay
 resolves the metrics endpoint from the selected profile's `vllm_port` and vLLM
 logging defaults to enabled. There is no manual replay-side endpoint override.
 Replay always enables vLLM logging; disabling it is not supported.
+When `--port-profile-id-list` is provided, replay resolves one metrics endpoint
+per listed profile and writes one monitor subdirectory per profile.
 
 Replay vLLM metrics are written under:
 
 - `<replay-output>/vllm-log/`
 - `<replay-output>/vllm-log/monitor.stdout.log`
 - `<replay-output>/vllm-log/monitor.stderr.log`
+
+Cluster-style replay writes:
+
+- `<replay-output>/vllm-log/profile-<id>/`
+- `<replay-output>/vllm-log/profile-<id>/monitor.stdout.log`
+- `<replay-output>/vllm-log/profile-<id>/monitor.stderr.log`
 
 Each compressed block stores the raw `/metrics` response text per scrape, not a
 parsed Prometheus JSON structure.

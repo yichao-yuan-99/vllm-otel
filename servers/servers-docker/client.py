@@ -61,8 +61,12 @@ DEFAULT_COMPOSE_PROJECT_NAME = "vllm-otel"
 DEFAULT_JAEGER_CONTAINER_NAME = "jaeger"
 DEFAULT_VLLM_CONTAINER_NAME = "vllm-openai-otel-lp"
 DEFAULT_OTEL_SERVICE_NAME = "vllm-server"
+DEFAULT_GATEWAY_MODULE_NAME = "gateway"
 DEFAULT_GATEWAY_CONFIG_PATH = REPO_ROOT / "gateway" / "config.toml"
 DEFAULT_GATEWAY_CONFIG_EXAMPLE_PATH = REPO_ROOT / "gateway" / "config.example.toml"
+DEFAULT_GATEWAY_CTX_MODULE_NAME = "gateway_ctx"
+DEFAULT_GATEWAY_CTX_CONFIG_PATH = REPO_ROOT / "gateway_ctx" / "config.toml"
+DEFAULT_GATEWAY_CTX_CONFIG_EXAMPLE_PATH = REPO_ROOT / "gateway_ctx" / "config.example.toml"
 DEFAULT_GATEWAY_VENV_DIR = REPO_ROOT / ".venv"
 DEFAULT_GATEWAY_HOST = "0.0.0.0"
 DEFAULT_GATEWAY_IPC_SOCKET_DIR = Path("/tmp")
@@ -286,6 +290,66 @@ def _write_json(path: Path, data: Any) -> None:
     tmp_path.replace(path)
 
 
+def _gateway_mode_from_flag(gateway_ctx: bool) -> str:
+    return DEFAULT_GATEWAY_CTX_MODULE_NAME if gateway_ctx else DEFAULT_GATEWAY_MODULE_NAME
+
+
+def _normalize_gateway_mode(value: object) -> str:
+    if isinstance(value, str):
+        normalized = value.strip().lower().replace("-", "_")
+        if normalized == DEFAULT_GATEWAY_CTX_MODULE_NAME:
+            return DEFAULT_GATEWAY_CTX_MODULE_NAME
+    return DEFAULT_GATEWAY_MODULE_NAME
+
+
+def _gateway_mode_from_selection(selection: dict[str, Any]) -> str:
+    return _gateway_mode_from_flag(bool(selection.get("gateway_ctx")))
+
+
+def _gateway_mode_from_record(record: dict[str, Any]) -> str:
+    raw_mode = record.get("gateway_mode")
+    if isinstance(raw_mode, str) and raw_mode.strip():
+        return _normalize_gateway_mode(raw_mode)
+
+    raw_module = record.get("module")
+    if isinstance(raw_module, str) and raw_module.strip():
+        return _normalize_gateway_mode(raw_module)
+
+    config_path_raw = record.get("config_path")
+    if isinstance(config_path_raw, str) and "gateway_ctx" in config_path_raw:
+        return DEFAULT_GATEWAY_CTX_MODULE_NAME
+    return DEFAULT_GATEWAY_MODULE_NAME
+
+
+def _gateway_config_paths(*, gateway_mode: str) -> tuple[Path, Path]:
+    normalized_mode = _normalize_gateway_mode(gateway_mode)
+    if normalized_mode == DEFAULT_GATEWAY_CTX_MODULE_NAME:
+        return DEFAULT_GATEWAY_CTX_CONFIG_PATH, DEFAULT_GATEWAY_CTX_CONFIG_EXAMPLE_PATH
+    return DEFAULT_GATEWAY_CONFIG_PATH, DEFAULT_GATEWAY_CONFIG_EXAMPLE_PATH
+
+
+def _gateway_default_socket_name(*, gateway_mode: str, port_profile_id: int) -> str:
+    normalized_mode = _normalize_gateway_mode(gateway_mode)
+    if normalized_mode == DEFAULT_GATEWAY_CTX_MODULE_NAME:
+        return f"vllm-gateway-ctx-profile-{port_profile_id}.sock"
+    return f"vllm-gateway-profile-{port_profile_id}.sock"
+
+
+def _gateway_mode_for_port_profile(port_profile_id: int) -> str:
+    pid_file, _ = _gateway_runtime_files(port_profile_id=port_profile_id)
+    record_raw = _read_json(pid_file, None)
+    if isinstance(record_raw, dict):
+        return _gateway_mode_from_record(record_raw)
+
+    state = _load_state()
+    selection = state.get("selection")
+    if isinstance(selection, dict):
+        state_port_profile_id = _coerce_int(selection.get("port_profile_id"))
+        if state_port_profile_id == port_profile_id:
+            return _gateway_mode_from_selection(selection)
+    return DEFAULT_GATEWAY_MODULE_NAME
+
+
 def _run_exec(
     cmd: list[str],
     *,
@@ -398,10 +462,6 @@ def _terminate_pid_or_group(pid: int, sig: int) -> None:
     except ProcessLookupError:
         return
     except PermissionError:
-        pass
-    try:
-        os.kill(pid, sig)
-    except ProcessLookupError:
         return
 
 
@@ -552,10 +612,11 @@ def _gateway_runtime_files(*, port_profile_id: int) -> tuple[Path, Path]:
     )
 
 
-def _resolve_gateway_config_path() -> Path:
-    if DEFAULT_GATEWAY_CONFIG_PATH.exists():
-        return DEFAULT_GATEWAY_CONFIG_PATH
-    return DEFAULT_GATEWAY_CONFIG_EXAMPLE_PATH
+def _resolve_gateway_config_path(*, gateway_mode: str) -> Path:
+    primary_path, fallback_path = _gateway_config_paths(gateway_mode=gateway_mode)
+    if primary_path.exists():
+        return primary_path
+    return fallback_path
 
 
 def _resolve_repo_relative_path(path: Path) -> Path:
@@ -565,20 +626,38 @@ def _resolve_repo_relative_path(path: Path) -> Path:
     return (REPO_ROOT / expanded).resolve()
 
 
-def _default_gateway_ipc_socket_path(port_profile_id: int) -> Path:
-    return DEFAULT_GATEWAY_IPC_SOCKET_DIR / f"vllm-gateway-profile-{port_profile_id}.sock"
+def _default_gateway_ipc_socket_path(port_profile_id: int, *, gateway_mode: str) -> Path:
+    return DEFAULT_GATEWAY_IPC_SOCKET_DIR / _gateway_default_socket_name(
+        gateway_mode=gateway_mode,
+        port_profile_id=port_profile_id,
+    )
 
 
-def _resolve_gateway_ipc_socket_path(port_profile_id: int) -> Path | None:
-    config_path = _resolve_gateway_config_path()
+def _resolve_gateway_ipc_socket_path(
+    port_profile_id: int,
+    *,
+    gateway_mode: str | None = None,
+) -> Path | None:
+    resolved_gateway_mode = (
+        _normalize_gateway_mode(gateway_mode)
+        if gateway_mode is not None
+        else _gateway_mode_for_port_profile(port_profile_id)
+    )
+    config_path = _resolve_gateway_config_path(gateway_mode=resolved_gateway_mode)
     try:
         payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
     except Exception:
-        return _default_gateway_ipc_socket_path(port_profile_id)
+        return _default_gateway_ipc_socket_path(
+            port_profile_id,
+            gateway_mode=resolved_gateway_mode,
+        )
 
     ipc_table = payload.get("ipc")
     if not isinstance(ipc_table, dict):
-        return _default_gateway_ipc_socket_path(port_profile_id)
+        return _default_gateway_ipc_socket_path(
+            port_profile_id,
+            gateway_mode=resolved_gateway_mode,
+        )
 
     if ipc_table.get("enabled") is False:
         return None
@@ -588,7 +667,10 @@ def _resolve_gateway_ipc_socket_path(port_profile_id: int) -> Path | None:
         stripped = configured_socket_path.strip()
         if stripped:
             return _resolve_repo_relative_path(Path(stripped))
-    return _default_gateway_ipc_socket_path(port_profile_id)
+    return _default_gateway_ipc_socket_path(
+        port_profile_id,
+        gateway_mode=resolved_gateway_mode,
+    )
 
 
 def _unix_socket_accepting_connections(socket_path: Path) -> bool:
@@ -611,9 +693,14 @@ def _unix_socket_accepting_connections(socket_path: Path) -> bool:
 
 
 def _cleanup_stale_gateway_ipc_socket(port_profile_id: int) -> dict[str, Any]:
-    socket_path = _resolve_gateway_ipc_socket_path(port_profile_id)
+    gateway_mode = _gateway_mode_for_port_profile(port_profile_id)
+    socket_path = _resolve_gateway_ipc_socket_path(
+        port_profile_id,
+        gateway_mode=gateway_mode,
+    )
     result: dict[str, Any] = {
         "port_profile_id": port_profile_id,
+        "gateway_mode": gateway_mode,
         "socket_path": str(socket_path) if socket_path is not None else None,
         "enabled": socket_path is not None,
         "exists": False,
@@ -661,7 +748,8 @@ def _gateway_record_matches_running_process(record: dict[str, Any]) -> bool:
     if not cmdline:
         return True
     normalized = cmdline.lower()
-    if "gateway" not in normalized or " start " not in f" {normalized} ":
+    gateway_mode = _gateway_mode_from_record(record)
+    if gateway_mode not in normalized or " start " not in f" {normalized} ":
         return False
     profile_id = _coerce_int(record.get("port_profile_id"))
     if profile_id is not None:
@@ -678,9 +766,15 @@ def _gateway_status_for_port_profile(port_profile_id: int) -> dict[str, Any]:
     record = record_raw if isinstance(record_raw, dict) else None
     running = isinstance(record, dict) and _gateway_record_matches_running_process(record)
     pid = _coerce_int(record.get("pid")) if isinstance(record, dict) else None
+    gateway_mode = (
+        _gateway_mode_from_record(record)
+        if isinstance(record, dict)
+        else _gateway_mode_for_port_profile(port_profile_id)
+    )
     return {
         "running": running,
         "port_profile_id": port_profile_id,
+        "gateway_mode": gateway_mode,
         "pid": pid,
         "pid_file": str(pid_file),
         "log_file": str(log_file),
@@ -691,6 +785,7 @@ def _gateway_status_for_port_profile(port_profile_id: int) -> dict[str, Any]:
 def _start_gateway_for_selection(selection: dict[str, Any]) -> dict[str, Any]:
     profile_id = _coerce_int(selection.get("port_profile_id"))
     ports = selection.get("ports")
+    gateway_mode = _gateway_mode_from_selection(selection)
     if profile_id is None:
         return _payload(
             ok=False,
@@ -704,14 +799,17 @@ def _start_gateway_for_selection(selection: dict[str, Any]) -> dict[str, Any]:
             message="cannot start gateway: missing resolved ports in selection",
         )
 
-    config_path = _resolve_gateway_config_path()
+    config_path = _resolve_gateway_config_path(gateway_mode=gateway_mode)
     if not config_path.exists():
+        primary_config_path, fallback_config_path = _gateway_config_paths(
+            gateway_mode=gateway_mode
+        )
         return _payload(
             ok=False,
             code=542,
             message=(
                 "cannot start gateway: config file not found "
-                f"(checked {DEFAULT_GATEWAY_CONFIG_PATH} and {DEFAULT_GATEWAY_CONFIG_EXAMPLE_PATH})"
+                f"(checked {primary_config_path} and {fallback_config_path})"
             ),
         )
 
@@ -731,7 +829,7 @@ def _start_gateway_for_selection(selection: dict[str, Any]) -> dict[str, Any]:
     gateway_cmd = [
         sys.executable,
         "-m",
-        "gateway",
+        gateway_mode,
         "start",
         "--config",
         str(config_path),
@@ -790,6 +888,8 @@ def _start_gateway_for_selection(selection: dict[str, Any]) -> dict[str, Any]:
         "pid": proc.pid,
         "started_at": _utc_now_iso(),
         "port_profile_id": profile_id,
+        "gateway_mode": gateway_mode,
+        "module": gateway_mode,
         "config_path": str(config_path),
         "venv_dir": str(DEFAULT_GATEWAY_VENV_DIR),
         "host": DEFAULT_GATEWAY_HOST,
@@ -2183,6 +2283,7 @@ def _validate_start_selection(
     launch_profile_key: str,
     lmcache: int | None = None,
     gpu_memory_utilization: float | None = None,
+    gateway_ctx: bool = False,
     enforce_weight_limit: bool = True,
 ) -> tuple[bool, dict[str, Any]]:
     try:
@@ -2236,6 +2337,8 @@ def _validate_start_selection(
         "launch_profile_key": launch_profile_key,
         "lmcache": normalized_lmcache,
         "gpu_memory_utilization": normalized_gpu_memory_utilization,
+        "gateway_ctx": bool(gateway_ctx),
+        "gateway_mode": _gateway_mode_from_flag(bool(gateway_ctx)),
         "images": images,
         "model": model,
         "ports": port_profile,
@@ -2606,6 +2709,7 @@ def _start_impl(
     launch_profile_key: str,
     lmcache: int | None,
     gpu_memory_utilization: float | None,
+    gateway_ctx: bool,
     block: bool,
     timeout_seconds: float,
     startup_log_path: Path,
@@ -2623,6 +2727,7 @@ def _start_impl(
         launch_profile_key=launch_profile_key,
         lmcache=lmcache,
         gpu_memory_utilization=gpu_memory_utilization,
+        gateway_ctx=gateway_ctx,
     )
     if not valid:
         return selection_payload
@@ -2660,6 +2765,7 @@ def _start_impl(
             f" model={selection['model_key']}"
             f" launch={selection['launch_profile_key']}"
             f" port_profile={selection['port_profile_id']}"
+            f" gateway_mode={selection['gateway_mode']}"
             f" lmcache={selection['lmcache'] if selection.get('lmcache') is not None else 'disabled'}"
             f" gpu_memory_utilization={selection['gpu_memory_utilization'] if selection.get('gpu_memory_utilization') is not None else 'default'}"
             f" vllm_port={selection['ports']['vllm_port']}"
@@ -2745,12 +2851,14 @@ def _start_impl(
                 "launch_profile_key": selection["launch_profile_key"],
                 "lmcache": selection.get("lmcache"),
                 "gpu_memory_utilization": selection.get("gpu_memory_utilization"),
+                "gateway_ctx": bool(selection.get("gateway_ctx")),
             },
             "resolved": {
                 "images": selection["images"],
                 "model": selection["model"],
                 "ports": selection["ports"],
                 "launch": selection["launch"],
+                "gateway_mode": selection["gateway_mode"],
                 "lmcache_enabled": selection.get("lmcache") is not None,
                 "lmcache_max_local_cpu_size": selection.get("lmcache"),
                 "gpu_memory_utilization": selection.get("gpu_memory_utilization"),
@@ -3052,6 +3160,11 @@ def start(
     model: str = typer.Option(..., "--model", "-m", help="Model key from configs/model_config.toml."),
     port_profile: int = typer.Option(..., "--port-profile", "-p", help="Port profile numeric ID."),
     launch_profile: str = typer.Option(..., "--launch-profile", "-l", help="Launch profile key."),
+    gateway_ctx: bool = typer.Option(
+        False,
+        "--gateway-ctx",
+        help="Start gateway_ctx instead of the plain gateway package.",
+    ),
     lmcache: int | None = typer.Option(
         None,
         "--lmcache",
@@ -3093,6 +3206,7 @@ def start(
                 launch_profile_key=launch_profile,
                 lmcache=lmcache,
                 gpu_memory_utilization=gpu_memory_utilization,
+                gateway_ctx=gateway_ctx,
                 block=block,
                 timeout_seconds=timeout_seconds,
                 startup_log_path=startup_log_path,

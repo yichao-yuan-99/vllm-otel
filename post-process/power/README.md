@@ -15,6 +15,10 @@ It produces three main outputs:
 2. total energy estimate (`total_energy_j`, `total_energy_kwh`)
 3. a power-over-time series (`power_points`) for visualization
 
+When the power log contains more than one GPU reading per sample, the summary
+also includes per-GPU series under `per_gpu_power` so downstream visualization
+can render one figure for each GPU in addition to the aggregate figure.
+
 ## Script
 
 - `post-process/power/extract_run.py`
@@ -93,6 +97,8 @@ After filtering and sorting by timestamp:
 - `power_stats_w` is computed from all retained samples
 - energy uses trapezoidal integration between adjacent points:
   - `energy_j += ((p_prev + p_curr) / 2) * delta_seconds`
+- `per_gpu_power` mirrors the same stats/energy/points structure for each GPU
+  series seen in the log
 
 ## Output Fields (`power-summary.json`)
 
@@ -117,6 +123,16 @@ After filtering and sorting by timestamp:
 - `power_points`:
   - `time_offset_s`
   - `power_w`
+- `per_gpu_power`:
+  - `gpu_key`
+  - `gpu_id`
+  - `display_label`
+  - `source_endpoint`
+  - `power_sample_count`
+  - `power_stats_w`
+  - `total_energy_j`
+  - `total_energy_kwh`
+  - `power_points`
 
 ## Visualization
 

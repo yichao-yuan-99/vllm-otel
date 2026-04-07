@@ -38,6 +38,12 @@ Default output:
 <run-dir>/post-processed/agent-output-throughput/agent-output-throughput.json
 ```
 
+For multi-profile runs, the extractor also writes one separate file per profile:
+
+```text
+<run-dir>/post-processed/agent-output-throughput/profile-<id>/agent-output-throughput.json
+```
+
 Optional arguments:
 
 - `--output <path>`
@@ -93,6 +99,10 @@ Top-level fields include:
   - `max`
   - `bins`
     - each bin includes `bin_start`, `bin_end`, and `count`
+- `multi_profile`
+- `port_profile_ids`
+- `series_keys`
+- `series_by_profile`
 - `agents`
 
 Each entry in `agents` includes:
@@ -100,6 +110,8 @@ Each entry in `agents` includes:
 - `gateway_run_id`
 - `gateway_profile_id`
 - `api_token_hash`
+- `replay_worker_status` (from `replay/summary.json` when available)
+- `replay_completed` (`true` only when `replay_worker_status == "completed"`)
 - `request_count`
 - `requests_with_output_tokens`
 - `requests_with_llm_request_duration`
@@ -115,6 +127,8 @@ Each entry in `agents` includes:
 - request duration uses `request_duration_ms`, with fallback to `duration_ms`,
   with final fallback to `request_end_time - request_start_time`
 - if a service failure cutoff is detected, requests after the cutoff are ignored
+- replay worker status is optional enrichment; when `replay/summary.json` is
+  present, agents are matched by `sha256(api_token)`
 - the histogram uses contiguous `1.0` token/s bins across the observed agent
   throughput range
 

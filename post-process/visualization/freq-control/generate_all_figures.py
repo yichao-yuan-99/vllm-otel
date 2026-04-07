@@ -11,6 +11,7 @@ from typing import Any
 
 DEFAULT_INPUT_NAME = "freq-control-summary.json"
 SEGMENTED_INPUT_DIR_NAME = "freq-control-seg"
+MULTI_LINESPACE_INPUT_DIR_NAME = "freq-control-linespace-multi"
 LINESPACE_INPUT_DIR_NAME = "freq-control-linespace"
 BASELINE_INPUT_DIR_NAME = "freq-control"
 DEFAULT_MANIFEST_NAME = "figures-manifest.json"
@@ -47,7 +48,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Run result root directory containing post-processed/freq-control/ "
-            "or post-processed/freq-control-seg/ or post-processed/freq-control-linespace/."
+            "or post-processed/freq-control-seg/ or "
+            "post-processed/freq-control-linespace-multi/ or "
+            "post-processed/freq-control-linespace/."
         ),
     )
     target_group.add_argument(
@@ -57,6 +60,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Root directory to recursively scan for run directories. Any directory "
             "with post-processed/freq-control/freq-control-summary.json or "
             "post-processed/freq-control-seg/freq-control-summary.json or "
+            "post-processed/freq-control-linespace-multi/freq-control-summary.json or "
             "post-processed/freq-control-linespace/freq-control-summary.json will be processed."
         ),
     )
@@ -66,6 +70,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "Optional freq-control summary input path. Default: "
             f"<run-dir>/post-processed/freq-control-seg/{DEFAULT_INPUT_NAME} "
+            f"if present, else <run-dir>/post-processed/freq-control-linespace-multi/{DEFAULT_INPUT_NAME} "
             f"if present, else <run-dir>/post-processed/freq-control-linespace/{DEFAULT_INPUT_NAME} "
             f"if present, else <run-dir>/post-processed/freq-control/{DEFAULT_INPUT_NAME}"
         ),
@@ -115,6 +120,12 @@ def _load_json(path: Path) -> Any:
 def _candidate_freq_control_input_paths_for_run(run_dir: Path) -> list[Path]:
     return [
         (run_dir / "post-processed" / SEGMENTED_INPUT_DIR_NAME / DEFAULT_INPUT_NAME).resolve(),
+        (
+            run_dir
+            / "post-processed"
+            / MULTI_LINESPACE_INPUT_DIR_NAME
+            / DEFAULT_INPUT_NAME
+        ).resolve(),
         (run_dir / "post-processed" / LINESPACE_INPUT_DIR_NAME / DEFAULT_INPUT_NAME).resolve(),
         (run_dir / "post-processed" / BASELINE_INPUT_DIR_NAME / DEFAULT_INPUT_NAME).resolve(),
     ]
@@ -131,6 +142,8 @@ def _summary_dir_name_for_input_path(freq_control_input_path: Path) -> str:
     parent_name = freq_control_input_path.resolve().parent.name
     if parent_name == SEGMENTED_INPUT_DIR_NAME:
         return SEGMENTED_INPUT_DIR_NAME
+    if parent_name == MULTI_LINESPACE_INPUT_DIR_NAME:
+        return MULTI_LINESPACE_INPUT_DIR_NAME
     if parent_name == LINESPACE_INPUT_DIR_NAME:
         return LINESPACE_INPUT_DIR_NAME
     return BASELINE_INPUT_DIR_NAME
@@ -149,6 +162,7 @@ def discover_run_dirs_with_freq_control_summary(root_dir: Path) -> list[Path]:
         if summary_path.parent.name not in {
             BASELINE_INPUT_DIR_NAME,
             SEGMENTED_INPUT_DIR_NAME,
+            MULTI_LINESPACE_INPUT_DIR_NAME,
             LINESPACE_INPUT_DIR_NAME,
         }:
             continue
@@ -173,6 +187,14 @@ def _int_or_none(value: Any) -> int | None:
         return value
     if isinstance(value, float) and value.is_integer():
         return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return int(stripped)
+        except ValueError:
+            return None
     return None
 
 
@@ -187,6 +209,334 @@ def _format_stat_value(value: float | int | None, suffix: str = "") -> str:
     if value is None:
         return "n/a"
     return f"{value:.6g}{suffix}"
+
+
+def _first_non_none(items: list[Any] | tuple[Any, ...] | Any) -> Any:
+    for item in items:
+        if item is not None:
+            return item
+    return None
+
+
+def _max_or_none(items: list[float | None] | tuple[float | None, ...] | Any) -> float | None:
+    values = [value for value in items if value is not None]
+    if not values:
+        return None
+    return max(values)
+
+
+def _min_or_none(items: list[int | None] | tuple[int | None, ...] | Any) -> int | None:
+    values = [value for value in items if value is not None]
+    if not values:
+        return None
+    return min(values)
+
+
+def _max_int_or_none(items: list[int | None] | tuple[int | None, ...] | Any) -> int | None:
+    values = [value for value in items if value is not None]
+    if not values:
+        return None
+    return max(values)
+
+
+def _profile_series_key(port_profile_id: int) -> str:
+    return f"profile-{port_profile_id}"
+
+
+def _profile_display_label(port_profile_id: int) -> str:
+    return f"Profile {port_profile_id}"
+
+
+def _port_profile_id_from_point(point: Any) -> int | None:
+    if not isinstance(point, dict):
+        return None
+    return _int_or_none(point.get("port_profile_id"))
+
+
+def _port_profile_id_from_path_text(path_text: Any) -> int | None:
+    if not isinstance(path_text, str) or not path_text:
+        return None
+    for part in Path(path_text).parts:
+        if not part.startswith("profile-"):
+            continue
+        return _int_or_none(part[len("profile-") :])
+    return None
+
+
+def _port_profile_ids_from_payload(freq_control_payload: dict[str, Any]) -> list[int]:
+    raw_port_profile_ids = freq_control_payload.get("port_profile_ids")
+    if isinstance(raw_port_profile_ids, list):
+        port_profile_ids = sorted(
+            {
+                profile_id
+                for profile_id in (_int_or_none(value) for value in raw_port_profile_ids)
+                if profile_id is not None
+            }
+        )
+        if port_profile_ids:
+            return port_profile_ids
+
+    port_profile_ids: set[int] = set()
+    for field_name in (
+        "source_query_log_paths",
+        "source_decision_log_paths",
+        "source_control_error_log_paths",
+    ):
+        raw_paths = freq_control_payload.get(field_name)
+        if not isinstance(raw_paths, list):
+            continue
+        for path_text in raw_paths:
+            port_profile_id = _port_profile_id_from_path_text(path_text)
+            if port_profile_id is not None:
+                port_profile_ids.add(port_profile_id)
+
+    for field_name in ("query_points", "decision_points", "control_error_points"):
+        raw_points = freq_control_payload.get(field_name)
+        if not isinstance(raw_points, list):
+            continue
+        for point in raw_points:
+            port_profile_id = _port_profile_id_from_point(point)
+            if port_profile_id is not None:
+                port_profile_ids.add(port_profile_id)
+    return sorted(port_profile_ids)
+
+
+def _filter_points_for_profile(
+    raw_points: Any,
+    *,
+    port_profile_id: int,
+) -> list[dict[str, Any]]:
+    if not isinstance(raw_points, list):
+        return []
+    return [
+        dict(point)
+        for point in raw_points
+        if isinstance(point, dict) and _port_profile_id_from_point(point) == port_profile_id
+    ]
+
+
+def _filter_log_paths_for_profile(
+    raw_paths: Any,
+    *,
+    port_profile_id: int,
+) -> list[str]:
+    if not isinstance(raw_paths, list):
+        return []
+    return [
+        path_text
+        for path_text in raw_paths
+        if isinstance(path_text, str)
+        and _port_profile_id_from_path_text(path_text) == port_profile_id
+    ]
+
+
+def _build_profile_payload(
+    freq_control_payload: dict[str, Any],
+    *,
+    port_profile_id: int,
+) -> dict[str, Any]:
+    query_points = _filter_points_for_profile(
+        freq_control_payload.get("query_points"),
+        port_profile_id=port_profile_id,
+    )
+    decision_points = _filter_points_for_profile(
+        freq_control_payload.get("decision_points"),
+        port_profile_id=port_profile_id,
+    )
+    control_error_points = _filter_points_for_profile(
+        freq_control_payload.get("control_error_points"),
+        port_profile_id=port_profile_id,
+    )
+    source_query_log_paths = _filter_log_paths_for_profile(
+        freq_control_payload.get("source_query_log_paths"),
+        port_profile_id=port_profile_id,
+    )
+    source_decision_log_paths = _filter_log_paths_for_profile(
+        freq_control_payload.get("source_decision_log_paths"),
+        port_profile_id=port_profile_id,
+    )
+    source_control_error_log_paths = _filter_log_paths_for_profile(
+        freq_control_payload.get("source_control_error_log_paths"),
+        port_profile_id=port_profile_id,
+    )
+
+    pending_query_point_count = sum(
+        1 for point in query_points if point.get("phase") == "pending"
+    )
+    active_query_point_count = sum(
+        1 for point in query_points if point.get("phase") == "active"
+    )
+    query_error_count = sum(1 for point in query_points if point.get("error") is not None)
+    control_error_point_count = len(control_error_points)
+    decision_change_count = sum(
+        1 for point in decision_points if point.get("changed") is True
+    )
+    lower_bound = _first_non_none(
+        point.get("lower_bound") for point in decision_points
+    )
+    upper_bound = _first_non_none(
+        point.get("upper_bound") for point in decision_points
+    )
+    target_context_usage_threshold = _first_non_none(
+        point.get("target_context_usage_threshold") for point in decision_points
+    )
+    segment_count = _first_non_none(
+        point.get("segment_count") for point in decision_points
+    )
+    segment_width_context_usage = _first_non_none(
+        point.get("segment_width_context_usage") for point in decision_points
+    )
+    low_freq_threshold = _first_non_none(
+        point.get("low_freq_threshold") for point in decision_points
+    )
+    low_freq_cap_mhz = _first_non_none(
+        point.get("low_freq_cap_mhz") for point in decision_points
+    )
+    max_context_usage = _max_or_none(
+        _float_or_none(point.get("context_usage")) for point in query_points
+    )
+    max_window_context_usage = _max_or_none(
+        _float_or_none(point.get("window_context_usage")) for point in decision_points
+    )
+    min_frequency_mhz = _min_or_none(
+        value
+        for point in decision_points
+        for value in (
+            _int_or_none(point.get("current_frequency_mhz")),
+            _int_or_none(point.get("target_frequency_mhz")),
+        )
+    )
+    max_frequency_mhz = _max_int_or_none(
+        value
+        for point in decision_points
+        for value in (
+            _int_or_none(point.get("current_frequency_mhz")),
+            _int_or_none(point.get("target_frequency_mhz")),
+        )
+    )
+    min_effective_min_frequency_mhz = _min_or_none(
+        _int_or_none(point.get("effective_min_frequency_mhz")) for point in decision_points
+    )
+    max_effective_min_frequency_mhz = _max_int_or_none(
+        _int_or_none(point.get("effective_min_frequency_mhz")) for point in decision_points
+    )
+    first_job_active_time_offset_s = _first_non_none(
+        _float_or_none(point.get("time_offset_s"))
+        for point in query_points
+        if point.get("job_active") is True
+    )
+    first_control_error_time_offset_s = _first_non_none(
+        _float_or_none(point.get("time_offset_s")) for point in control_error_points
+    )
+    source_freq_control_log_dir_name = _non_empty_str_or_none(
+        freq_control_payload.get("source_freq_control_log_dir_name")
+    ) or BASELINE_INPUT_DIR_NAME
+    segmented_policy_detected = (
+        low_freq_threshold is not None
+        or low_freq_cap_mhz is not None
+        or min_effective_min_frequency_mhz is not None
+        or max_effective_min_frequency_mhz is not None
+        or source_freq_control_log_dir_name == SEGMENTED_INPUT_DIR_NAME
+    )
+    linespace_policy_detected = (
+        target_context_usage_threshold is not None
+        or segment_count is not None
+        or segment_width_context_usage is not None
+        or source_freq_control_log_dir_name in {
+            LINESPACE_INPUT_DIR_NAME,
+            MULTI_LINESPACE_INPUT_DIR_NAME,
+        }
+    )
+    series_key = _profile_series_key(port_profile_id)
+    display_label = _profile_display_label(port_profile_id)
+
+    return {
+        "source_run_dir": freq_control_payload.get("source_run_dir"),
+        "source_type": freq_control_payload.get("source_type"),
+        "source_freq_control_log_dir_name": source_freq_control_log_dir_name,
+        "source_query_log_paths": source_query_log_paths,
+        "source_decision_log_paths": source_decision_log_paths,
+        "source_control_error_log_paths": source_control_error_log_paths,
+        "experiment_started_at": freq_control_payload.get("experiment_started_at"),
+        "experiment_finished_at": freq_control_payload.get("experiment_finished_at"),
+        "time_constraint_s": _float_or_none(freq_control_payload.get("time_constraint_s")),
+        "analysis_window_start_utc": freq_control_payload.get("analysis_window_start_utc"),
+        "analysis_window_end_utc": freq_control_payload.get("analysis_window_end_utc"),
+        "service_failure_detected": bool(
+            freq_control_payload.get("service_failure_detected", False)
+        ),
+        "service_failure_cutoff_time_utc": freq_control_payload.get(
+            "service_failure_cutoff_time_utc"
+        ),
+        "freq_control_log_found": bool(
+            source_query_log_paths or source_decision_log_paths or source_control_error_log_paths
+        ),
+        "query_log_found": bool(source_query_log_paths),
+        "decision_log_found": bool(source_decision_log_paths),
+        "control_error_log_found": bool(source_control_error_log_paths),
+        "multi_profile": False,
+        "port_profile_id": port_profile_id,
+        "port_profile_ids": [port_profile_id],
+        "series_keys": [series_key],
+        "series_key": series_key,
+        "display_label": display_label,
+        "query_point_count": len(query_points),
+        "pending_query_point_count": pending_query_point_count,
+        "active_query_point_count": active_query_point_count,
+        "query_error_count": query_error_count,
+        "control_error_point_count": control_error_point_count,
+        "decision_point_count": len(decision_points),
+        "decision_change_count": decision_change_count,
+        "first_job_active_time_offset_s": first_job_active_time_offset_s,
+        "first_control_error_time_offset_s": first_control_error_time_offset_s,
+        "lower_bound": lower_bound,
+        "upper_bound": upper_bound,
+        "linespace_policy_detected": linespace_policy_detected,
+        "target_context_usage_threshold": target_context_usage_threshold,
+        "segment_count": segment_count,
+        "segment_width_context_usage": segment_width_context_usage,
+        "segmented_policy_detected": segmented_policy_detected,
+        "low_freq_threshold": low_freq_threshold,
+        "low_freq_cap_mhz": low_freq_cap_mhz,
+        "min_effective_min_frequency_mhz": min_effective_min_frequency_mhz,
+        "max_effective_min_frequency_mhz": max_effective_min_frequency_mhz,
+        "max_context_usage": max_context_usage,
+        "max_window_context_usage": max_window_context_usage,
+        "min_frequency_mhz": min_frequency_mhz,
+        "max_frequency_mhz": max_frequency_mhz,
+        "query_points": query_points,
+        "decision_points": decision_points,
+        "control_error_points": control_error_points,
+        "_subtitle_prefix": f"port profile: {display_label}",
+    }
+
+
+def _figure_payloads(freq_control_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    port_profile_ids = _port_profile_ids_from_payload(freq_control_payload)
+    if len(port_profile_ids) <= 1:
+        return [
+            {
+                "series_key": "aggregate",
+                "display_label": "Aggregate",
+                "port_profile_id": None,
+                "relative_output_subdir": Path(),
+                "freq_control_payload": freq_control_payload,
+            }
+        ]
+
+    return [
+        {
+            "series_key": _profile_series_key(port_profile_id),
+            "display_label": _profile_display_label(port_profile_id),
+            "port_profile_id": port_profile_id,
+            "relative_output_subdir": Path(_profile_series_key(port_profile_id)),
+            "freq_control_payload": _build_profile_payload(
+                freq_control_payload,
+                port_profile_id=port_profile_id,
+            ),
+        }
+        for port_profile_id in port_profile_ids
+    ]
 
 
 def _extract_query_series(
@@ -682,6 +1032,9 @@ def _render_freq_control_figure(
     context_axis.legend(loc="upper left", frameon=False, ncols=2)
 
     subtitle_parts: list[str] = []
+    subtitle_prefix = _non_empty_str_or_none(freq_control_payload.get("_subtitle_prefix"))
+    if subtitle_prefix is not None:
+        subtitle_parts.append(subtitle_prefix)
     source_type = freq_control_payload.get("source_type")
     if isinstance(source_type, str) and source_type:
         subtitle_parts.append(f"source: {source_type}")
@@ -875,19 +1228,80 @@ def generate_figure_for_run_dir(
         )
 
     resolved_output_dir.mkdir(parents=True, exist_ok=True)
-    figure_file_name = f"{DEFAULT_FIGURE_STEM}.{image_format}"
-    figure_path = resolved_output_dir / figure_file_name
-    rendered = _render_freq_control_figure(
-        freq_control_payload=freq_control_payload,
-        output_path=figure_path,
-        image_format=image_format,
-        dpi=dpi,
-    )
+    figure_payloads = _figure_payloads(freq_control_payload)
+    if any(figure_payload["relative_output_subdir"].parts for figure_payload in figure_payloads):
+        stale_root_figure_path = resolved_output_dir / f"{DEFAULT_FIGURE_STEM}.{image_format}"
+        if stale_root_figure_path.is_file():
+            stale_root_figure_path.unlink()
+
+    figure_entries: list[dict[str, Any]] = []
+    for figure_payload in figure_payloads:
+        series_payload = figure_payload["freq_control_payload"]
+        figure_file_name = f"{DEFAULT_FIGURE_STEM}.{image_format}"
+        figure_path = (
+            resolved_output_dir / figure_payload["relative_output_subdir"] / figure_file_name
+        )
+        figure_path.parent.mkdir(parents=True, exist_ok=True)
+        rendered = _render_freq_control_figure(
+            freq_control_payload=series_payload,
+            output_path=figure_path,
+            image_format=image_format,
+            dpi=dpi,
+        )
+        figure_entries.append(
+            {
+                "series_key": figure_payload["series_key"],
+                "display_label": figure_payload["display_label"],
+                "port_profile_id": figure_payload["port_profile_id"],
+                "figure_generated": rendered,
+                "relative_output_subdir": (
+                    figure_payload["relative_output_subdir"].as_posix()
+                    if figure_payload["relative_output_subdir"].parts
+                    else ""
+                ),
+                "figure_file_name": figure_file_name if rendered else None,
+                "figure_path": str(figure_path.resolve()) if rendered else None,
+                "freq_control_log_found": bool(
+                    series_payload.get("freq_control_log_found", False)
+                ),
+                "query_log_found": bool(series_payload.get("query_log_found", False)),
+                "decision_log_found": bool(series_payload.get("decision_log_found", False)),
+                "control_error_log_found": bool(
+                    series_payload.get("control_error_log_found", False)
+                ),
+                "query_point_count": _int_or_none(series_payload.get("query_point_count")),
+                "pending_query_point_count": _int_or_none(
+                    series_payload.get("pending_query_point_count")
+                ),
+                "active_query_point_count": _int_or_none(
+                    series_payload.get("active_query_point_count")
+                ),
+                "query_error_count": _int_or_none(series_payload.get("query_error_count")),
+                "control_error_point_count": _int_or_none(
+                    series_payload.get("control_error_point_count")
+                ),
+                "decision_point_count": _int_or_none(
+                    series_payload.get("decision_point_count")
+                ),
+                "decision_change_count": _int_or_none(
+                    series_payload.get("decision_change_count")
+                ),
+                "max_context_usage": _float_or_none(series_payload.get("max_context_usage")),
+                "max_window_context_usage": _float_or_none(
+                    series_payload.get("max_window_context_usage")
+                ),
+                "min_frequency_mhz": _int_or_none(series_payload.get("min_frequency_mhz")),
+                "max_frequency_mhz": _int_or_none(series_payload.get("max_frequency_mhz")),
+                "skip_reason": None if rendered else "No valid freq-control points",
+            }
+        )
     (
         low_freq_threshold,
         low_freq_cap_mhz,
         segmented_policy_detected,
     ) = _extract_segmented_policy_markers(freq_control_payload)
+    generated_figures = [entry for entry in figure_entries if entry["figure_generated"]]
+    primary_figure = generated_figures[0] if generated_figures else None
 
     manifest = {
         "source_run_dir": str(resolved_run_dir),
@@ -898,10 +1312,13 @@ def generate_figure_for_run_dir(
         "output_dir": str(resolved_output_dir),
         "image_format": image_format,
         "dpi": dpi,
-        "figure_count": 1 if rendered else 0,
-        "figure_generated": rendered,
-        "figure_file_name": figure_file_name if rendered else None,
-        "figure_path": str(figure_path.resolve()) if rendered else None,
+        "multi_profile": bool(freq_control_payload.get("multi_profile", False)),
+        "port_profile_ids": _port_profile_ids_from_payload(freq_control_payload),
+        "series_count": len(figure_payloads),
+        "figure_count": len(generated_figures),
+        "figure_generated": bool(generated_figures),
+        "figure_file_name": primary_figure["figure_file_name"] if primary_figure else None,
+        "figure_path": primary_figure["figure_path"] if primary_figure else None,
         "freq_control_log_found": bool(freq_control_payload.get("freq_control_log_found", False)),
         "query_log_found": bool(freq_control_payload.get("query_log_found", False)),
         "decision_log_found": bool(freq_control_payload.get("decision_log_found", False)),
@@ -941,7 +1358,8 @@ def generate_figure_for_run_dir(
         "service_failure_cutoff_time_utc": freq_control_payload.get(
             "service_failure_cutoff_time_utc"
         ),
-        "skip_reason": None if rendered else "No valid freq-control points",
+        "skip_reason": None if generated_figures else "No valid freq-control points",
+        "figures": figure_entries,
     }
     manifest_path = resolved_output_dir / DEFAULT_MANIFEST_NAME
     manifest_path.write_text(

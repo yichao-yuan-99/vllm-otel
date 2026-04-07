@@ -5,6 +5,7 @@ from concurrent.futures import ProcessPoolExecutor
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -141,6 +142,13 @@ def _int_or_none(value: Any) -> int | None:
     return None
 
 
+def _non_empty_str_or_none(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
 def _extract_xy(power_summary_payload: dict[str, Any]) -> tuple[list[float], list[float]]:
     raw_points = power_summary_payload.get("power_points")
     if not isinstance(raw_points, list):
@@ -202,6 +210,113 @@ def _build_stats_annotation(
         f"energy: {_format_stat_value(total_energy_kwh)} kWh\n"
         f"energy: {_format_stat_value(total_energy_j)} J"
     )
+
+
+def _extract_per_gpu_series(power_summary_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_per_gpu_power = power_summary_payload.get("per_gpu_power")
+    if not isinstance(raw_per_gpu_power, list):
+        return []
+
+    series_payloads: list[dict[str, Any]] = []
+    for entry in raw_per_gpu_power:
+        if not isinstance(entry, dict):
+            continue
+        series_payload = {
+            "source_type": power_summary_payload.get("source_type"),
+            "analysis_window_start_utc": power_summary_payload.get("analysis_window_start_utc"),
+            "power_log_found": power_summary_payload.get("power_log_found"),
+            "power_sample_count": entry.get("power_sample_count"),
+            "power_stats_w": entry.get("power_stats_w"),
+            "total_energy_j": entry.get("total_energy_j"),
+            "total_energy_kwh": entry.get("total_energy_kwh"),
+            "power_points": entry.get("power_points"),
+            "gpu_key": entry.get("gpu_key"),
+            "gpu_id": entry.get("gpu_id"),
+            "display_label": entry.get("display_label"),
+            "source_endpoint": entry.get("source_endpoint"),
+            "_figure_variant_label": entry.get("display_label"),
+        }
+        x_values, _ = _extract_xy(series_payload)
+        if x_values:
+            series_payloads.append(series_payload)
+    return series_payloads
+
+
+def _slugify_filename_part(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or "series"
+
+
+def _series_figure_stem(
+    *,
+    figure_kind: str,
+    gpu_key: str | None = None,
+    display_label: str | None = None,
+) -> str:
+    if figure_kind == "aggregate":
+        return DEFAULT_FIGURE_STEM
+    stem_suffix = _slugify_filename_part(gpu_key or display_label or "gpu")
+    return f"{DEFAULT_FIGURE_STEM}-{stem_suffix}"
+
+
+def _build_figure_series_specs(power_summary_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    specs = [
+        {
+            "figure_kind": "aggregate",
+            "payload": power_summary_payload,
+            "display_label": "All GPUs",
+            "gpu_key": None,
+            "gpu_id": None,
+            "source_endpoint": None,
+        }
+    ]
+
+    per_gpu_series = _extract_per_gpu_series(power_summary_payload)
+    if len(per_gpu_series) <= 1:
+        return specs
+
+    for series_payload in per_gpu_series:
+        specs.append(
+            {
+                "figure_kind": "per_gpu",
+                "payload": series_payload,
+                "display_label": _non_empty_str_or_none(series_payload.get("display_label")),
+                "gpu_key": _non_empty_str_or_none(series_payload.get("gpu_key")),
+                "gpu_id": _non_empty_str_or_none(series_payload.get("gpu_id")),
+                "source_endpoint": _non_empty_str_or_none(series_payload.get("source_endpoint")),
+            }
+        )
+    return specs
+
+
+def _build_manifest_figure_entry(
+    *,
+    series_spec: dict[str, Any],
+    figure_file_name: str,
+    figure_path: Path,
+    rendered: bool,
+) -> dict[str, Any]:
+    series_payload = series_spec["payload"]
+    x_values, y_values = _extract_xy(series_payload)
+    summary_stats = _build_summary_stats(x_values, y_values)
+    return {
+        "figure_kind": series_spec["figure_kind"],
+        "figure_generated": rendered,
+        "figure_file_name": figure_file_name if rendered else None,
+        "figure_path": str(figure_path.resolve()) if rendered else None,
+        "display_label": series_spec.get("display_label"),
+        "gpu_key": series_spec.get("gpu_key"),
+        "gpu_id": series_spec.get("gpu_id"),
+        "source_endpoint": series_spec.get("source_endpoint"),
+        "sample_count": summary_stats["sample_count"],
+        "avg_power_w": _float_or_none(summary_stats.get("avg")),
+        "min_power_w": _float_or_none(summary_stats.get("min")),
+        "max_power_w": _float_or_none(summary_stats.get("max")),
+        "peak_time_s": _float_or_none(summary_stats.get("peak_time_s")),
+        "total_energy_j": _float_or_none(series_payload.get("total_energy_j")),
+        "total_energy_kwh": _float_or_none(series_payload.get("total_energy_kwh")),
+        "skip_reason": None if rendered else "No valid power points",
+    }
 
 
 def _import_matplotlib_pyplot() -> Any:
@@ -287,7 +402,13 @@ def _render_power_figure(
             },
         )
 
-    axis.set_title("GPU Power Over Time", loc="left", fontweight="semibold")
+    figure_variant_label = _non_empty_str_or_none(
+        power_summary_payload.get("_figure_variant_label")
+    )
+    if figure_variant_label is None:
+        axis.set_title("GPU Power Over Time", loc="left", fontweight="semibold")
+    else:
+        axis.set_title(f"{figure_variant_label} Power Over Time", loc="left", fontweight="semibold")
     axis.set_xlabel("Time From Run Start (s)")
     axis.set_ylabel("GPU Power (W)")
 
@@ -298,6 +419,9 @@ def _render_power_figure(
     analysis_start = power_summary_payload.get("analysis_window_start_utc")
     if isinstance(analysis_start, str) and analysis_start:
         subtitle_parts.append(f"start: {analysis_start}")
+    source_endpoint = _non_empty_str_or_none(power_summary_payload.get("source_endpoint"))
+    if source_endpoint is not None:
+        subtitle_parts.append(f"endpoint: {source_endpoint}")
     if subtitle_parts:
         axis.text(
             0.0,
@@ -364,13 +488,44 @@ def generate_figure_for_run_dir(
     summary_stats = _build_summary_stats(x_values, y_values)
 
     resolved_output_dir.mkdir(parents=True, exist_ok=True)
-    figure_file_name = f"{DEFAULT_FIGURE_STEM}.{image_format}"
-    figure_path = resolved_output_dir / figure_file_name
-    rendered = _render_power_figure(
-        power_summary_payload=power_summary_payload,
-        output_path=figure_path,
-        image_format=image_format,
-        dpi=dpi,
+    figure_entries: list[dict[str, Any]] = []
+    used_file_names: set[str] = set()
+    for series_spec in _build_figure_series_specs(power_summary_payload):
+        figure_stem = _series_figure_stem(
+            figure_kind=str(series_spec["figure_kind"]),
+            gpu_key=_non_empty_str_or_none(series_spec.get("gpu_key")),
+            display_label=_non_empty_str_or_none(series_spec.get("display_label")),
+        )
+        figure_file_name = f"{figure_stem}.{image_format}"
+        if figure_file_name in used_file_names:
+            suffix = 2
+            while f"{figure_stem}-{suffix}.{image_format}" in used_file_names:
+                suffix += 1
+            figure_file_name = f"{figure_stem}-{suffix}.{image_format}"
+        used_file_names.add(figure_file_name)
+
+        figure_path = resolved_output_dir / figure_file_name
+        rendered = _render_power_figure(
+            power_summary_payload=series_spec["payload"],
+            output_path=figure_path,
+            image_format=image_format,
+            dpi=dpi,
+        )
+        figure_entries.append(
+            _build_manifest_figure_entry(
+                series_spec=series_spec,
+                figure_file_name=figure_file_name,
+                figure_path=figure_path,
+                rendered=rendered,
+            )
+        )
+
+    aggregate_entry = figure_entries[0] if figure_entries else {}
+    rendered_figure_count = sum(1 for entry in figure_entries if entry["figure_generated"])
+    rendered_per_gpu_figure_count = sum(
+        1
+        for entry in figure_entries
+        if entry["figure_generated"] and entry["figure_kind"] == "per_gpu"
     )
 
     manifest = {
@@ -379,10 +534,11 @@ def generate_figure_for_run_dir(
         "output_dir": str(resolved_output_dir),
         "image_format": image_format,
         "dpi": dpi,
-        "figure_count": 1 if rendered else 0,
-        "figure_generated": rendered,
-        "figure_file_name": figure_file_name if rendered else None,
-        "figure_path": str(figure_path.resolve()) if rendered else None,
+        "figure_count": rendered_figure_count,
+        "per_gpu_figure_count": rendered_per_gpu_figure_count,
+        "figure_generated": bool(aggregate_entry.get("figure_generated", False)),
+        "figure_file_name": aggregate_entry.get("figure_file_name"),
+        "figure_path": aggregate_entry.get("figure_path"),
         "sample_count": summary_stats["sample_count"],
         "avg_power_w": _float_or_none(summary_stats.get("avg")),
         "min_power_w": _float_or_none(summary_stats.get("min")),
@@ -399,7 +555,8 @@ def generate_figure_for_run_dir(
         "service_failure_cutoff_time_utc": power_summary_payload.get(
             "service_failure_cutoff_time_utc"
         ),
-        "skip_reason": None if rendered else "No valid power points",
+        "skip_reason": aggregate_entry.get("skip_reason"),
+        "figures": figure_entries,
     }
     manifest_path = resolved_output_dir / DEFAULT_MANIFEST_NAME
     manifest_path.write_text(

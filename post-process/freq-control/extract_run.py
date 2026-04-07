@@ -8,6 +8,7 @@ from datetime import timezone
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from typing import Any
 from typing import Iterable
@@ -27,18 +28,25 @@ DEFAULT_OUTPUT_NAME = "freq-control-summary.json"
 DEFAULT_FREQ_CONTROL_LOG_DIR_NAME = "freq-control"
 SEGMENTED_FREQ_CONTROL_LOG_DIR_NAME = "freq-control-seg"
 LINESPACE_FREQ_CONTROL_LOG_DIR_NAME = "freq-control-linespace"
+MULTI_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME = "freq-control-linespace-multi"
 QUERY_LOG_GLOBS = (
     "freq-controller.query.*.jsonl",
     "freq-controller-ls.query.*.jsonl",
+    "freq-controller-ls-multi.query.*.jsonl",
 )
 DECISION_LOG_GLOBS = (
     "freq-controller.decision.*.jsonl",
     "freq-controller-ls.decision.*.jsonl",
+    "freq-controller-ls-multi.decision.*.jsonl",
 )
 CONTROL_ERROR_LOG_GLOBS = (
     "freq-controller.control-error.*.jsonl",
     "freq-controller-ls.control-error.*.jsonl",
+    "freq-controller-ls-multi.control-error.*.jsonl",
 )
+LINESPACE_LOG_PREFIX = "freq-controller-ls."
+MULTI_LINESPACE_LOG_PREFIX = "freq-controller-ls-multi."
+PROFILE_DIR_RE = re.compile(r"^profile-(\d+)$")
 
 
 def _default_max_procs() -> int:
@@ -85,7 +93,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Optional output path. Default matches the detected log layout: "
             f"<run-dir>/post-processed/freq-control/{DEFAULT_OUTPUT_NAME} or "
             f"<run-dir>/post-processed/freq-control-seg/{DEFAULT_OUTPUT_NAME} or "
-            f"<run-dir>/post-processed/freq-control-linespace/{DEFAULT_OUTPUT_NAME}"
+            f"<run-dir>/post-processed/freq-control-linespace/{DEFAULT_OUTPUT_NAME} or "
+            f"<run-dir>/post-processed/freq-control-linespace-multi/{DEFAULT_OUTPUT_NAME}"
         ),
     )
     parser.add_argument(
@@ -168,9 +177,22 @@ def _detect_freq_control_layout_name(run_dir: Path) -> str:
     segmented_dir = (run_dir / SEGMENTED_FREQ_CONTROL_LOG_DIR_NAME).resolve()
     if segmented_dir.exists():
         return SEGMENTED_FREQ_CONTROL_LOG_DIR_NAME
+    multi_linespace_dir = (run_dir / MULTI_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME).resolve()
+    if multi_linespace_dir.exists():
+        return MULTI_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
     linespace_dir = (run_dir / LINESPACE_FREQ_CONTROL_LOG_DIR_NAME).resolve()
     if linespace_dir.exists():
         return LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
+    multi_linespace_log_paths, _ = _discover_log_paths(
+        run_dir,
+        (
+            "freq-controller-ls-multi.query.*.jsonl",
+            "freq-controller-ls-multi.decision.*.jsonl",
+            "freq-controller-ls-multi.control-error.*.jsonl",
+        ),
+    )
+    if multi_linespace_log_paths:
+        return MULTI_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
     linespace_log_paths, _ = _discover_log_paths(
         run_dir,
         (
@@ -191,6 +213,7 @@ def _resolve_log_dir_candidates(run_dir: Path) -> list[tuple[str | None, Path]]:
     candidates: list[tuple[str | None, Path]] = []
     for log_dir_name in (
         SEGMENTED_FREQ_CONTROL_LOG_DIR_NAME,
+        MULTI_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME,
         LINESPACE_FREQ_CONTROL_LOG_DIR_NAME,
         DEFAULT_FREQ_CONTROL_LOG_DIR_NAME,
     ):
@@ -208,17 +231,38 @@ def _discover_log_paths(
     glob_patterns: tuple[str, ...],
 ) -> tuple[list[Path], str | None]:
     for log_dir_name, log_dir in _resolve_log_dir_candidates(run_dir):
+        # Actual freq-control directories may contain nested profile-specific logs
+        # (for example freq-control-linespace/profile-2/*.jsonl). Keep the
+        # legacy run-dir fallback non-recursive so we do not scan unrelated
+        # parts of the run tree when probing for root-level historical layouts.
+        matcher = log_dir.glob if log_dir_name is None else log_dir.rglob
         matches = sorted(
             {
                 path.resolve()
                 for glob_pattern in glob_patterns
-                for path in log_dir.glob(glob_pattern)
+                for path in matcher(glob_pattern)
                 if path.is_file()
             }
         )
         if matches:
             return matches, log_dir_name
     return [], None
+
+
+def _port_profile_id_from_log_path(path: Path, *, run_dir: Path) -> int | None:
+    try:
+        relative_parts = path.resolve().relative_to(run_dir.resolve()).parts
+    except ValueError:
+        relative_parts = path.resolve().parts
+    for part in relative_parts:
+        match = PROFILE_DIR_RE.fullmatch(part)
+        if match is not None:
+            return int(match.group(1))
+    return None
+
+
+def _profile_label(profile_id: int) -> str:
+    return f"profile-{profile_id}"
 
 
 def _resolve_experiment_window(
@@ -288,13 +332,14 @@ def _normalize_query_point(
     *,
     run_start_utc: datetime,
     run_end_utc: datetime | None,
+    port_profile_id: int | None,
 ) -> dict[str, Any] | None:
     timestamp_utc = parse_iso8601_to_utc(record.get("timestamp"))
     if timestamp_utc is None:
         return None
     if run_end_utc is not None and timestamp_utc > run_end_utc:
         return None
-    return {
+    result = {
         "timestamp_utc": _isoformat_utc(timestamp_utc),
         "time_offset_s": round((timestamp_utc - run_start_utc).total_seconds(), 6),
         "phase": _non_empty_str_or_none(record.get("phase")),
@@ -304,6 +349,9 @@ def _normalize_query_point(
         "sample_count_window": _int_or_none(record.get("sample_count_window")),
         "error": _non_empty_str_or_none(record.get("error")),
     }
+    if port_profile_id is not None:
+        result["port_profile_id"] = port_profile_id
+    return result
 
 
 def _normalize_decision_point(
@@ -311,13 +359,14 @@ def _normalize_decision_point(
     *,
     run_start_utc: datetime,
     run_end_utc: datetime | None,
+    port_profile_id: int | None,
 ) -> dict[str, Any] | None:
     timestamp_utc = parse_iso8601_to_utc(record.get("timestamp"))
     if timestamp_utc is None:
         return None
     if run_end_utc is not None and timestamp_utc > run_end_utc:
         return None
-    return {
+    result = {
         "timestamp_utc": _isoformat_utc(timestamp_utc),
         "time_offset_s": round((timestamp_utc - run_start_utc).total_seconds(), 6),
         "action": _non_empty_str_or_none(record.get("action")),
@@ -342,6 +391,9 @@ def _normalize_decision_point(
             record.get("effective_min_frequency_mhz")
         ),
     }
+    if port_profile_id is not None:
+        result["port_profile_id"] = port_profile_id
+    return result
 
 
 def _normalize_control_error_point(
@@ -349,13 +401,14 @@ def _normalize_control_error_point(
     *,
     run_start_utc: datetime,
     run_end_utc: datetime | None,
+    port_profile_id: int | None,
 ) -> dict[str, Any] | None:
     timestamp_utc = parse_iso8601_to_utc(record.get("timestamp"))
     if timestamp_utc is None:
         return None
     if run_end_utc is not None and timestamp_utc > run_end_utc:
         return None
-    return {
+    result = {
         "timestamp_utc": _isoformat_utc(timestamp_utc),
         "time_offset_s": round((timestamp_utc - run_start_utc).total_seconds(), 6),
         "reason": _non_empty_str_or_none(record.get("reason")),
@@ -372,6 +425,9 @@ def _normalize_control_error_point(
         ),
         "sample_count": _int_or_none(record.get("sample_count")),
     }
+    if port_profile_id is not None:
+        result["port_profile_id"] = port_profile_id
+    return result
 
 
 def _first_non_none(items: Iterable[Any]) -> Any:
@@ -402,47 +458,30 @@ def _max_int_or_none(items: Iterable[int | None]) -> int | None:
     return max(values)
 
 
-def extract_freq_control_summary_from_run_dir(run_dir: Path) -> dict[str, Any]:
-    resolved_run_dir = run_dir.expanduser().resolve()
-    service_failure_payload = ensure_service_failure_payload(resolved_run_dir)
-    cutoff_time_utc = cutoff_datetime_utc_from_payload(service_failure_payload)
-
-    (
-        source_type,
-        experiment_started_at,
-        experiment_finished_at,
-        time_constraint_s,
-        run_start_utc,
-        run_end_utc,
-    ) = _resolve_experiment_window(resolved_run_dir, cutoff_time_utc=cutoff_time_utc)
-
-    default_log_dir_name = _detect_freq_control_layout_name(resolved_run_dir)
-    query_log_paths, query_log_dir_name = _discover_log_paths(
-        resolved_run_dir,
-        QUERY_LOG_GLOBS,
-    )
-    decision_log_paths, decision_log_dir_name = _discover_log_paths(
-        resolved_run_dir,
-        DECISION_LOG_GLOBS,
-    )
-    control_error_log_paths, control_error_log_dir_name = _discover_log_paths(
-        resolved_run_dir,
-        CONTROL_ERROR_LOG_GLOBS,
-    )
-    source_freq_control_log_dir_name = (
-        decision_log_dir_name
-        or query_log_dir_name
-        or control_error_log_dir_name
-        or default_log_dir_name
-    )
-
+def _build_summary_from_log_paths(
+    *,
+    run_dir: Path,
+    source_type: str,
+    source_freq_control_log_dir_name: str,
+    query_log_paths: list[Path],
+    decision_log_paths: list[Path],
+    control_error_log_paths: list[Path],
+    experiment_started_at: Any,
+    experiment_finished_at: Any,
+    time_constraint_s: float | None,
+    run_start_utc: datetime,
+    run_end_utc: datetime | None,
+    service_failure_payload: dict[str, Any],
+) -> dict[str, Any]:
     query_points: list[dict[str, Any]] = []
     for query_log_path in query_log_paths:
+        port_profile_id = _port_profile_id_from_log_path(query_log_path, run_dir=run_dir)
         for record in _iter_jsonl_dict_records(query_log_path):
             point = _normalize_query_point(
                 record,
                 run_start_utc=run_start_utc,
                 run_end_utc=run_end_utc,
+                port_profile_id=port_profile_id,
             )
             if point is not None:
                 query_points.append(point)
@@ -455,11 +494,13 @@ def extract_freq_control_summary_from_run_dir(run_dir: Path) -> dict[str, Any]:
 
     decision_points: list[dict[str, Any]] = []
     for decision_log_path in decision_log_paths:
+        port_profile_id = _port_profile_id_from_log_path(decision_log_path, run_dir=run_dir)
         for record in _iter_jsonl_dict_records(decision_log_path):
             point = _normalize_decision_point(
                 record,
                 run_start_utc=run_start_utc,
                 run_end_utc=run_end_utc,
+                port_profile_id=port_profile_id,
             )
             if point is not None:
                 decision_points.append(point)
@@ -472,11 +513,16 @@ def extract_freq_control_summary_from_run_dir(run_dir: Path) -> dict[str, Any]:
 
     control_error_points: list[dict[str, Any]] = []
     for control_error_log_path in control_error_log_paths:
+        port_profile_id = _port_profile_id_from_log_path(
+            control_error_log_path,
+            run_dir=run_dir,
+        )
         for record in _iter_jsonl_dict_records(control_error_log_path):
             point = _normalize_control_error_point(
                 record,
                 run_start_utc=run_start_utc,
                 run_end_utc=run_end_utc,
+                port_profile_id=port_profile_id,
             )
             if point is not None:
                 control_error_points.append(point)
@@ -562,28 +608,59 @@ def extract_freq_control_summary_from_run_dir(run_dir: Path) -> dict[str, Any]:
         or max_effective_min_frequency_mhz is not None
         or source_freq_control_log_dir_name == SEGMENTED_FREQ_CONTROL_LOG_DIR_NAME
     )
+    multi_linespace_log_detected = any(
+        path.name.startswith(MULTI_LINESPACE_LOG_PREFIX) for path in query_log_paths
+    ) or any(
+        path.name.startswith(MULTI_LINESPACE_LOG_PREFIX) for path in decision_log_paths
+    ) or any(
+        path.name.startswith(MULTI_LINESPACE_LOG_PREFIX)
+        for path in control_error_log_paths
+    )
+    linespace_log_detected = any(
+        path.name.startswith(LINESPACE_LOG_PREFIX) for path in query_log_paths
+    ) or any(
+        path.name.startswith(LINESPACE_LOG_PREFIX) for path in decision_log_paths
+    ) or any(
+        path.name.startswith(LINESPACE_LOG_PREFIX)
+        for path in control_error_log_paths
+    )
     linespace_policy_detected = (
         target_context_usage_threshold is not None
         or segment_count is not None
         or segment_width_context_usage is not None
         or source_freq_control_log_dir_name == LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
-        or any(path.name.startswith("freq-controller-ls.") for path in query_log_paths)
-        or any(path.name.startswith("freq-controller-ls.") for path in decision_log_paths)
-        or any(
-            path.name.startswith("freq-controller-ls.")
-            for path in control_error_log_paths
-        )
+        or source_freq_control_log_dir_name == MULTI_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
+        or linespace_log_detected
+        or multi_linespace_log_detected
     )
+    effective_source_freq_control_log_dir_name = source_freq_control_log_dir_name
     if (
         linespace_policy_detected
-        and source_freq_control_log_dir_name == DEFAULT_FREQ_CONTROL_LOG_DIR_NAME
+        and effective_source_freq_control_log_dir_name == DEFAULT_FREQ_CONTROL_LOG_DIR_NAME
     ):
-        source_freq_control_log_dir_name = LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
+        effective_source_freq_control_log_dir_name = (
+            MULTI_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
+            if multi_linespace_log_detected
+            else LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
+        )
+
+    port_profile_ids = sorted(
+        {
+            profile_id
+            for profile_id in (
+                _port_profile_id_from_log_path(path, run_dir=run_dir)
+                for path in (
+                    query_log_paths + decision_log_paths + control_error_log_paths
+                )
+            )
+            if profile_id is not None
+        }
+    )
 
     return {
-        "source_run_dir": str(resolved_run_dir),
+        "source_run_dir": str(run_dir),
         "source_type": source_type,
-        "source_freq_control_log_dir_name": source_freq_control_log_dir_name,
+        "source_freq_control_log_dir_name": effective_source_freq_control_log_dir_name,
         "source_query_log_paths": [str(path) for path in query_log_paths],
         "source_decision_log_paths": [str(path) for path in decision_log_paths],
         "source_control_error_log_paths": [
@@ -604,6 +681,9 @@ def extract_freq_control_summary_from_run_dir(run_dir: Path) -> dict[str, Any]:
         "query_log_found": bool(query_log_paths),
         "decision_log_found": bool(decision_log_paths),
         "control_error_log_found": bool(control_error_log_paths),
+        "multi_profile": len(port_profile_ids) > 1,
+        "port_profile_ids": port_profile_ids,
+        "series_keys": [_profile_label(profile_id) for profile_id in port_profile_ids],
         "query_point_count": len(query_points),
         "pending_query_point_count": pending_query_point_count,
         "active_query_point_count": active_query_point_count,
@@ -632,6 +712,56 @@ def extract_freq_control_summary_from_run_dir(run_dir: Path) -> dict[str, Any]:
         "decision_points": decision_points,
         "control_error_points": control_error_points,
     }
+
+
+def extract_freq_control_summary_from_run_dir(run_dir: Path) -> dict[str, Any]:
+    resolved_run_dir = run_dir.expanduser().resolve()
+    service_failure_payload = ensure_service_failure_payload(resolved_run_dir)
+    cutoff_time_utc = cutoff_datetime_utc_from_payload(service_failure_payload)
+
+    (
+        source_type,
+        experiment_started_at,
+        experiment_finished_at,
+        time_constraint_s,
+        run_start_utc,
+        run_end_utc,
+    ) = _resolve_experiment_window(resolved_run_dir, cutoff_time_utc=cutoff_time_utc)
+
+    default_log_dir_name = _detect_freq_control_layout_name(resolved_run_dir)
+    query_log_paths, query_log_dir_name = _discover_log_paths(
+        resolved_run_dir,
+        QUERY_LOG_GLOBS,
+    )
+    decision_log_paths, decision_log_dir_name = _discover_log_paths(
+        resolved_run_dir,
+        DECISION_LOG_GLOBS,
+    )
+    control_error_log_paths, control_error_log_dir_name = _discover_log_paths(
+        resolved_run_dir,
+        CONTROL_ERROR_LOG_GLOBS,
+    )
+    source_freq_control_log_dir_name = (
+        decision_log_dir_name
+        or query_log_dir_name
+        or control_error_log_dir_name
+        or default_log_dir_name
+    )
+
+    return _build_summary_from_log_paths(
+        run_dir=resolved_run_dir,
+        source_type=source_type,
+        source_freq_control_log_dir_name=source_freq_control_log_dir_name,
+        query_log_paths=query_log_paths,
+        decision_log_paths=decision_log_paths,
+        control_error_log_paths=control_error_log_paths,
+        experiment_started_at=experiment_started_at,
+        experiment_finished_at=experiment_finished_at,
+        time_constraint_s=time_constraint_s,
+        run_start_utc=run_start_utc,
+        run_end_utc=run_end_utc,
+        service_failure_payload=service_failure_payload,
+    )
 
 
 def _default_output_path_for_run(run_dir: Path) -> Path:

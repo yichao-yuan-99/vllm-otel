@@ -203,6 +203,18 @@ def _float_or_none(value: Any) -> float | None:
     return None
 
 
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value.is_integer():
+            return int(value)
+        return None
+    return None
+
+
 def _extract_xy(histogram_payload: dict[str, Any]) -> tuple[list[float], list[float]]:
     raw_points = histogram_payload.get("points")
     if not isinstance(raw_points, list):
@@ -244,6 +256,47 @@ def _variant_specs() -> list[dict[str, Any]]:
             }
         )
     return variants
+
+
+def _series_specs_for_payload(histogram_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    series_specs = [
+        {
+            "series_id": "aggregate",
+            "scope_label": None,
+            "relative_output_subdir": Path(),
+            "series_payload": histogram_payload,
+        }
+    ]
+    raw_series_by_profile = histogram_payload.get("series_by_profile")
+    if not isinstance(raw_series_by_profile, dict):
+        return series_specs
+
+    for series_id in histogram_payload.get("series_keys", []):
+        series_payload = raw_series_by_profile.get(series_id)
+        if not isinstance(series_payload, dict):
+            continue
+        series_specs.append(
+            {
+                "series_id": series_id,
+                "scope_label": series_id,
+                "relative_output_subdir": Path(series_id),
+                "series_payload": series_payload,
+            }
+        )
+    for series_id, series_payload in sorted(raw_series_by_profile.items()):
+        if not isinstance(series_payload, dict):
+            continue
+        if any(item["series_id"] == series_id for item in series_specs):
+            continue
+        series_specs.append(
+            {
+                "series_id": series_id,
+                "scope_label": series_id,
+                "relative_output_subdir": Path(series_id),
+                "series_payload": series_payload,
+            }
+        )
+    return series_specs
 
 
 def _smooth_values_with_centered_window(
@@ -438,6 +491,9 @@ def _render_metric_figure(
     axis.set_ylabel("Accumulated Value in 1s Bucket")
 
     subtitle_parts: list[str] = []
+    scope_label = histogram_payload.get("_figure_scope_label")
+    if isinstance(scope_label, str) and scope_label:
+        subtitle_parts.append(scope_label)
     metric_id = histogram_payload.get("metric")
     if isinstance(metric_id, str) and metric_id:
         subtitle_parts.append(f"metric: {metric_id}")
@@ -511,8 +567,11 @@ def generate_figures_for_run_dir(
 
     resolved_output_dir.mkdir(parents=True, exist_ok=True)
     figure_entries: list[dict[str, Any]] = []
-    skipped_metric_variants: list[str] = []
+    skipped_figure_ids: list[str] = []
     variants = _variant_specs()
+    series_specs_for_manifest: list[dict[str, Any]] | None = None
+    port_profile_ids: list[int] = []
+    multi_profile = False
 
     for metric_spec in METRIC_SPECS:
         metric = metric_spec["metric"]
@@ -520,48 +579,81 @@ def generate_figures_for_run_dir(
         histogram_payload = _load_json(input_path)
         if not isinstance(histogram_payload, dict):
             raise ValueError(f"Histogram JSON must be an object: {input_path}")
+        series_specs = _series_specs_for_payload(histogram_payload)
+        if series_specs_for_manifest is None:
+            series_specs_for_manifest = series_specs
+            multi_profile = bool(histogram_payload.get("multi_profile", False))
+            raw_port_profile_ids = histogram_payload.get("port_profile_ids")
+            if isinstance(raw_port_profile_ids, list):
+                port_profile_ids = [
+                    profile_id
+                    for profile_id in (_int_or_none(value) for value in raw_port_profile_ids)
+                    if profile_id is not None
+                ]
 
-        for variant_spec in variants:
-            variant_id = variant_spec["variant_id"]
-            window_size_s = variant_spec["window_size_s"]
+        for series_spec in series_specs:
+            series_payload = dict(series_spec["series_payload"])
+            if series_spec["scope_label"]:
+                series_payload["_figure_scope_label"] = series_spec["scope_label"]
+            for variant_spec in variants:
+                variant_id = variant_spec["variant_id"]
+                window_size_s = variant_spec["window_size_s"]
 
-            figure_file_name = (
-                f"{metric_spec['figure_stem']}{variant_spec['file_suffix']}.{image_format}"
-            )
-            figure_path = resolved_output_dir / figure_file_name
-            rendered, summary_stats = _render_metric_figure(
-                metric_spec=metric_spec,
-                histogram_payload=histogram_payload,
-                window_size_s=window_size_s,
-                title_suffix=variant_spec["title_suffix"],
-                output_path=figure_path,
-                image_format=image_format,
-                dpi=dpi,
-            )
-            if not rendered:
-                skipped_metric_variants.append(f"{metric}:{variant_id}")
+                figure_file_name = (
+                    f"{metric_spec['figure_stem']}{variant_spec['file_suffix']}.{image_format}"
+                )
+                figure_path = (
+                    resolved_output_dir / series_spec["relative_output_subdir"] / figure_file_name
+                )
+                figure_path.parent.mkdir(parents=True, exist_ok=True)
+                rendered, summary_stats = _render_metric_figure(
+                    metric_spec=metric_spec,
+                    histogram_payload=series_payload,
+                    window_size_s=window_size_s,
+                    title_suffix=variant_spec["title_suffix"],
+                    output_path=figure_path,
+                    image_format=image_format,
+                    dpi=dpi,
+                )
+                figure_id = (
+                    f"{metric}:{variant_id}"
+                    if series_spec["series_id"] == "aggregate"
+                    else f"{series_spec['series_id']}:{metric}:{variant_id}"
+                )
+                if not rendered:
+                    skipped_figure_ids.append(figure_id)
 
-            figure_entries.append(
-                {
-                    "metric": metric,
-                    "variant_id": variant_id,
-                    "window_size_s": window_size_s,
-                    "phase": histogram_payload.get("phase"),
-                    "figure_generated": rendered,
-                    "figure_file_name": figure_file_name if rendered else None,
-                    "figure_path": str(figure_path.resolve()) if rendered else None,
-                    "source_histogram_path": str(input_path.resolve()),
-                    "sample_count": summary_stats["sample_count"],
-                    "avg_accumulated_value": _float_or_none(summary_stats.get("avg")),
-                    "min_accumulated_value": _float_or_none(summary_stats.get("min")),
-                    "max_accumulated_value": _float_or_none(summary_stats.get("max")),
-                    "peak_second": _float_or_none(summary_stats.get("peak_second")),
-                    "total_accumulated_value": _float_or_none(
-                        summary_stats.get("total_accumulated_value")
-                    ),
-                    "skip_reason": None if rendered else "No valid histogram points",
-                }
-            )
+                figure_entries.append(
+                    {
+                        "metric": metric,
+                        "series_id": series_spec["series_id"],
+                        "gateway_profile_id": _int_or_none(
+                            series_spec["series_payload"].get("gateway_profile_id")
+                        ),
+                        "variant_id": variant_id,
+                        "figure_id": figure_id,
+                        "window_size_s": window_size_s,
+                        "phase": series_payload.get("phase"),
+                        "figure_generated": rendered,
+                        "relative_output_subdir": (
+                            series_spec["relative_output_subdir"].as_posix()
+                            if series_spec["relative_output_subdir"].parts
+                            else ""
+                        ),
+                        "figure_file_name": figure_file_name if rendered else None,
+                        "figure_path": str(figure_path.resolve()) if rendered else None,
+                        "source_histogram_path": str(input_path.resolve()),
+                        "sample_count": summary_stats["sample_count"],
+                        "avg_accumulated_value": _float_or_none(summary_stats.get("avg")),
+                        "min_accumulated_value": _float_or_none(summary_stats.get("min")),
+                        "max_accumulated_value": _float_or_none(summary_stats.get("max")),
+                        "peak_second": _float_or_none(summary_stats.get("peak_second")),
+                        "total_accumulated_value": _float_or_none(
+                            summary_stats.get("total_accumulated_value")
+                        ),
+                        "skip_reason": None if rendered else "No valid histogram points",
+                    }
+                )
 
     manifest = {
         "source_run_dir": str(resolved_run_dir),
@@ -569,11 +661,14 @@ def generate_figures_for_run_dir(
         "output_dir": str(resolved_output_dir),
         "image_format": image_format,
         "dpi": dpi,
+        "multi_profile": multi_profile,
+        "port_profile_ids": port_profile_ids,
+        "series_count": len(series_specs_for_manifest or []),
         "metric_count": len(METRIC_SPECS),
         "variant_count": len(variants),
         "figure_count": len([entry for entry in figure_entries if entry["figure_generated"]]),
-        "skipped_metric_variant_count": len(skipped_metric_variants),
-        "skipped_metric_variants": skipped_metric_variants,
+        "skipped_metric_variant_count": len(skipped_figure_ids),
+        "skipped_metric_variants": skipped_figure_ids,
         "figures": figure_entries,
     }
     manifest_path = resolved_output_dir / DEFAULT_MANIFEST_NAME

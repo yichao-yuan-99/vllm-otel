@@ -21,6 +21,10 @@ if str(MODULE_ROOT) not in sys.path:
 from pp_common.service_failure import cutoff_datetime_utc_from_payload
 from pp_common.service_failure import ensure_service_failure_payload
 from pp_common.service_failure import parse_iso8601_to_utc
+from pp_common.profile_id import api_token_sha256
+from pp_common.profile_id import build_gateway_run_profile_id_by_api_token_hash
+from pp_common.profile_id import profile_ids_from_payload
+from pp_common.profile_id import profile_label
 
 
 DEFAULT_OUTPUT_NAME = "job-throughput-timeseries.json"
@@ -153,6 +157,22 @@ def _is_cancelled_status(value: Any) -> bool:
     return value.strip().lower() in {"cancelled", "canceled"}
 
 
+def _gateway_profile_id_from_job_payload(
+    payload: Any,
+    *,
+    profile_id_by_api_token_hash: dict[str, int],
+) -> int | None:
+    declared_profile_ids = profile_ids_from_payload(payload)
+    if declared_profile_ids:
+        return declared_profile_ids[0]
+    if not isinstance(payload, dict):
+        return None
+    api_token_hash = api_token_sha256(payload.get("api_token"))
+    if api_token_hash is None:
+        return None
+    return profile_id_by_api_token_hash.get(api_token_hash)
+
+
 def _resolved_total_duration_s(
     total_duration_s: float | None,
     *,
@@ -171,7 +191,8 @@ def _extract_completion_offsets_from_replay_run(
     run_dir: Path,
     *,
     cutoff_time_utc: datetime | None = None,
-) -> tuple[str, Any, Any, float | None, int, list[dict[str, Any]], float]:
+    profile_id_by_api_token_hash: dict[str, int] | None = None,
+) -> tuple[str, Any, Any, float | None, int, list[dict[str, Any]], float, list[int], dict[int, int]]:
     summary_path = run_dir / "replay" / "summary.json"
     payload = _load_json(summary_path)
     if not isinstance(payload, dict):
@@ -191,10 +212,19 @@ def _extract_completion_offsets_from_replay_run(
 
     replay_count = 0
     finish_events: list[dict[str, Any]] = []
+    replay_count_by_profile: dict[int, int] = {}
     for worker_payload in worker_results.values():
         if not isinstance(worker_payload, dict):
             continue
         replay_count += 1
+        gateway_profile_id = _gateway_profile_id_from_job_payload(
+            worker_payload,
+            profile_id_by_api_token_hash=profile_id_by_api_token_hash or {},
+        )
+        if gateway_profile_id is not None:
+            replay_count_by_profile[gateway_profile_id] = (
+                replay_count_by_profile.get(gateway_profile_id, 0) + 1
+            )
         finish_dt = _parse_iso8601(worker_payload.get("finished_at"))
         finish_dt_utc = parse_iso8601_to_utc(worker_payload.get("finished_at"))
         if cutoff_time_utc is not None and finish_dt_utc is not None and finish_dt_utc > cutoff_time_utc:
@@ -205,6 +235,7 @@ def _extract_completion_offsets_from_replay_run(
                 {
                     "finish_offset_s": finish_offset_s,
                     "status": worker_payload.get("status"),
+                    "gateway_profile_id": gateway_profile_id,
                 }
             )
 
@@ -237,6 +268,8 @@ def _extract_completion_offsets_from_replay_run(
             completion_offsets_s=completion_offsets_s,
             time_constraint_s=time_constraint_s,
         ),
+        profile_ids_from_payload(payload),
+        replay_count_by_profile,
     )
 
 
@@ -244,7 +277,8 @@ def _extract_completion_offsets_from_con_driver_run(
     run_dir: Path,
     *,
     cutoff_time_utc: datetime | None = None,
-) -> tuple[str, Any, Any, float | None, int, list[dict[str, Any]], float]:
+    profile_id_by_api_token_hash: dict[str, int] | None = None,
+) -> tuple[str, Any, Any, float | None, int, list[dict[str, Any]], float, list[int], dict[int, int]]:
     manifest_path = run_dir / "meta" / "run_manifest.json"
     results_path = run_dir / "meta" / "results.json"
 
@@ -265,10 +299,19 @@ def _extract_completion_offsets_from_con_driver_run(
 
     replay_count = 0
     finish_events: list[dict[str, Any]] = []
+    replay_count_by_profile: dict[int, int] = {}
     for entry in results_payload:
         if not isinstance(entry, dict):
             continue
         replay_count += 1
+        gateway_profile_id = _gateway_profile_id_from_job_payload(
+            entry,
+            profile_id_by_api_token_hash=profile_id_by_api_token_hash or {},
+        )
+        if gateway_profile_id is not None:
+            replay_count_by_profile[gateway_profile_id] = (
+                replay_count_by_profile.get(gateway_profile_id, 0) + 1
+            )
         finish_dt = _parse_iso8601(entry.get("finished_at"))
         finish_dt_utc = parse_iso8601_to_utc(entry.get("finished_at"))
         if cutoff_time_utc is not None and finish_dt_utc is not None and finish_dt_utc > cutoff_time_utc:
@@ -279,6 +322,7 @@ def _extract_completion_offsets_from_con_driver_run(
                 {
                     "finish_offset_s": finish_offset_s,
                     "status": entry.get("status"),
+                    "gateway_profile_id": gateway_profile_id,
                 }
             )
 
@@ -311,6 +355,8 @@ def _extract_completion_offsets_from_con_driver_run(
             completion_offsets_s=completion_offsets_s,
             time_constraint_s=time_constraint_s,
         ),
+        profile_ids_from_payload(manifest_payload),
+        replay_count_by_profile,
     )
 
 
@@ -356,58 +402,13 @@ def _build_throughput_points(
     return points
 
 
-def extract_job_throughput_from_run_dir(
-    run_dir: Path,
+def _build_job_throughput_summary(
+    finish_events: list[dict[str, Any]],
     *,
-    timepoint_freq_hz: float = DEFAULT_TIMEPOINT_FREQ_HZ,
-    window_size_s: float = DEFAULT_WINDOW_SIZE_S,
+    total_duration_s: float,
+    timepoint_freq_hz: float,
+    window_size_s: float,
 ) -> dict[str, Any]:
-    if timepoint_freq_hz <= 0:
-        raise ValueError(
-            f"timepoint_freq_hz must be a positive number: {timepoint_freq_hz}"
-        )
-    if window_size_s <= 0:
-        raise ValueError(f"window_size_s must be a positive number: {window_size_s}")
-
-    service_failure_payload = ensure_service_failure_payload(run_dir)
-    cutoff_time_utc = cutoff_datetime_utc_from_payload(service_failure_payload)
-
-    replay_summary_path = run_dir / "replay" / "summary.json"
-    con_driver_results_path = run_dir / "meta" / "results.json"
-    con_driver_manifest_path = run_dir / "meta" / "run_manifest.json"
-
-    if replay_summary_path.is_file():
-        (
-            source_type,
-            experiment_started_at,
-            experiment_finished_at,
-            time_constraint_s,
-            replay_count,
-            finish_events,
-            total_duration_s,
-        ) = _extract_completion_offsets_from_replay_run(
-            run_dir,
-            cutoff_time_utc=cutoff_time_utc,
-        )
-    elif con_driver_results_path.is_file() and con_driver_manifest_path.is_file():
-        (
-            source_type,
-            experiment_started_at,
-            experiment_finished_at,
-            time_constraint_s,
-            replay_count,
-            finish_events,
-            total_duration_s,
-        ) = _extract_completion_offsets_from_con_driver_run(
-            run_dir,
-            cutoff_time_utc=cutoff_time_utc,
-        )
-    else:
-        raise ValueError(
-            "Unrecognized run layout. Expected either replay/summary.json "
-            "or meta/results.json + meta/run_manifest.json."
-        )
-
     filtered_finish_events = [
         event
         for event in finish_events
@@ -424,9 +425,6 @@ def extract_job_throughput_from_run_dir(
         for event in filtered_finish_events
         if not _is_cancelled_status(event.get("status"))
     ]
-    cancelled_finished_replay_count = (
-        len(completion_offsets_s) - len(completion_offsets_s_excluding_cancelled)
-    )
     throughput_points = _build_throughput_points(
         completion_offsets_s=completion_offsets_s,
         total_duration_s=total_duration_s,
@@ -440,29 +438,134 @@ def extract_job_throughput_from_run_dir(
         window_size_s=window_size_s,
     )
     return {
+        "finished_replay_count": len(completion_offsets_s),
+        "finished_replay_count_excluding_cancelled": len(
+            completion_offsets_s_excluding_cancelled
+        ),
+        "cancelled_finished_replay_count": (
+            len(completion_offsets_s) - len(completion_offsets_s_excluding_cancelled)
+        ),
+        "sample_count": len(throughput_points),
+        "throughput_points": throughput_points,
+        "throughput_points_excluding_cancelled": throughput_points_excluding_cancelled,
+    }
+
+
+def extract_job_throughput_from_run_dir(
+    run_dir: Path,
+    *,
+    timepoint_freq_hz: float = DEFAULT_TIMEPOINT_FREQ_HZ,
+    window_size_s: float = DEFAULT_WINDOW_SIZE_S,
+) -> dict[str, Any]:
+    if timepoint_freq_hz <= 0:
+        raise ValueError(
+            f"timepoint_freq_hz must be a positive number: {timepoint_freq_hz}"
+        )
+    if window_size_s <= 0:
+        raise ValueError(f"window_size_s must be a positive number: {window_size_s}")
+
+    service_failure_payload = ensure_service_failure_payload(run_dir)
+    cutoff_time_utc = cutoff_datetime_utc_from_payload(service_failure_payload)
+    profile_id_by_api_token_hash = build_gateway_run_profile_id_by_api_token_hash(run_dir)
+
+    replay_summary_path = run_dir / "replay" / "summary.json"
+    con_driver_results_path = run_dir / "meta" / "results.json"
+    con_driver_manifest_path = run_dir / "meta" / "run_manifest.json"
+
+    if replay_summary_path.is_file():
+        (
+            source_type,
+            experiment_started_at,
+            experiment_finished_at,
+            time_constraint_s,
+            replay_count,
+            finish_events,
+            total_duration_s,
+            declared_port_profile_ids,
+            replay_count_by_profile,
+        ) = _extract_completion_offsets_from_replay_run(
+            run_dir,
+            cutoff_time_utc=cutoff_time_utc,
+            profile_id_by_api_token_hash=profile_id_by_api_token_hash,
+        )
+    elif con_driver_results_path.is_file() and con_driver_manifest_path.is_file():
+        (
+            source_type,
+            experiment_started_at,
+            experiment_finished_at,
+            time_constraint_s,
+            replay_count,
+            finish_events,
+            total_duration_s,
+            declared_port_profile_ids,
+            replay_count_by_profile,
+        ) = _extract_completion_offsets_from_con_driver_run(
+            run_dir,
+            cutoff_time_utc=cutoff_time_utc,
+            profile_id_by_api_token_hash=profile_id_by_api_token_hash,
+        )
+    else:
+        raise ValueError(
+            "Unrecognized run layout. Expected either replay/summary.json "
+            "or meta/results.json + meta/run_manifest.json."
+        )
+
+    common = {
         "source_run_dir": str(run_dir.resolve()),
         "source_type": source_type,
         "experiment_started_at": experiment_started_at,
         "experiment_finished_at": experiment_finished_at,
         "time_constraint_s": time_constraint_s,
-        "service_failure_detected": bool(
-            service_failure_payload.get("service_failure_detected", False)
-        ),
-        "service_failure_cutoff_time_utc": service_failure_payload.get("cutoff_time_utc"),
-        "replay_count": replay_count,
-        "finished_replay_count": len(completion_offsets_s),
-        "finished_replay_count_excluding_cancelled": len(
-            completion_offsets_s_excluding_cancelled
-        ),
-        "cancelled_finished_replay_count": cancelled_finished_replay_count,
         "total_duration_s": total_duration_s,
         "timepoint_frequency_hz": timepoint_freq_hz,
         "timepoint_interval_s": round(1.0 / timepoint_freq_hz, 6),
         "window_size_s": window_size_s,
         "window_width_s": round(window_size_s * 2.0, 6),
-        "sample_count": len(throughput_points),
-        "throughput_points": throughput_points,
-        "throughput_points_excluding_cancelled": throughput_points_excluding_cancelled,
+        "service_failure_detected": bool(
+            service_failure_payload.get("service_failure_detected", False)
+        ),
+        "service_failure_cutoff_time_utc": service_failure_payload.get("cutoff_time_utc"),
+    }
+    aggregate_summary = _build_job_throughput_summary(
+        finish_events,
+        total_duration_s=total_duration_s,
+        timepoint_freq_hz=timepoint_freq_hz,
+        window_size_s=window_size_s,
+    )
+    port_profile_ids = sorted(
+        set(declared_port_profile_ids)
+        | {
+            int(event["gateway_profile_id"])
+            for event in finish_events
+            if isinstance(event, dict) and isinstance(event.get("gateway_profile_id"), int)
+        }
+    )
+    series_by_profile: dict[str, dict[str, Any]] = {}
+    for gateway_profile_id in port_profile_ids:
+        profile_finish_events = [
+            event
+            for event in finish_events
+            if isinstance(event, dict) and event.get("gateway_profile_id") == gateway_profile_id
+        ]
+        series_by_profile[profile_label(gateway_profile_id)] = {
+            **common,
+            "gateway_profile_id": gateway_profile_id,
+            "replay_count": replay_count_by_profile.get(gateway_profile_id, 0),
+            **_build_job_throughput_summary(
+                profile_finish_events,
+                total_duration_s=total_duration_s,
+                timepoint_freq_hz=timepoint_freq_hz,
+                window_size_s=window_size_s,
+            ),
+        }
+    return {
+        **common,
+        "replay_count": replay_count,
+        **aggregate_summary,
+        "multi_profile": len(port_profile_ids) > 1,
+        "port_profile_ids": port_profile_ids,
+        "series_keys": list(series_by_profile.keys()),
+        "series_by_profile": series_by_profile,
     }
 
 

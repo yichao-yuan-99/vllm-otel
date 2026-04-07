@@ -19,10 +19,20 @@ def _write_stack_histograms(run_dir: Path) -> Path:
     stack_dir = run_dir / "post-processed" / "gateway" / "stack"
     stack_dir.mkdir(parents=True)
 
-    points = [
+    aggregate_points = [
         {"second": 0, "accumulated_value": 1.0},
         {"second": 1, "accumulated_value": 3.0},
         {"second": 2, "accumulated_value": 2.0},
+    ]
+    profile_2_points = [
+        {"second": 0, "accumulated_value": 0.5},
+        {"second": 1, "accumulated_value": 2.0},
+        {"second": 2, "accumulated_value": 1.5},
+    ]
+    profile_13_points = [
+        {"second": 0, "accumulated_value": 0.5},
+        {"second": 1, "accumulated_value": 1.0},
+        {"second": 2, "accumulated_value": 0.5},
     ]
     for metric_spec in generate_all_figures.METRIC_SPECS:
         metric_name = metric_spec["metric"]
@@ -34,8 +44,27 @@ def _write_stack_histograms(run_dir: Path) -> Path:
         payload = {
             "metric": metric_name,
             "phase": phase,
+            "multi_profile": True,
+            "port_profile_ids": [2, 13],
+            "series_keys": ["profile-2", "profile-13"],
             "bucket_width_s": 1,
-            "points": points,
+            "points": aggregate_points,
+            "series_by_profile": {
+                "profile-2": {
+                    "metric": metric_name,
+                    "phase": phase,
+                    "gateway_profile_id": 2,
+                    "bucket_width_s": 1,
+                    "points": profile_2_points,
+                },
+                "profile-13": {
+                    "metric": metric_name,
+                    "phase": phase,
+                    "gateway_profile_id": 13,
+                    "bucket_width_s": 1,
+                    "points": profile_13_points,
+                },
+            },
         }
         (stack_dir / metric_spec["input_name"]).write_text(
             json.dumps(payload),
@@ -111,13 +140,16 @@ def test_generate_figures_for_run_dir_writes_manifest(tmp_path: Path, monkeypatc
     ).resolve()
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["multi_profile"] is True
+    assert manifest["port_profile_ids"] == [2, 13]
+    assert manifest["series_count"] == 3
     assert manifest["metric_count"] == 5
     assert manifest["variant_count"] == 5
-    assert manifest["figure_count"] == 25
+    assert manifest["figure_count"] == 75
     assert manifest["skipped_metric_variant_count"] == 0
     assert manifest["image_format"] == "png"
     assert manifest["dpi"] == 150
-    assert len(manifest["figures"]) == 25
+    assert len(manifest["figures"]) == 75
     assert any(
         entry["figure_file_name"] == "prompt-tokens-stacked-histogram.png"
         for entry in manifest["figures"]
@@ -129,6 +161,17 @@ def test_generate_figures_for_run_dir_writes_manifest(tmp_path: Path, monkeypatc
     assert any(
         entry["figure_file_name"]
         == "compute-prompt-plus-completion-tokens-stacked-histogram-smoothed-120s.png"
+        for entry in manifest["figures"]
+    )
+    assert any(
+        entry["figure_file_name"] == "prompt-tokens-stacked-histogram.png"
+        and entry["relative_output_subdir"] == "profile-2"
+        for entry in manifest["figures"]
+    )
+    assert any(
+        entry["figure_file_name"]
+        == "prompt-tokens-stacked-histogram-smoothed-10s.png"
+        and entry["relative_output_subdir"] == "profile-13"
         for entry in manifest["figures"]
     )
     for entry in manifest["figures"]:

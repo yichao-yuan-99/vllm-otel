@@ -15,6 +15,12 @@ DEFAULT_OUTPUT_REL_PATH = Path("post-processed/visualization/agent-output-throug
 DEFAULT_MANIFEST_NAME = "figures-manifest.json"
 DEFAULT_HISTOGRAM_FIGURE_STEM = "agent-output-throughput-histogram"
 DEFAULT_SCATTER_FIGURE_STEM = "agent-output-throughput-vs-output-tokens"
+DEFAULT_COMPLETED_REPLAY_ONLY_HISTOGRAM_FIGURE_STEM = (
+    "agent-output-throughput-histogram-completed-replay-only"
+)
+DEFAULT_COMPLETED_REPLAY_ONLY_SCATTER_FIGURE_STEM = (
+    "agent-output-throughput-vs-output-tokens-completed-replay-only"
+)
 DEFAULT_FORMAT = "png"
 SUPPORTED_FORMATS = ("png", "pdf", "svg")
 
@@ -153,6 +159,94 @@ def _format_stat_value(value: float | int | None, suffix: str = "") -> str:
     return f"{value:.6g}{suffix}"
 
 
+def _variant_label(payload: dict[str, Any]) -> str | None:
+    label = payload.get("_figure_variant_label")
+    if not isinstance(label, str):
+        return None
+    stripped = label.strip()
+    return stripped or None
+
+
+def _throughput_from_totals(
+    *,
+    output_tokens: int,
+    llm_request_duration_s: float,
+) -> float | None:
+    if llm_request_duration_s <= 0.0:
+        return None
+    return output_tokens / llm_request_duration_s
+
+
+def _summarize_values(values: list[float]) -> dict[str, Any]:
+    if not values:
+        return {
+            "sample_count": 0,
+            "avg": None,
+            "min": None,
+            "max": None,
+            "std": None,
+        }
+
+    avg_value = sum(values) / len(values)
+    variance = sum((value - avg_value) ** 2 for value in values) / len(values)
+    return {
+        "sample_count": len(values),
+        "avg": round(avg_value, 6),
+        "min": round(min(values), 6),
+        "max": round(max(values), 6),
+        "std": round(math.sqrt(variance), 6),
+    }
+
+
+def _build_histogram_from_values(
+    values: list[float],
+    *,
+    bin_size: float,
+) -> dict[str, Any]:
+    if bin_size <= 0.0:
+        raise ValueError(f"bin_size must be positive: {bin_size}")
+
+    finite_values = [float(value) for value in values if math.isfinite(value)]
+    if not finite_values:
+        return {
+            "metric": "output_throughput_tokens_per_s",
+            "bin_size": round(bin_size, 6),
+            "sample_count": 0,
+            "bin_count": 0,
+            "min": None,
+            "max": None,
+            "bins": [],
+        }
+
+    min_value = min(finite_values)
+    max_value = max(finite_values)
+    min_bin_index = math.floor(min_value / bin_size)
+    max_bin_index = math.floor(max_value / bin_size)
+    counts_by_index = {
+        bin_index: 0 for bin_index in range(min_bin_index, max_bin_index + 1)
+    }
+    for value in finite_values:
+        counts_by_index[math.floor(value / bin_size)] += 1
+
+    bins = [
+        {
+            "bin_start": round(bin_index * bin_size, 6),
+            "bin_end": round((bin_index + 1) * bin_size, 6),
+            "count": counts_by_index[bin_index],
+        }
+        for bin_index in range(min_bin_index, max_bin_index + 1)
+    ]
+    return {
+        "metric": "output_throughput_tokens_per_s",
+        "bin_size": round(bin_size, 6),
+        "sample_count": len(finite_values),
+        "bin_count": len(bins),
+        "min": round(min_value, 6),
+        "max": round(max_value, 6),
+        "bins": bins,
+    }
+
+
 def _histogram_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
     histogram = payload.get("agent_output_throughput_tokens_per_s_histogram")
     if not isinstance(histogram, dict):
@@ -213,6 +307,214 @@ def _extract_scatter_points(payload: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return points
+
+
+def _build_payload_for_agents(
+    source_payload: dict[str, Any],
+    agents: list[dict[str, Any]],
+    *,
+    figure_variant_label: str,
+) -> dict[str, Any]:
+    request_count = 0
+    requests_with_output_tokens = 0
+    requests_with_llm_request_duration = 0
+    requests_with_output_tokens_and_llm_request_duration = 0
+    output_tokens = 0
+    llm_request_duration_s = 0.0
+    throughput_values: list[float] = []
+
+    for agent in agents:
+        request_count += _int_or_none(agent.get("request_count")) or 0
+        requests_with_output_tokens += (
+            _int_or_none(agent.get("requests_with_output_tokens")) or 0
+        )
+        requests_with_llm_request_duration += (
+            _int_or_none(agent.get("requests_with_llm_request_duration")) or 0
+        )
+        requests_with_output_tokens_and_llm_request_duration += (
+            _int_or_none(agent.get("requests_with_output_tokens_and_llm_request_duration")) or 0
+        )
+        output_tokens += _int_or_none(agent.get("output_tokens")) or 0
+        llm_request_duration_s += _float_or_none(agent.get("llm_request_duration_s")) or 0.0
+
+        throughput_value = _float_or_none(agent.get("output_throughput_tokens_per_s"))
+        if throughput_value is not None:
+            throughput_values.append(throughput_value)
+
+    llm_request_duration_s = round(llm_request_duration_s, 6)
+    output_throughput = _throughput_from_totals(
+        output_tokens=output_tokens,
+        llm_request_duration_s=llm_request_duration_s,
+    )
+
+    histogram = _histogram_payload(source_payload)
+    histogram_bin_size = None
+    if histogram is not None:
+        histogram_bin_size = _float_or_none(histogram.get("bin_size"))
+    resolved_histogram_bin_size = histogram_bin_size or 1.0
+
+    variant_payload = dict(source_payload)
+    variant_payload.update(
+        {
+            "agent_count": len(agents),
+            "request_count": request_count,
+            "requests_with_output_tokens": requests_with_output_tokens,
+            "requests_with_llm_request_duration": requests_with_llm_request_duration,
+            "requests_with_output_tokens_and_llm_request_duration": (
+                requests_with_output_tokens_and_llm_request_duration
+            ),
+            "output_tokens": output_tokens,
+            "completion_tokens": output_tokens,
+            "llm_request_duration_s": llm_request_duration_s,
+            "output_throughput_tokens_per_s": (
+                round(output_throughput, 6) if output_throughput is not None else None
+            ),
+            "agent_output_throughput_tokens_per_s_summary": _summarize_values(
+                throughput_values
+            ),
+            "agent_output_throughput_tokens_per_s_histogram": _build_histogram_from_values(
+                throughput_values,
+                bin_size=resolved_histogram_bin_size,
+            ),
+            "agents": agents,
+            "_figure_variant_label": figure_variant_label,
+        }
+    )
+    return variant_payload
+
+
+def _completed_replay_variant_payload(
+    source_payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    raw_agents = source_payload.get("agents")
+    if not isinstance(raw_agents, list):
+        return None
+
+    completed_agents: list[dict[str, Any]] = []
+    for agent in raw_agents:
+        if not isinstance(agent, dict):
+            continue
+
+        replay_completed = agent.get("replay_completed")
+        if isinstance(replay_completed, bool):
+            if replay_completed:
+                completed_agents.append(dict(agent))
+            continue
+
+        replay_worker_status = agent.get("replay_worker_status")
+        if isinstance(replay_worker_status, str):
+            if replay_worker_status == "completed":
+                completed_agents.append(dict(agent))
+            continue
+
+        return None
+
+    return _build_payload_for_agents(
+        source_payload,
+        completed_agents,
+        figure_variant_label="completed replay only",
+    )
+
+
+def _variant_payload_with_scope_label(
+    payload: dict[str, Any],
+    *,
+    scope_label: str | None,
+) -> dict[str, Any]:
+    if scope_label is None:
+        return payload
+
+    scoped_payload = dict(payload)
+    base_label = _variant_label(payload)
+    scoped_payload["_figure_variant_label"] = (
+        scope_label if base_label is None else f"{base_label} | {scope_label}"
+    )
+    return scoped_payload
+
+
+def _variant_specs_for_payload(
+    agent_output_payload: dict[str, Any],
+    *,
+    scope_label: str | None = None,
+) -> list[dict[str, Any]]:
+    all_agents_payload = dict(agent_output_payload)
+    all_agents_payload["_figure_variant_label"] = "all agents"
+
+    variants = [
+        {
+            "variant_id": "all-agents",
+            "payload": _variant_payload_with_scope_label(
+                all_agents_payload,
+                scope_label=scope_label,
+            ),
+            "histogram_figure_stem": DEFAULT_HISTOGRAM_FIGURE_STEM,
+            "scatter_figure_stem": DEFAULT_SCATTER_FIGURE_STEM,
+        }
+    ]
+
+    completed_replay_payload = _completed_replay_variant_payload(agent_output_payload)
+    if completed_replay_payload is not None:
+        variants.append(
+            {
+                "variant_id": "completed-replay-only",
+                "payload": _variant_payload_with_scope_label(
+                    completed_replay_payload,
+                    scope_label=scope_label,
+                ),
+                "histogram_figure_stem": DEFAULT_COMPLETED_REPLAY_ONLY_HISTOGRAM_FIGURE_STEM,
+                "scatter_figure_stem": DEFAULT_COMPLETED_REPLAY_ONLY_SCATTER_FIGURE_STEM,
+            }
+        )
+
+    return variants
+
+
+def _series_specs_for_payload(agent_output_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    series_specs = [
+        {
+            "series_id": "aggregate",
+            "scope_label": None,
+            "relative_output_subdir": Path(),
+            "series_payload": agent_output_payload,
+        }
+    ]
+
+    raw_series_by_profile = agent_output_payload.get("series_by_profile")
+    if not isinstance(raw_series_by_profile, dict):
+        return series_specs
+
+    for series_id in agent_output_payload.get("series_keys", []):
+        if not isinstance(series_id, str) or not series_id:
+            continue
+        series_payload = raw_series_by_profile.get(series_id)
+        if not isinstance(series_payload, dict):
+            continue
+        series_specs.append(
+            {
+                "series_id": series_id,
+                "scope_label": series_id,
+                "relative_output_subdir": Path(series_id),
+                "series_payload": series_payload,
+            }
+        )
+
+    for series_id, series_payload in sorted(raw_series_by_profile.items()):
+        if not isinstance(series_id, str) or not series_id:
+            continue
+        if not isinstance(series_payload, dict):
+            continue
+        if any(item["series_id"] == series_id for item in series_specs):
+            continue
+        series_specs.append(
+            {
+                "series_id": series_id,
+                "scope_label": series_id,
+                "relative_output_subdir": Path(series_id),
+                "series_payload": series_payload,
+            }
+        )
+
+    return series_specs
 
 
 def _build_common_stats_annotation(payload: dict[str, Any]) -> str:
@@ -326,6 +628,9 @@ def _render_histogram_figure(
     axis.set_ylabel("Agent Count")
 
     subtitle_parts = ["source: gateway request logs"]
+    figure_variant_label = _variant_label(agent_output_payload)
+    if figure_variant_label is not None:
+        subtitle_parts.append(f"subset: {figure_variant_label}")
     if bin_size is not None:
         subtitle_parts.append(f"bin size: {bin_size:.6g} tok/s")
     axis.text(
@@ -424,10 +729,22 @@ def _render_scatter_figure(
     axis.set_xlabel("Output Tokens")
     axis.set_ylabel("Output Throughput (tokens/s)")
 
+    figure_variant_label = _variant_label(agent_output_payload)
     axis.text(
         0.0,
         1.02,
-        "source: per-agent gateway request aggregates",
+        " | ".join(
+            part
+            for part in (
+                "source: per-agent gateway request aggregates",
+                (
+                    f"subset: {figure_variant_label}"
+                    if figure_variant_label is not None
+                    else None
+                ),
+            )
+            if part is not None
+        ),
         transform=axis.transAxes,
         ha="left",
         va="bottom",
@@ -488,56 +805,116 @@ def generate_figures_for_run_dir(
             f"Agent-output-throughput JSON must be an object: {resolved_input_path}"
         )
 
-    histogram_bins, bin_size = _extract_histogram_bins(agent_output_payload)
-    scatter_points = _extract_scatter_points(agent_output_payload)
-
     resolved_output_dir.mkdir(parents=True, exist_ok=True)
     figure_entries: list[dict[str, Any]] = []
+    series_specs = _series_specs_for_payload(agent_output_payload)
+    skipped_variant_ids: set[str] = set()
 
-    histogram_file_name = f"{DEFAULT_HISTOGRAM_FIGURE_STEM}.{image_format}"
-    histogram_path = resolved_output_dir / histogram_file_name
-    histogram_rendered = _render_histogram_figure(
-        agent_output_payload=agent_output_payload,
-        output_path=histogram_path,
-        image_format=image_format,
-        dpi=dpi,
-    )
-    figure_entries.append(
-        {
-            "figure_id": "histogram",
-            "figure_generated": histogram_rendered,
-            "figure_file_name": histogram_file_name if histogram_rendered else None,
-            "figure_path": str(histogram_path.resolve()) if histogram_rendered else None,
-            "sample_count": sum(int(item["count"]) for item in histogram_bins),
-            "bin_count": len(histogram_bins),
-            "bin_size": bin_size,
-            "skip_reason": None if histogram_rendered else "No valid histogram bins",
-        }
-    )
+    for series_spec in series_specs:
+        base_series_payload = series_spec["series_payload"]
+        for variant_spec in _variant_specs_for_payload(
+            base_series_payload,
+            scope_label=series_spec["scope_label"],
+        ):
+            variant_id = str(variant_spec["variant_id"])
+            variant_payload = variant_spec["payload"]
+            if not isinstance(variant_payload, dict):
+                continue
 
-    scatter_file_name = f"{DEFAULT_SCATTER_FIGURE_STEM}.{image_format}"
-    scatter_path = resolved_output_dir / scatter_file_name
-    scatter_rendered = _render_scatter_figure(
-        agent_output_payload=agent_output_payload,
-        output_path=scatter_path,
-        image_format=image_format,
-        dpi=dpi,
-    )
-    figure_entries.append(
-        {
-            "figure_id": "scatter",
-            "figure_generated": scatter_rendered,
-            "figure_file_name": scatter_file_name if scatter_rendered else None,
-            "figure_path": str(scatter_path.resolve()) if scatter_rendered else None,
-            "sample_count": len(scatter_points),
-            "max_output_tokens": max((point["output_tokens"] for point in scatter_points), default=None),
-            "max_output_throughput_tokens_per_s": max(
-                (point["output_throughput_tokens_per_s"] for point in scatter_points),
-                default=None,
-            ),
-            "skip_reason": None if scatter_rendered else "No valid scatter points",
-        }
-    )
+            histogram_bins, bin_size = _extract_histogram_bins(variant_payload)
+            scatter_points = _extract_scatter_points(variant_payload)
+
+            output_subdir = resolved_output_dir / series_spec["relative_output_subdir"]
+            output_subdir.mkdir(parents=True, exist_ok=True)
+
+            histogram_file_name = f"{variant_spec['histogram_figure_stem']}.{image_format}"
+            histogram_path = output_subdir / histogram_file_name
+            histogram_rendered = _render_histogram_figure(
+                agent_output_payload=variant_payload,
+                output_path=histogram_path,
+                image_format=image_format,
+                dpi=dpi,
+            )
+            figure_entries.append(
+                {
+                    "series_id": series_spec["series_id"],
+                    "gateway_profile_id": _int_or_none(
+                        base_series_payload.get("gateway_profile_id")
+                    ),
+                    "variant_id": variant_id,
+                    "variant_label": _variant_label(variant_payload),
+                    "figure_id": "histogram",
+                    "relative_output_subdir": (
+                        series_spec["relative_output_subdir"].as_posix()
+                        if series_spec["relative_output_subdir"].parts
+                        else ""
+                    ),
+                    "figure_generated": histogram_rendered,
+                    "figure_file_name": histogram_file_name if histogram_rendered else None,
+                    "figure_path": (
+                        str(histogram_path.resolve()) if histogram_rendered else None
+                    ),
+                    "agent_count": _int_or_none(variant_payload.get("agent_count")),
+                    "run_output_throughput_tokens_per_s": _float_or_none(
+                        variant_payload.get("output_throughput_tokens_per_s")
+                    ),
+                    "sample_count": sum(int(item["count"]) for item in histogram_bins),
+                    "bin_count": len(histogram_bins),
+                    "bin_size": bin_size,
+                    "skip_reason": None if histogram_rendered else "No valid histogram bins",
+                }
+            )
+
+            scatter_file_name = f"{variant_spec['scatter_figure_stem']}.{image_format}"
+            scatter_path = output_subdir / scatter_file_name
+            scatter_rendered = _render_scatter_figure(
+                agent_output_payload=variant_payload,
+                output_path=scatter_path,
+                image_format=image_format,
+                dpi=dpi,
+            )
+            series_variant_id = (
+                variant_id
+                if series_spec["series_id"] == "aggregate"
+                else f"{series_spec['series_id']}:{variant_id}"
+            )
+            if not histogram_rendered and not scatter_rendered:
+                skipped_variant_ids.add(series_variant_id)
+            figure_entries.append(
+                {
+                    "series_id": series_spec["series_id"],
+                    "gateway_profile_id": _int_or_none(
+                        base_series_payload.get("gateway_profile_id")
+                    ),
+                    "variant_id": variant_id,
+                    "variant_label": _variant_label(variant_payload),
+                    "figure_id": "scatter",
+                    "relative_output_subdir": (
+                        series_spec["relative_output_subdir"].as_posix()
+                        if series_spec["relative_output_subdir"].parts
+                        else ""
+                    ),
+                    "figure_generated": scatter_rendered,
+                    "figure_file_name": scatter_file_name if scatter_rendered else None,
+                    "figure_path": (
+                        str(scatter_path.resolve()) if scatter_rendered else None
+                    ),
+                    "agent_count": _int_or_none(variant_payload.get("agent_count")),
+                    "run_output_throughput_tokens_per_s": _float_or_none(
+                        variant_payload.get("output_throughput_tokens_per_s")
+                    ),
+                    "sample_count": len(scatter_points),
+                    "max_output_tokens": max(
+                        (point["output_tokens"] for point in scatter_points),
+                        default=None,
+                    ),
+                    "max_output_throughput_tokens_per_s": max(
+                        (point["output_throughput_tokens_per_s"] for point in scatter_points),
+                        default=None,
+                    ),
+                    "skip_reason": None if scatter_rendered else "No valid scatter points",
+                }
+            )
 
     primary_figure = next(
         (item for item in figure_entries if item["figure_generated"]),
@@ -549,8 +926,14 @@ def generate_figures_for_run_dir(
         "output_dir": str(resolved_output_dir),
         "image_format": image_format,
         "dpi": dpi,
+        "multi_profile": bool(agent_output_payload.get("multi_profile", False)),
+        "port_profile_ids": agent_output_payload.get("port_profile_ids"),
+        "series_count": len(series_specs),
         "figure_count": len([item for item in figure_entries if item["figure_generated"]]),
         "requested_figure_count": len(figure_entries),
+        "variant_count": len(_variant_specs_for_payload(agent_output_payload)),
+        "skipped_variant_count": len(skipped_variant_ids),
+        "skipped_variant_ids": sorted(skipped_variant_ids),
         "figures": figure_entries,
         "figure_generated": primary_figure["figure_generated"] if primary_figure else False,
         "figure_file_name": primary_figure["figure_file_name"] if primary_figure else None,

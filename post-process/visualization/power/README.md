@@ -7,6 +7,10 @@ It visualizes each run's GPU power change over time with one line chart:
 - y-axis: total GPU power (`power_w`)
 - annotation: sample count, avg/min/max power, peak time, and total energy
 
+When the source summary contains multiple per-GPU series in
+`per_gpu_power`, the renderer keeps the aggregate chart and also writes one
+additional figure per GPU.
+
 The plotting style matches the existing post-process figures:
 
 - serif font
@@ -40,6 +44,7 @@ Default output directory:
 It writes:
 
 - `gpu-power-over-time.<format>` (default `.png`)
+- `gpu-power-over-time-<gpu>.<format>` for each GPU when multi-GPU data is present
 - `figures-manifest.json`
 
 Optional parameters (single-run mode):

@@ -107,14 +107,18 @@ DEFAULT_LMCACHE_LOG_PROBE_TIMEOUT_S = 2.0
 DEFAULT_COMPILE_TOKENIZE_TIMEOUT_S = 3600.0
 _MONITOR_INTERRUPT_GRACE_SEC = 3600.0
 _MONITOR_TERMINATE_GRACE_SEC = 3600.0
+_GATEWAY_AGENT_END_RETRY_INTERVAL_S = 0.2
+_GATEWAY_AGENT_END_RETRY_TIMEOUT_S = 30.0
 
 
 @dataclass(frozen=True)
 class ReplayVLLMLogConfig:
     enabled: bool
     endpoint: str
+    endpoints: tuple[str, ...]
     interval_s: float
     timeout_s: float
+    port_profile_ids: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -133,6 +137,32 @@ class ReplayVLLMMonitorProcess:
     stderr_handle: Any
     stdout_log: Path
     stderr_log: Path
+    log_dir: Path
+    endpoint: str
+    port_profile_id: int | None
+
+
+@dataclass(frozen=True)
+class ReplayVLLMMonitorTarget:
+    endpoint: str
+    log_dir: Path
+    port_profile_id: int | None
+
+
+class GatewayLifecycleError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        path: str,
+        status: int,
+        response_payload: Any,
+    ) -> None:
+        self.path = path
+        self.status = status
+        self.response_payload = response_payload
+        super().__init__(
+            f"Gateway lifecycle call failed: {path} HTTP {status} payload={response_payload}"
+        )
 
 
 class _NullProgress(AbstractContextManager["_NullProgress"]):
@@ -214,27 +244,43 @@ def create_batch_compile_progress() -> Any:
 def resolve_replay_vllm_log_config(
     *,
     port_profile_id: int | None,
+    port_profile_id_list: list[int] | tuple[int, ...] | None = None,
     interval_s: float,
     timeout_s: float,
 ) -> ReplayVLLMLogConfig:
-    if port_profile_id is None:
-        raise ValueError(
-            "vLLM metrics logging requires --port-profile-id so the endpoint "
-            "can be resolved from configs/port_profiles.toml."
-        )
-    from gateway.port_profiles import load_port_profile
+    resolved_port_profile_ids = list(port_profile_id_list or [])
+    if not resolved_port_profile_ids:
+        if port_profile_id is None:
+            raise ValueError(
+                "vLLM metrics logging requires --port-profile-id so the endpoint "
+                "can be resolved from configs/port_profiles.toml."
+            )
+        resolved_port_profile_ids = [port_profile_id]
 
-    profile = load_port_profile(port_profile_id)
-    endpoint = f"http://127.0.0.1:{profile.vllm_port}/metrics"
     if interval_s <= 0:
         raise ValueError("--vllm-log-interval-s must be > 0")
     if timeout_s <= 0:
         raise ValueError("--vllm-log-timeout-s must be > 0")
+
+    from gateway.port_profiles import load_port_profile
+
+    endpoints: list[str] = []
+    for resolved_profile_id in resolved_port_profile_ids:
+        profile = load_port_profile(resolved_profile_id)
+        endpoints.append(f"http://127.0.0.1:{profile.vllm_port}/metrics")
+
+    if not endpoints:
+        raise ValueError(
+            "vLLM metrics logging requires --port-profile-id so the endpoint "
+            "can be resolved from configs/port_profiles.toml."
+        )
     return ReplayVLLMLogConfig(
         enabled=True,
-        endpoint=endpoint,
+        endpoint=endpoints[0],
+        endpoints=tuple(endpoints),
         interval_s=interval_s,
         timeout_s=timeout_s,
+        port_profile_ids=tuple(resolved_port_profile_ids),
     )
 
 
@@ -307,16 +353,15 @@ def _build_monitor_env() -> dict[str, str]:
 
 def _start_replay_metrics_monitor(
     *,
-    output_dir: Path,
+    log_dir: Path,
     endpoint: str,
     interval_s: float,
     timeout_s: float,
-    log_dir_name: str,
+    port_profile_id: int | None,
 ) -> ReplayVLLMMonitorProcess:
-    metrics_log_dir = output_dir / log_dir_name
-    metrics_log_dir.mkdir(parents=True, exist_ok=True)
-    stdout_log = metrics_log_dir / "monitor.stdout.log"
-    stderr_log = metrics_log_dir / "monitor.stderr.log"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stdout_log = log_dir / "monitor.stdout.log"
+    stderr_log = log_dir / "monitor.stderr.log"
     stdout_handle = stdout_log.open("w", encoding="utf-8")
     stderr_handle = stderr_log.open("w", encoding="utf-8")
     command = [
@@ -326,7 +371,7 @@ def _start_replay_metrics_monitor(
         "--endpoint",
         endpoint,
         "--output-dir",
-        str(metrics_log_dir),
+        str(log_dir),
         "--interval-s",
         str(interval_s),
         "--timeout-s",
@@ -352,6 +397,9 @@ def _start_replay_metrics_monitor(
         stderr_handle=stderr_handle,
         stdout_log=stdout_log,
         stderr_log=stderr_log,
+        log_dir=log_dir,
+        endpoint=endpoint,
+        port_profile_id=port_profile_id,
     )
 
 
@@ -361,12 +409,69 @@ def start_replay_vllm_monitor(
     config: ReplayVLLMLogConfig,
 ) -> ReplayVLLMMonitorProcess:
     return _start_replay_metrics_monitor(
-        output_dir=output_dir,
+        log_dir=(output_dir / "vllm-log"),
         endpoint=config.endpoint,
         interval_s=config.interval_s,
         timeout_s=config.timeout_s,
-        log_dir_name="vllm-log",
+        port_profile_id=(
+            config.port_profile_ids[0] if len(config.port_profile_ids) == 1 else None
+        ),
     )
+
+
+def build_replay_vllm_monitor_targets(
+    *,
+    output_dir: Path,
+    config: ReplayVLLMLogConfig,
+) -> list[ReplayVLLMMonitorTarget]:
+    if len(config.endpoints) <= 1:
+        return [
+            ReplayVLLMMonitorTarget(
+                endpoint=config.endpoint,
+                log_dir=(output_dir / "vllm-log"),
+                port_profile_id=(
+                    config.port_profile_ids[0] if config.port_profile_ids else None
+                ),
+            )
+        ]
+
+    targets: list[ReplayVLLMMonitorTarget] = []
+    for profile_id, endpoint in zip(config.port_profile_ids, config.endpoints, strict=True):
+        targets.append(
+            ReplayVLLMMonitorTarget(
+                endpoint=endpoint,
+                log_dir=(output_dir / "vllm-log" / f"profile-{profile_id}"),
+                port_profile_id=profile_id,
+            )
+        )
+    return targets
+
+
+def start_replay_vllm_monitors(
+    *,
+    output_dir: Path,
+    config: ReplayVLLMLogConfig,
+) -> list[ReplayVLLMMonitorProcess]:
+    monitor_targets = build_replay_vllm_monitor_targets(output_dir=output_dir, config=config)
+    if (
+        len(monitor_targets) == 1
+        and monitor_targets[0].log_dir == (output_dir / "vllm-log")
+        and monitor_targets[0].endpoint == config.endpoint
+    ):
+        return [start_replay_vllm_monitor(output_dir=output_dir, config=config)]
+
+    monitors: list[ReplayVLLMMonitorProcess] = []
+    for target in monitor_targets:
+        monitors.append(
+            _start_replay_metrics_monitor(
+                log_dir=target.log_dir,
+                endpoint=target.endpoint,
+                interval_s=config.interval_s,
+                timeout_s=config.timeout_s,
+                port_profile_id=target.port_profile_id,
+            )
+        )
+    return monitors
 
 
 def start_replay_lmcache_monitor(
@@ -377,11 +482,11 @@ def start_replay_lmcache_monitor(
     if config.endpoint is None:
         raise ValueError("LMCache metrics endpoint is required to start lmcache monitor")
     return _start_replay_metrics_monitor(
-        output_dir=output_dir,
+        log_dir=(output_dir / "lmcache-log"),
         endpoint=config.endpoint,
         interval_s=config.interval_s,
         timeout_s=config.timeout_s,
-        log_dir_name="lmcache-log",
+        port_profile_id=None,
     )
 
 
@@ -407,6 +512,10 @@ def stop_replay_vllm_monitor(monitor: ReplayVLLMMonitorProcess) -> int:
         monitor.stdout_handle.close()
         monitor.stderr_handle.close()
     return int(process.returncode if process.returncode is not None else 1)
+
+
+def stop_replay_vllm_monitors(monitors: list[ReplayVLLMMonitorProcess]) -> list[int]:
+    return [stop_replay_vllm_monitor(monitor) for monitor in monitors]
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -484,6 +593,51 @@ def parse_optional_int(value: Any, *, field_name: str) -> int | None:
         except ValueError as exc:
             raise ValueError(f"{field_name} must be an integer") from exc
     raise ValueError(f"{field_name} must be an integer")
+
+
+def parse_optional_port_profile_id_list(
+    value: Any,
+    *,
+    field_name: str,
+) -> list[int] | None:
+    if value is None:
+        return None
+
+    raw_items = list(value) if isinstance(value, (list, tuple)) else [value]
+    parsed: list[int] = []
+    seen: set[int] = set()
+
+    for raw_item in raw_items:
+        if raw_item is None:
+            continue
+        if isinstance(raw_item, bool):
+            raise ValueError(f"{field_name} must be a list of integers")
+        if isinstance(raw_item, int):
+            candidate_values = [raw_item]
+        elif isinstance(raw_item, str):
+            candidate_values = []
+            for part in raw_item.split(","):
+                stripped = part.strip()
+                if not stripped:
+                    continue
+                try:
+                    candidate_values.append(int(stripped))
+                except ValueError as exc:
+                    raise ValueError(
+                        f"{field_name} must be a comma-separated list of integers"
+                    ) from exc
+        else:
+            raise ValueError(f"{field_name} must be a list of integers")
+
+        for candidate in candidate_values:
+            if candidate in seen:
+                raise ValueError(f"{field_name} contains duplicate port profile id: {candidate}")
+            seen.add(candidate)
+            parsed.append(candidate)
+
+    if not parsed:
+        return None
+    return parsed
 
 
 def parse_optional_float(value: Any, *, field_name: str) -> float | None:
@@ -3281,7 +3435,6 @@ def sleep_with_stop_or_deadline(
 
     return "stopped"
 
-
 def _normalize_launch_pattern_name(value: Any) -> str:
     if isinstance(value, str) and value.strip():
         return value.strip().lower()
@@ -3591,6 +3744,14 @@ def cmd_replay(args: argparse.Namespace) -> int:
     )
     if port_profile_id_override is None:
         raise ValueError("Missing required option '--port-profile-id'.")
+    port_profile_id_list_override = parse_optional_port_profile_id_list(
+        (
+            args.port_profile_id_list
+            if getattr(args, "port_profile_id_list", None) is not None
+            else replay_config.get("port_profile_id_list")
+        ),
+        field_name="port_profile_id_list",
+    )
     launch_policy_override = parse_launch_policy_override_payload(
         (
             args.launch_policy_override_json
@@ -3743,6 +3904,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
     use_gateway_lifecycle = True
     vllm_log_config = resolve_replay_vllm_log_config(
         port_profile_id=resolved_port_profile_id_int,
+        port_profile_id_list=port_profile_id_list_override,
         interval_s=vllm_log_interval_s,
         timeout_s=vllm_log_timeout_s,
     )
@@ -3788,8 +3950,10 @@ def cmd_replay(args: argparse.Namespace) -> int:
         "effective_launch_policy": effective_launch_policy,
         "vllm_log_enabled": vllm_log_config.enabled,
         "vllm_log_endpoint": vllm_log_config.endpoint,
+        "vllm_log_endpoints": list(vllm_log_config.endpoints),
         "vllm_log_interval_s": vllm_log_config.interval_s,
         "vllm_log_timeout_s": vllm_log_config.timeout_s,
+        "vllm_log_port_profile_ids": list(vllm_log_config.port_profile_ids),
         "vllm_log_dir": str(output_dir / "vllm-log") if vllm_log_config.enabled else None,
         "lmcache_log_configured": lmcache_log_config.configured,
         "lmcache_log_enabled": False,
@@ -3805,12 +3969,15 @@ def cmd_replay(args: argparse.Namespace) -> int:
         "workers_failed": 0,
         "workers_timed_out": 0,
         "workers_time_bound_finished": 0,
+        "workers_time_bound_finished_reclassified_from_cancel_failed": 0,
         "requests_sent": 0,
         "requests_failed": 0,
         "time_constraint_reached": False,
     }
     if randomize_seed is not None:
         summary["randomize_seed"] = randomize_seed
+    if port_profile_id_list_override is not None:
+        summary["port_profile_id_list"] = port_profile_id_list_override
     if time_constraint_s is not None:
         summary["time_constraint_s"] = time_constraint_s
         summary["workers_total"] = 0
@@ -3848,16 +4015,57 @@ def cmd_replay(args: argparse.Namespace) -> int:
             timeout_s=replay_http_timeout_s,
         )
         if status >= 400:
-            raise RuntimeError(
-                f"Gateway lifecycle call failed: {path} HTTP {status} payload={response_payload}"
+            raise GatewayLifecycleError(
+                path=path,
+                status=status,
+                response_payload=response_payload,
             )
         return response_payload
 
-    monitor: ReplayVLLMMonitorProcess | None = None
+    def _is_retryable_agent_end_error(exc: BaseException) -> bool:
+        if not isinstance(exc, GatewayLifecycleError):
+            return False
+        if exc.path != "/agent/end" or exc.status != 409:
+            return False
+        if not isinstance(exc.response_payload, dict):
+            return False
+        detail = exc.response_payload.get("detail")
+        return detail == "cannot end agent while requests are active"
+
+    def end_agent_with_retry(*, api_token: str, return_code: int) -> int:
+        deadline_at = time.monotonic() + _GATEWAY_AGENT_END_RETRY_TIMEOUT_S
+        retry_count = 0
+        while True:
+            try:
+                call_gateway(
+                    "/agent/end",
+                    {"api_token": api_token, "return_code": return_code},
+                )
+                return retry_count
+            except Exception as exc:  # noqa: BLE001
+                if not _is_retryable_agent_end_error(exc):
+                    raise
+                if time.monotonic() >= deadline_at:
+                    raise
+                retry_count += 1
+                time.sleep(_GATEWAY_AGENT_END_RETRY_INTERVAL_S)
+
+    vllm_monitors: list[ReplayVLLMMonitorProcess] = []
     if vllm_log_config.enabled:
-        monitor = start_replay_vllm_monitor(output_dir=output_dir, config=vllm_log_config)
-        summary["vllm_log_stdout"] = str(monitor.stdout_log)
-        summary["vllm_log_stderr"] = str(monitor.stderr_log)
+        vllm_monitors = start_replay_vllm_monitors(output_dir=output_dir, config=vllm_log_config)
+        summary["vllm_log_monitors"] = [
+            {
+                "port_profile_id": getattr(monitor, "port_profile_id", None),
+                "endpoint": str(getattr(monitor, "endpoint", vllm_log_config.endpoint)),
+                "log_dir": str(getattr(monitor, "log_dir", output_dir / "vllm-log")),
+                "stdout_log": str(monitor.stdout_log),
+                "stderr_log": str(monitor.stderr_log),
+            }
+            for monitor in vllm_monitors
+        ]
+        if len(vllm_monitors) == 1:
+            summary["vllm_log_stdout"] = str(vllm_monitors[0].stdout_log)
+            summary["vllm_log_stderr"] = str(vllm_monitors[0].stderr_log)
     lmcache_monitor: ReplayVLLMMonitorProcess | None = None
     if lmcache_log_config.configured and lmcache_log_config.endpoint is not None:
         probe_success, probe_error = probe_metrics_endpoint(
@@ -3895,7 +4103,8 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
         api_token = worker.get("api_token")
         if not isinstance(api_token, str) or not api_token:
-            api_token = None
+            api_token = f"replay_{safe_name(worker_id)}"
+            record["api_token_generated"] = True
         record["api_token"] = api_token
         agent_started = False
 
@@ -3918,6 +4127,40 @@ def cmd_replay(args: argparse.Namespace) -> int:
                 return None
             return max(0.0, deadline_at - time.monotonic())
 
+        def _append_note(message: str) -> None:
+            existing_notes = record.get("notes")
+            if existing_notes is None:
+                record["notes"] = [message]
+                return
+            if isinstance(existing_notes, list):
+                existing_notes.append(message)
+                return
+            record["notes"] = [str(existing_notes), message]
+
+        def _mark_time_bound_finished_from_cancel_failed(
+            *,
+            path: str,
+            timeout_reason: str,
+            timed_result: dict[str, Any],
+        ) -> bool:
+            if timeout_reason != "time_constraint":
+                return False
+            if timed_result.get("outcome") != "cancel_failed":
+                return False
+
+            record["status"] = "time_bound_finished"
+            record["time_bound_finish_origin_outcome"] = "cancel_failed"
+            summary["time_constraint_reached"] = True
+            set_stop_reason("time_constraint")
+            _append_note(
+                "Reclassified from cancel_failed to time_bound_finished because "
+                "the global replay time constraint fired while timed request "
+                f"teardown was still in progress for path={path}, "
+                f"response_status={timed_result.get('response_status')!r}, "
+                f"error={timed_result.get('error')!r}."
+            )
+            return True
+
         try:
             delta_agent_start_s = float(worker.get("delta_agent_start_s", 0.0))
             sleep_result = sleep_with_stop_or_deadline(
@@ -3935,10 +4178,6 @@ def cmd_replay(args: argparse.Namespace) -> int:
                 return
 
             if use_gateway_lifecycle:
-                if not api_token:
-                    raise RuntimeError(
-                        f"Missing worker api_token for gateway lifecycle: {worker_id}"
-                    )
                 call_gateway("/agent/start", {"api_token": api_token})
                 agent_started = True
 
@@ -4061,6 +4300,12 @@ def cmd_replay(args: argparse.Namespace) -> int:
                             raise RuntimeError(
                                 f"Unexpected timeout reason for client-disconnect replay: {timeout_reason!r}"
                             )
+                    if _mark_time_bound_finished_from_cancel_failed(
+                        path=path,
+                        timeout_reason=timeout_reason,
+                        timed_result=timed_result,
+                    ):
+                        return
                     if (
                         outcome == "completed_early"
                         and is_acceptable_client_disconnect_early_error(timed_result)
@@ -4152,6 +4397,12 @@ def cmd_replay(args: argparse.Namespace) -> int:
                                     f"Unexpected request timeout reason: {request_timeout_reason!r}"
                                 )
                             return
+                        if _mark_time_bound_finished_from_cancel_failed(
+                            path=path,
+                            timeout_reason=request_timeout_reason,
+                            timed_result=timed_result,
+                        ):
+                            return
                         if outcome != "completed_early":
                             record["requests_failed"] += 1
                             with lock:
@@ -4237,11 +4488,14 @@ def cmd_replay(args: argparse.Namespace) -> int:
                         if record["status"] in {"completed", "timed_out", "time_bound_finished"}
                         else 1
                     )
-                    call_gateway(
-                        "/agent/end",
-                        {"api_token": api_token, "return_code": rc},
+                    retry_count = end_agent_with_retry(
+                        api_token=api_token,
+                        return_code=rc,
                     )
+                    if retry_count > 0:
+                        record["gateway_agent_end_retry_count"] = retry_count
                 except Exception as exc:  # noqa: BLE001
+                    record["gateway_agent_end_error"] = str(exc)
                     if record["status"] == "completed":
                         record["status"] = "failed"
                         record["error"] = f"agent/end failed: {exc}"
@@ -4256,6 +4510,8 @@ def cmd_replay(args: argparse.Namespace) -> int:
                     summary["workers_timed_out"] += 1
                 elif record["status"] == "time_bound_finished":
                     summary["workers_time_bound_finished"] += 1
+                    if record.get("time_bound_finish_origin_outcome") == "cancel_failed":
+                        summary["workers_time_bound_finished_reclassified_from_cancel_failed"] += 1
                 elif record["status"] == "failed":
                     summary["workers_failed"] += 1
                 progress_state["active"] = max(progress_state["active"] - 1, 0)
@@ -4479,13 +4735,25 @@ def cmd_replay(args: argparse.Namespace) -> int:
                 summary["gateway_job_end_error"] = str(exc)
                 summary["workers_failed"] += 1
     finally:
-        if monitor is not None:
-            summary["vllm_log_monitor_return_code"] = stop_replay_vllm_monitor(monitor)
+        if vllm_monitors:
+            monitor_return_codes = stop_replay_vllm_monitors(vllm_monitors)
+            summary["vllm_log_monitor_return_codes"] = monitor_return_codes
+            summary["vllm_log_monitor_return_code"] = (
+                monitor_return_codes[0] if len(monitor_return_codes) == 1 else None
+            )
         if lmcache_monitor is not None:
             summary["lmcache_log_monitor_return_code"] = stop_replay_vllm_monitor(
                 lmcache_monitor
             )
         summary["finished_at"] = now_iso8601_utc()
+        if summary["workers_time_bound_finished_reclassified_from_cancel_failed"] > 0:
+            summary["workers_time_bound_finished_reclassification_note"] = (
+                "Workers counted in "
+                "workers_time_bound_finished_reclassified_from_cancel_failed "
+                "hit the global replay time constraint while timed request "
+                "teardown still reported cancel_failed; see worker_results[*].notes "
+                "for per-worker details."
+            )
         summary["worker_results"] = worker_results
         write_json(summary_path, summary)
 
@@ -4697,6 +4965,16 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help=(
             "Required. Resolve replay target URLs from configs/port_profiles.toml."
+        ),
+    )
+    replay_parser.add_argument(
+        "--port-profile-id-list",
+        action="append",
+        default=None,
+        help=(
+            "Optional comma-separated port profile IDs used for vLLM metrics logging. "
+            "When multiple profiles are provided, replay writes one subdirectory per "
+            "profile under vllm-log/."
         ),
     )
     replay_parser.add_argument(

@@ -222,6 +222,82 @@ def _round_value(value: float) -> float:
     return round(value, 12)
 
 
+def _extract_power_series_points_from_payload(payload: dict[str, Any]) -> list[tuple[float, float]]:
+    raw_points = payload.get("power_points")
+    power_points_raw: list[tuple[float, float]] = []
+    if isinstance(raw_points, list):
+        for point in raw_points:
+            if not isinstance(point, dict):
+                continue
+            time_offset_s = _float_or_none(point.get("time_offset_s"))
+            power_w = _float_or_none(point.get("power_w"))
+            if time_offset_s is None or power_w is None:
+                continue
+            power_points_raw.append((time_offset_s, power_w))
+    power_points_raw.sort(key=lambda pair: pair[0])
+    return power_points_raw
+
+
+def _select_power_series_points(
+    power_points_raw: list[tuple[float, float]],
+    *,
+    window: SelectionWindow,
+) -> list[tuple[float, float]]:
+    selected_points: list[tuple[float, float]] = []
+    boundary_power = _interpolate_power(power_points_raw, window.cutoff_offset_s)
+    if boundary_power is not None:
+        selected_points.append((0.0, round(boundary_power, 6)))
+    for time_offset_s, power_w in power_points_raw:
+        rebased_offset_s = _rebase_point_offset(time_offset_s, window=window)
+        if rebased_offset_s is None:
+            continue
+        selected_points.append((rebased_offset_s, round(power_w, 6)))
+
+    deduped_points: list[tuple[float, float]] = []
+    for time_offset_s, power_w in selected_points:
+        if deduped_points and deduped_points[-1][0] == time_offset_s:
+            deduped_points[-1] = (time_offset_s, power_w)
+        else:
+            deduped_points.append((time_offset_s, power_w))
+    return deduped_points
+
+
+def _summarize_selected_power_series(points: list[tuple[float, float]]) -> dict[str, Any]:
+    power_values = [power_w for _, power_w in points]
+    avg_power_w = round(sum(power_values) / len(power_values), 6) if power_values else None
+    min_power_w = round(min(power_values), 6) if power_values else None
+    max_power_w = round(max(power_values), 6) if power_values else None
+
+    total_energy_j = 0.0
+    if len(points) >= 2:
+        previous_time_s, previous_power_w = points[0]
+        for time_s, power_w in points[1:]:
+            delta_s = time_s - previous_time_s
+            if delta_s > 0:
+                total_energy_j += ((previous_power_w + power_w) / 2.0) * delta_s
+            previous_time_s = time_s
+            previous_power_w = power_w
+    total_energy_j = round(total_energy_j, 6)
+
+    return {
+        "power_sample_count": len(points),
+        "power_stats_w": {
+            "avg": avg_power_w,
+            "min": min_power_w,
+            "max": max_power_w,
+        },
+        "total_energy_j": total_energy_j,
+        "total_energy_kwh": round(total_energy_j / 3_600_000.0, 12),
+        "power_points": [
+            {
+                "time_offset_s": _round_s(time_offset_s),
+                "power_w": power_w,
+            }
+            for time_offset_s, power_w in points
+        ],
+    }
+
+
 def _normalize_percent(percent: float) -> float:
     if not math.isfinite(percent):
         raise ValueError(f"--percent must be finite: {percent!r}")
@@ -1676,52 +1752,31 @@ class Selector:
         if not isinstance(source_payload, dict):
             raise ValueError("power/power-summary.json must be a JSON object")
 
-        raw_points = source_payload.get("power_points")
-        power_points_raw: list[tuple[float, float]] = []
-        if isinstance(raw_points, list):
-            for point in raw_points:
-                if not isinstance(point, dict):
+        deduped_points = _select_power_series_points(
+            _extract_power_series_points_from_payload(source_payload),
+            window=self.window,
+        )
+        aggregate_summary = _summarize_selected_power_series(deduped_points)
+
+        per_gpu_power: list[dict[str, Any]] = []
+        raw_per_gpu_power = source_payload.get("per_gpu_power")
+        if isinstance(raw_per_gpu_power, list):
+            for entry in raw_per_gpu_power:
+                if not isinstance(entry, dict):
                     continue
-                time_offset_s = _float_or_none(point.get("time_offset_s"))
-                power_w = _float_or_none(point.get("power_w"))
-                if time_offset_s is None or power_w is None:
-                    continue
-                power_points_raw.append((time_offset_s, power_w))
-        power_points_raw.sort(key=lambda pair: pair[0])
-
-        selected_points: list[tuple[float, float]] = []
-        boundary_power = _interpolate_power(power_points_raw, self.window.cutoff_offset_s)
-        if boundary_power is not None:
-            selected_points.append((0.0, round(boundary_power, 6)))
-        for time_offset_s, power_w in power_points_raw:
-            rebased_offset_s = _rebase_point_offset(time_offset_s, window=self.window)
-            if rebased_offset_s is None:
-                continue
-            selected_points.append((rebased_offset_s, round(power_w, 6)))
-
-        deduped_points: list[tuple[float, float]] = []
-        for time_offset_s, power_w in selected_points:
-            if deduped_points and deduped_points[-1][0] == time_offset_s:
-                deduped_points[-1] = (time_offset_s, power_w)
-            else:
-                deduped_points.append((time_offset_s, power_w))
-
-        power_values = [power_w for _, power_w in deduped_points]
-        avg_power_w = round(sum(power_values) / len(power_values), 6) if power_values else None
-        min_power_w = round(min(power_values), 6) if power_values else None
-        max_power_w = round(max(power_values), 6) if power_values else None
-
-        total_energy_j = 0.0
-        if len(deduped_points) >= 2:
-            previous_time_s, previous_power_w = deduped_points[0]
-            for time_s, power_w in deduped_points[1:]:
-                delta_s = time_s - previous_time_s
-                if delta_s > 0:
-                    total_energy_j += ((previous_power_w + power_w) / 2.0) * delta_s
-                previous_time_s = time_s
-                previous_power_w = power_w
-        total_energy_j = round(total_energy_j, 6)
-        total_energy_kwh = round(total_energy_j / 3_600_000.0, 12)
+                selected_gpu_points = _select_power_series_points(
+                    _extract_power_series_points_from_payload(entry),
+                    window=self.window,
+                )
+                per_gpu_power.append(
+                    {
+                        "gpu_key": entry.get("gpu_key"),
+                        "gpu_id": entry.get("gpu_id"),
+                        "display_label": entry.get("display_label"),
+                        "source_endpoint": entry.get("source_endpoint"),
+                        **_summarize_selected_power_series(selected_gpu_points),
+                    }
+                )
 
         self._selected_power_payload = {
             "source_run_dir": source_payload.get("source_run_dir"),
@@ -1737,21 +1792,12 @@ class Selector:
             ),
             "service_failure_cutoff_time_utc": source_payload.get("service_failure_cutoff_time_utc"),
             "power_log_found": bool(source_payload.get("power_log_found", False)),
-            "power_sample_count": len(deduped_points),
-            "power_stats_w": {
-                "avg": avg_power_w,
-                "min": min_power_w,
-                "max": max_power_w,
-            },
-            "total_energy_j": total_energy_j,
-            "total_energy_kwh": total_energy_kwh,
-            "power_points": [
-                {
-                    "time_offset_s": _round_s(time_offset_s),
-                    "power_w": power_w,
-                }
-                for time_offset_s, power_w in deduped_points
-            ],
+            "power_sample_count": aggregate_summary["power_sample_count"],
+            "power_stats_w": aggregate_summary["power_stats_w"],
+            "total_energy_j": aggregate_summary["total_energy_j"],
+            "total_energy_kwh": aggregate_summary["total_energy_kwh"],
+            "power_points": aggregate_summary["power_points"],
+            "per_gpu_power": per_gpu_power,
         }
         return self._selected_power_payload
 

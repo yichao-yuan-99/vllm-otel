@@ -10,6 +10,15 @@ import re
 import sys
 from typing import Any
 
+THIS_DIR = Path(__file__).resolve().parent
+MODULE_ROOT = THIS_DIR.parent.parent
+if str(MODULE_ROOT) not in sys.path:
+    sys.path.insert(0, str(MODULE_ROOT))
+
+from pp_common.profile_id import int_or_none
+from pp_common.profile_id import profile_ids_from_payload
+from pp_common.profile_id import profile_label
+
 
 DEFAULT_LLM_REQUESTS_OUTPUT_NAME = "llm-requests.json"
 RANGES_OUTPUT_NAME = "kv-usage-ranges.json"
@@ -151,6 +160,26 @@ def _load_llm_request_records(path: Path) -> tuple[list[dict[str, Any]], dict[st
         raise ValueError(f"Missing 'requests' list in llm request file: {path}")
     request_records = [item for item in raw_requests if isinstance(item, dict)]
     return request_records, payload
+
+
+def _gateway_profile_id_or_none(payload: Any) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    return int_or_none(payload.get("gateway_profile_id"))
+
+
+def _port_profile_ids_from_payload_and_requests(
+    llm_requests_payload: dict[str, Any],
+    request_records: list[dict[str, Any]],
+) -> list[int]:
+    return sorted(
+        set(profile_ids_from_payload(llm_requests_payload))
+        | {
+            profile_id
+            for profile_id in (_gateway_profile_id_or_none(record) for record in request_records)
+            if profile_id is not None
+        }
+    )
 
 
 def _resolve_gateway_output_dir(
@@ -322,6 +351,37 @@ def extract_gateway_stack_kv_from_run_dir(
         llm_requests_payload.get("service_failure_detected", False)
     )
     service_failure_cutoff_time_utc = llm_requests_payload.get("service_failure_cutoff_time_utc")
+    port_profile_ids = _port_profile_ids_from_payload_and_requests(
+        llm_requests_payload,
+        request_records,
+    )
+    multi_profile = len(port_profile_ids) > 1
+    entries_by_profile: dict[str, list[dict[str, Any]]] = {}
+    series_by_profile: dict[str, dict[str, Any]] = {}
+    for gateway_profile_id in port_profile_ids:
+        series_key = profile_label(gateway_profile_id)
+        profile_ranges = [
+            entry
+            for entry in ranges
+            if _gateway_profile_id_or_none(entry) == gateway_profile_id
+        ]
+        profile_histogram_points = build_stacked_histogram(profile_ranges)
+        entries_by_profile[series_key] = profile_ranges
+        series_by_profile[series_key] = {
+            "source_run_dir": source_run_dir,
+            "source_gateway_output_dir": source_gateway_output_dir,
+            "source_llm_requests_path": str(resolved_llm_requests_path),
+            "service_failure_detected": service_failure_detected,
+            "service_failure_cutoff_time_utc": service_failure_cutoff_time_utc,
+            "input_request_count": input_request_count,
+            "metric": "kv_usage_tokens",
+            "phase": "request_lifetime",
+            "gateway_profile_id": gateway_profile_id,
+            "entry_count": len(profile_ranges),
+            "bucket_width_s": 1,
+            "point_count": len(profile_histogram_points),
+            "points": profile_histogram_points,
+        }
 
     ranges_payload = {
         "source_run_dir": source_run_dir,
@@ -332,8 +392,12 @@ def extract_gateway_stack_kv_from_run_dir(
         "input_request_count": input_request_count,
         "metric": "kv_usage_tokens",
         "phase": "request_lifetime",
+        "multi_profile": multi_profile,
+        "port_profile_ids": port_profile_ids,
+        "series_keys": list(series_by_profile.keys()),
         "entry_count": len(ranges),
         "entries": ranges,
+        "entries_by_profile": entries_by_profile,
     }
     histogram_payload = {
         "source_run_dir": source_run_dir,
@@ -343,9 +407,14 @@ def extract_gateway_stack_kv_from_run_dir(
         "service_failure_cutoff_time_utc": service_failure_cutoff_time_utc,
         "input_request_count": input_request_count,
         "metric": "kv_usage_tokens",
+        "phase": "request_lifetime",
+        "multi_profile": multi_profile,
+        "port_profile_ids": port_profile_ids,
+        "series_keys": list(series_by_profile.keys()),
         "bucket_width_s": 1,
         "point_count": len(histogram_points),
         "points": histogram_points,
+        "series_by_profile": series_by_profile,
     }
     return ranges_payload, histogram_payload
 

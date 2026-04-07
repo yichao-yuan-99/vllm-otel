@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import signal
 import socket
 import sys
 import tempfile
@@ -20,6 +21,15 @@ import client  # type: ignore[import-not-found]
 
 
 class DockerStopManagedServicesTest(unittest.TestCase):
+    def test_terminate_pid_or_group_does_not_fall_back_to_os_kill_on_permission_error(self) -> None:
+        with (
+            mock.patch.object(client.os, "killpg", side_effect=PermissionError),
+            mock.patch.object(client.os, "kill") as kill,
+        ):
+            client._terminate_pid_or_group(1234, signal.SIGTERM)
+
+        kill.assert_not_called()
+
     def test_stop_reports_managed_services_alongside_running_services(self) -> None:
         saved_states: list[dict[str, object]] = []
         load_state_values = [

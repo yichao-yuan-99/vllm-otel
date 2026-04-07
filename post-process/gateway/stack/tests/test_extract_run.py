@@ -124,6 +124,9 @@ def test_extract_run_generates_ranges_and_histograms(tmp_path: Path) -> None:
     assert cached_ranges["entry_count"] == 2
     assert compute_ranges["entry_count"] == 2
     assert combined_ranges["entry_count"] == 4
+    assert prompt_ranges["port_profile_ids"] == [0]
+    assert prompt_ranges["series_keys"] == ["profile-0"]
+    assert len(prompt_ranges["entries_by_profile"]["profile-0"]) == 2
 
     assert prompt_ranges["entries"][0]["request_id"] == "req-1"
     assert prompt_ranges["entries"][0]["range_start_s"] == pytest.approx(0.2)
@@ -160,6 +163,61 @@ def test_extract_run_generates_ranges_and_histograms(tmp_path: Path) -> None:
     assert len(combined_points) == 2
     assert combined_points[0]["accumulated_value"] == pytest.approx(8.6)
     assert combined_points[1]["accumulated_value"] == pytest.approx(12.4)
+    assert prompt_histogram["series_keys"] == ["profile-0"]
+    assert prompt_histogram["series_by_profile"]["profile-0"]["gateway_profile_id"] == 0
+    assert prompt_histogram["series_by_profile"]["profile-0"]["points"] == prompt_points
+
+
+def test_extract_gateway_stack_from_run_dir_builds_series_by_profile(tmp_path: Path) -> None:
+    run_dir = tmp_path / "job"
+    llm_requests_path = (
+        run_dir
+        / "post-processed"
+        / "gateway"
+        / "llm-requests"
+        / extract_run.DEFAULT_LLM_REQUESTS_OUTPUT_NAME
+    )
+
+    _write_llm_requests(
+        llm_requests_path,
+        [
+            {
+                "gateway_run_id": "run_002",
+                "gateway_profile_id": 2,
+                "request_id": "req-1",
+                "request_start_offset_s": 0.0,
+                "prompt_tokens": 8,
+                "completion_tokens": 4,
+                "gen_ai.latency.time_in_queue": 0.0,
+                "gen_ai.latency.time_in_model_prefill": 1.0,
+                "gen_ai.latency.time_to_first_token": 0.5,
+                "gen_ai.latency.time_in_model_decode": 1.0,
+            },
+            {
+                "gateway_run_id": "run_013",
+                "gateway_profile_id": 13,
+                "request_id": "req-2",
+                "request_start_offset_s": 1.0,
+                "prompt_tokens": 5,
+                "completion_tokens": 7,
+                "gen_ai.latency.time_in_queue": 0.0,
+                "gen_ai.latency.time_in_model_prefill": 1.0,
+                "gen_ai.latency.time_to_first_token": 1.5,
+                "gen_ai.latency.time_in_model_decode": 1.0,
+            },
+        ],
+    )
+
+    _range_payloads, histogram_payloads = extract_run.extract_gateway_stack_from_run_dir(run_dir)
+
+    prompt_histogram = histogram_payloads["prompt_tokens"]
+    assert prompt_histogram["multi_profile"] is True
+    assert prompt_histogram["port_profile_ids"] == [2, 13]
+    assert prompt_histogram["series_keys"] == ["profile-2", "profile-13"]
+    assert prompt_histogram["series_by_profile"]["profile-2"]["gateway_profile_id"] == 2
+    assert prompt_histogram["series_by_profile"]["profile-13"]["gateway_profile_id"] == 13
+    assert prompt_histogram["series_by_profile"]["profile-2"]["point_count"] == 1
+    assert prompt_histogram["series_by_profile"]["profile-13"]["point_count"] == 2
 
 
 def test_missing_cached_tokens_defaults_to_zero_for_prefill_metrics(tmp_path: Path) -> None:

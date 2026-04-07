@@ -392,13 +392,57 @@ def _build_series_payload(
     finished_count_key: str,
     figure_title: str,
     figure_variant_label: str,
+    scope_label: str | None = None,
 ) -> dict[str, Any]:
     series_payload = dict(timeseries_payload)
     series_payload["throughput_points"] = timeseries_payload.get(points_key)
     series_payload["finished_replay_count"] = timeseries_payload.get(finished_count_key)
     series_payload["_figure_title"] = figure_title
-    series_payload["_figure_variant_label"] = figure_variant_label
+    variant_parts = [figure_variant_label] if figure_variant_label else []
+    if scope_label:
+        variant_parts.append(scope_label)
+    series_payload["_figure_variant_label"] = " | ".join(variant_parts)
     return series_payload
+
+
+def _series_specs_for_payload(timeseries_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    series_specs = [
+        {
+            "series_id": "aggregate",
+            "scope_label": None,
+            "relative_output_subdir": Path(),
+            "series_payload": timeseries_payload,
+        }
+    ]
+    raw_series_by_profile = timeseries_payload.get("series_by_profile")
+    if not isinstance(raw_series_by_profile, dict):
+        return series_specs
+    for series_id in timeseries_payload.get("series_keys", []):
+        series_payload = raw_series_by_profile.get(series_id)
+        if not isinstance(series_payload, dict):
+            continue
+        series_specs.append(
+            {
+                "series_id": series_id,
+                "scope_label": series_id,
+                "relative_output_subdir": Path(series_id),
+                "series_payload": series_payload,
+            }
+        )
+    for series_id, series_payload in sorted(raw_series_by_profile.items()):
+        if not isinstance(series_payload, dict):
+            continue
+        if any(item["series_id"] == series_id for item in series_specs):
+            continue
+        series_specs.append(
+            {
+                "series_id": series_id,
+                "scope_label": series_id,
+                "relative_output_subdir": Path(series_id),
+                "series_payload": series_payload,
+            }
+        )
+    return series_specs
 
 
 def generate_figure_for_run_dir(
@@ -429,46 +473,66 @@ def generate_figure_for_run_dir(
     resolved_output_dir.mkdir(parents=True, exist_ok=True)
     figure_entries: list[dict[str, Any]] = []
     skipped_variant_ids: list[str] = []
+    series_specs = _series_specs_for_payload(timeseries_payload)
 
-    for variant_spec in _variant_specs_for_payload(timeseries_payload):
-        series_payload = _build_series_payload(
-            timeseries_payload,
-            points_key=variant_spec["points_key"],
-            finished_count_key=variant_spec["finished_count_key"],
-            figure_title=variant_spec["figure_title"],
-            figure_variant_label=variant_spec["figure_variant_label"],
-        )
-        x_values, y_values = _extract_xy(series_payload)
-        summary_stats = _build_summary_stats(x_values, y_values)
-        figure_file_name = f"{variant_spec['figure_stem']}.{image_format}"
-        figure_path = resolved_output_dir / figure_file_name
-        rendered = _render_throughput_figure(
-            series_payload=series_payload,
-            output_path=figure_path,
-            image_format=image_format,
-            dpi=dpi,
-        )
-        if not rendered:
-            skipped_variant_ids.append(variant_spec["variant_id"])
-        figure_entries.append(
-            {
-                "variant_id": variant_spec["variant_id"],
-                "figure_generated": rendered,
-                "figure_file_name": figure_file_name if rendered else None,
-                "figure_path": str(figure_path.resolve()) if rendered else None,
-                "sample_count": summary_stats["sample_count"],
-                "avg_throughput_jobs_per_s": _float_or_none(summary_stats.get("avg")),
-                "min_throughput_jobs_per_s": _float_or_none(summary_stats.get("min")),
-                "max_throughput_jobs_per_s": _float_or_none(summary_stats.get("max")),
-                "peak_time_s": _float_or_none(summary_stats.get("peak_time_s")),
-                "replay_count": _int_or_none(timeseries_payload.get("replay_count")),
-                "finished_replay_count": _int_or_none(series_payload.get("finished_replay_count")),
-                "total_duration_s": _float_or_none(timeseries_payload.get("total_duration_s")),
-                "window_size_s": _float_or_none(timeseries_payload.get("window_size_s")),
-                "timepoint_frequency_hz": _float_or_none(timeseries_payload.get("timepoint_frequency_hz")),
-                "skip_reason": None if rendered else "No valid throughput points",
-            }
-        )
+    for series_spec in series_specs:
+        base_series_payload = series_spec["series_payload"]
+        for variant_spec in _variant_specs_for_payload(base_series_payload):
+            series_payload = _build_series_payload(
+                base_series_payload,
+                points_key=variant_spec["points_key"],
+                finished_count_key=variant_spec["finished_count_key"],
+                figure_title=variant_spec["figure_title"],
+                figure_variant_label=variant_spec["figure_variant_label"],
+                scope_label=series_spec["scope_label"],
+            )
+            x_values, y_values = _extract_xy(series_payload)
+            summary_stats = _build_summary_stats(x_values, y_values)
+            figure_file_name = f"{variant_spec['figure_stem']}.{image_format}"
+            figure_path = (
+                resolved_output_dir / series_spec["relative_output_subdir"] / figure_file_name
+            )
+            figure_path.parent.mkdir(parents=True, exist_ok=True)
+            rendered = _render_throughput_figure(
+                series_payload=series_payload,
+                output_path=figure_path,
+                image_format=image_format,
+                dpi=dpi,
+            )
+            figure_id = (
+                variant_spec["variant_id"]
+                if series_spec["series_id"] == "aggregate"
+                else f"{series_spec['series_id']}:{variant_spec['variant_id']}"
+            )
+            if not rendered:
+                skipped_variant_ids.append(figure_id)
+            figure_entries.append(
+                {
+                    "series_id": series_spec["series_id"],
+                    "gateway_profile_id": _int_or_none(base_series_payload.get("gateway_profile_id")),
+                    "variant_id": variant_spec["variant_id"],
+                    "figure_id": figure_id,
+                    "figure_generated": rendered,
+                    "relative_output_subdir": (
+                        series_spec["relative_output_subdir"].as_posix()
+                        if series_spec["relative_output_subdir"].parts
+                        else ""
+                    ),
+                    "figure_file_name": figure_file_name if rendered else None,
+                    "figure_path": str(figure_path.resolve()) if rendered else None,
+                    "sample_count": summary_stats["sample_count"],
+                    "avg_throughput_jobs_per_s": _float_or_none(summary_stats.get("avg")),
+                    "min_throughput_jobs_per_s": _float_or_none(summary_stats.get("min")),
+                    "max_throughput_jobs_per_s": _float_or_none(summary_stats.get("max")),
+                    "peak_time_s": _float_or_none(summary_stats.get("peak_time_s")),
+                    "replay_count": _int_or_none(base_series_payload.get("replay_count")),
+                    "finished_replay_count": _int_or_none(series_payload.get("finished_replay_count")),
+                    "total_duration_s": _float_or_none(base_series_payload.get("total_duration_s")),
+                    "window_size_s": _float_or_none(base_series_payload.get("window_size_s")),
+                    "timepoint_frequency_hz": _float_or_none(base_series_payload.get("timepoint_frequency_hz")),
+                    "skip_reason": None if rendered else "No valid throughput points",
+                }
+            )
 
     primary_figure = figure_entries[0] if figure_entries else None
     manifest = {
@@ -477,8 +541,11 @@ def generate_figure_for_run_dir(
         "output_dir": str(resolved_output_dir),
         "image_format": image_format,
         "dpi": dpi,
+        "multi_profile": bool(timeseries_payload.get("multi_profile", False)),
+        "port_profile_ids": timeseries_payload.get("port_profile_ids"),
+        "series_count": len(series_specs),
         "figure_count": len([item for item in figure_entries if item["figure_generated"]]),
-        "variant_count": len(figure_entries),
+        "variant_count": len(_variant_specs_for_payload(timeseries_payload)),
         "skipped_variant_count": len(skipped_variant_ids),
         "skipped_variant_ids": skipped_variant_ids,
         "figures": figure_entries,

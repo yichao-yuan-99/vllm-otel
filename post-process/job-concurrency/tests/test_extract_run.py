@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -176,6 +177,74 @@ def test_extract_job_concurrency_applies_service_failure_cutoff(tmp_path: Path) 
         {"second": 2, "concurrency": 2},
         {"second": 3, "concurrency": 2},
     ]
+
+
+def test_extract_job_concurrency_adds_profile_series_from_gateway_manifests(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "job-replay"
+    replay_dir = run_dir / "replay"
+    replay_dir.mkdir(parents=True)
+
+    token_a = "token-a"
+    token_b = "token-b"
+    (replay_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "started_at": "2026-03-08T00:00:00.000Z",
+                "finished_at": "2026-03-08T00:00:05.000Z",
+                "port_profile_id_list": [2, 13],
+                "worker_results": {
+                    "trial-0001": {
+                        "worker_id": "trial-0001",
+                        "status": "completed",
+                        "api_token": token_a,
+                        "started_at": "2026-03-08T00:00:00.000Z",
+                        "finished_at": "2026-03-08T00:00:02.000Z",
+                    },
+                    "trial-0002": {
+                        "worker_id": "trial-0002",
+                        "status": "completed",
+                        "api_token": token_b,
+                        "started_at": "2026-03-08T00:00:01.000Z",
+                        "finished_at": "2026-03-08T00:00:03.000Z",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    gateway_output_dir = run_dir / "gateway-output"
+    (gateway_output_dir / "run_a").mkdir(parents=True)
+    (gateway_output_dir / "run_b").mkdir(parents=True)
+    (gateway_output_dir / "run_a" / "manifest.json").write_text(
+        json.dumps(
+            {
+                "api_token_hash": hashlib.sha256(token_a.encode("utf-8")).hexdigest(),
+                "backend_port_profile_id": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (gateway_output_dir / "run_b" / "manifest.json").write_text(
+        json.dumps(
+            {
+                "api_token_hash": hashlib.sha256(token_b.encode("utf-8")).hexdigest(),
+                "backend_port_profile_id": 13,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = extract_run.extract_job_concurrency_from_run_dir(run_dir)
+
+    assert result["multi_profile"] is True
+    assert result["port_profile_ids"] == [2, 13]
+    assert result["series_keys"] == ["profile-2", "profile-13"]
+    assert result["series_by_profile"]["profile-2"]["replay_count"] == 1
+    assert result["series_by_profile"]["profile-13"]["replay_count"] == 1
+    assert result["series_by_profile"]["profile-2"]["max_concurrency"] == 1
+    assert result["series_by_profile"]["profile-13"]["max_concurrency"] == 1
 
 
 def test_discover_run_dirs_with_job_concurrency_sources_scans_recursively(

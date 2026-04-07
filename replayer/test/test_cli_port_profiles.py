@@ -173,8 +173,29 @@ def test_resolve_replay_vllm_log_config_defaults_from_port_profile() -> None:
 
     assert config.enabled is True
     assert config.endpoint == "http://127.0.0.1:24123/metrics"
+    assert config.endpoints == ("http://127.0.0.1:24123/metrics",)
     assert config.interval_s == 1.0
     assert config.timeout_s == 5.0
+    assert config.port_profile_ids == (1,)
+
+
+def test_resolve_replay_vllm_log_config_supports_port_profile_id_list() -> None:
+    config = resolve_replay_vllm_log_config(
+        port_profile_id=2,
+        port_profile_id_list=[2, 13],
+        interval_s=1.0,
+        timeout_s=5.0,
+    )
+
+    assert config.enabled is True
+    assert config.endpoint == "http://127.0.0.1:31987/metrics"
+    assert config.endpoints == (
+        "http://127.0.0.1:31987/metrics",
+        "http://127.0.0.1:16231/metrics",
+    )
+    assert config.interval_s == 1.0
+    assert config.timeout_s == 5.0
+    assert config.port_profile_ids == (2, 13)
 
 
 def test_resolve_replay_vllm_log_config_requires_port_profile() -> None:
@@ -1890,6 +1911,7 @@ def test_cmd_replay_updates_progress_bar(monkeypatch: pytest.MonkeyPatch, tmp_pa
                 "workers": [
                     {
                         "worker_id": "worker-1",
+                        "api_token": "token-1",
                         "delta_agent_start_s": 0.0,
                         "delta_first_request_s": 0.0,
                         "requests": [
@@ -2117,6 +2139,157 @@ def test_cmd_replay_enables_lmcache_log_when_probe_succeeds(
     assert summary["lmcache_log_enabled"] is True
     assert summary["lmcache_log_dir"] == str(output_dir / "lmcache-log")
     assert summary["lmcache_log_monitor_return_code"] == 0
+
+
+def test_cmd_replay_splits_vllm_logs_by_port_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plan_path = tmp_path / "replay-plan.json"
+    output_dir = tmp_path / "replay-output"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "replay_target": {
+                    "port_profile_id": "2",
+                    "api_base": "http://127.0.0.1:9999/v1",
+                    "gateway_url": "http://127.0.0.1:9999",
+                    "tokenize_endpoint": "http://127.0.0.1:9998/tokenize",
+                },
+                "launch_policy": {
+                    "strategy": "config_ordered",
+                    "max_concurrent": 1,
+                    "pattern": {"name": "eager"},
+                },
+                "workers": [
+                    {
+                        "worker_id": "worker-1",
+                        "api_token": "token-1",
+                        "delta_agent_start_s": 0.0,
+                        "delta_first_request_s": 0.0,
+                        "requests": [
+                            {
+                                "method": "POST",
+                                "path": "v1/chat/completions",
+                                "body": {"model": "Test-Model", "messages": []},
+                                "expected_response_text": "ok",
+                                "delta_agent_action_after_s": 0.0,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_http_json(
+        *,
+        method: str,
+        url: str,
+        payload: object,
+        timeout_s: float | None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, object]:
+        del method, payload, headers
+        assert timeout_s is None
+        if url.endswith("/v1/chat/completions"):
+            return (
+                200,
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "ok",
+                            }
+                        }
+                    ]
+                },
+            )
+        return 200, {}
+
+    def fake_vllm_monitors(*, output_dir: Path, config: object) -> list[object]:
+        assert getattr(config, "port_profile_ids") == (2, 13)
+        assert getattr(config, "endpoints") == (
+            "http://127.0.0.1:31987/metrics",
+            "http://127.0.0.1:16231/metrics",
+        )
+        profile_2_dir = output_dir / "vllm-log" / "profile-2"
+        profile_13_dir = output_dir / "vllm-log" / "profile-13"
+        return [
+            type(
+                "FakeMonitor",
+                (),
+                {
+                    "port_profile_id": 2,
+                    "endpoint": "http://127.0.0.1:31987/metrics",
+                    "log_dir": profile_2_dir,
+                    "stdout_log": profile_2_dir / "monitor.stdout.log",
+                    "stderr_log": profile_2_dir / "monitor.stderr.log",
+                },
+            )(),
+            type(
+                "FakeMonitor",
+                (),
+                {
+                    "port_profile_id": 13,
+                    "endpoint": "http://127.0.0.1:16231/metrics",
+                    "log_dir": profile_13_dir,
+                    "stdout_log": profile_13_dir / "monitor.stdout.log",
+                    "stderr_log": profile_13_dir / "monitor.stderr.log",
+                },
+            )(),
+        ]
+
+    monkeypatch.setattr("replayer.cli.http_json", fake_http_json)
+    monkeypatch.setattr("replayer.cli.start_replay_vllm_monitors", fake_vllm_monitors)
+    monkeypatch.setattr("replayer.cli.stop_replay_vllm_monitors", lambda monitors: [0, 0])
+    monkeypatch.setattr(
+        "replayer.cli.probe_metrics_endpoint",
+        lambda *, endpoint, timeout_s: (False, "disabled-for-test"),
+    )
+
+    exit_code = cmd_replay(
+        argparse.Namespace(
+            plan=str(plan_path),
+            output_dir=str(output_dir),
+            port_profile_id=2,
+            port_profile_id_list=["2,13"],
+            launch_policy_override_json='{"max_concurrent": 1}',
+            vllm_log=None,
+            vllm_log_interval_s=1.0,
+            vllm_log_timeout_s=5.0,
+        )
+    )
+
+    assert exit_code == 0
+    summary = json.loads((output_dir / "replay" / "summary.json").read_text(encoding="utf-8"))
+    assert summary["port_profile_id"] == "2"
+    assert summary["port_profile_id_list"] == [2, 13]
+    assert summary["vllm_log_port_profile_ids"] == [2, 13]
+    assert summary["vllm_log_dir"] == str(output_dir / "vllm-log")
+    assert summary["vllm_log_monitor_return_code"] is None
+    assert summary["vllm_log_monitor_return_codes"] == [0, 0]
+    assert summary["vllm_log_endpoints"] == [
+        "http://127.0.0.1:31987/metrics",
+        "http://127.0.0.1:16231/metrics",
+    ]
+    assert summary["vllm_log_monitors"] == [
+        {
+            "port_profile_id": 2,
+            "endpoint": "http://127.0.0.1:31987/metrics",
+            "log_dir": str(output_dir / "vllm-log" / "profile-2"),
+            "stdout_log": str(output_dir / "vllm-log" / "profile-2" / "monitor.stdout.log"),
+            "stderr_log": str(output_dir / "vllm-log" / "profile-2" / "monitor.stderr.log"),
+        },
+        {
+            "port_profile_id": 13,
+            "endpoint": "http://127.0.0.1:16231/metrics",
+            "log_dir": str(output_dir / "vllm-log" / "profile-13"),
+            "stdout_log": str(output_dir / "vllm-log" / "profile-13" / "monitor.stdout.log"),
+            "stderr_log": str(output_dir / "vllm-log" / "profile-13" / "monitor.stderr.log"),
+        },
+    ]
 
 
 def test_cmd_replay_num_tasks_truncates_to_first_launch_order_tasks(
@@ -2858,6 +3031,7 @@ def test_cmd_replay_handles_client_disconnect_requests(
                 "workers": [
                     {
                         "worker_id": "worker-1",
+                        "api_token": "token-1",
                         "delta_agent_start_s": 0.0,
                         "delta_first_request_s": 0.0,
                         "requests": [
@@ -2922,6 +3096,102 @@ def test_cmd_replay_handles_client_disconnect_requests(
     assert worker_log["requests_succeeded"] == 1
 
 
+def test_cmd_replay_time_constraint_reclassifies_client_disconnect_cancel_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plan_path = tmp_path / "replay-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "replay_target": {
+                    "port_profile_id": "1",
+                    "api_base": "http://127.0.0.1:9999/v1",
+                    "gateway_url": "http://127.0.0.1:9999",
+                    "tokenize_endpoint": "http://127.0.0.1:9998/tokenize",
+                },
+                "launch_policy": {
+                    "strategy": "config_ordered",
+                    "max_concurrent": 1,
+                    "pattern": {"name": "eager"},
+                },
+                "workers": [
+                    {
+                        "worker_id": "worker-1",
+                        "api_token": "token-1",
+                        "delta_agent_start_s": 0.0,
+                        "delta_first_request_s": 0.0,
+                        "requests": [
+                            {
+                                "method": "POST",
+                                "path": "v1/chat/completions",
+                                "body": {
+                                    "model": "Test-Model",
+                                    "messages": [{"role": "user", "content": "hi"}],
+                                    "ignore_eos": True,
+                                },
+                                "replay_mode": "client_disconnect_after_duration",
+                                "cancel_after_s": 600.0,
+                                "delta_agent_action_after_s": 0.0,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_timed_cancel_http_json(**_: object) -> dict[str, object]:
+        return {
+            "outcome": "cancel_failed",
+            "elapsed_s": 0.05,
+            "response_status": None,
+            "response_payload": None,
+            "error": "Remote end closed connection without response",
+        }
+
+    monkeypatch.setattr("replayer.cli.timed_cancel_http_json", fake_timed_cancel_http_json)
+    monkeypatch.setattr("replayer.cli.http_json", lambda **_: (200, {}))
+
+    output_dir = tmp_path / "replay-output"
+    exit_code = cmd_replay(
+        argparse.Namespace(
+            plan=str(plan_path),
+            output_dir=str(output_dir),
+            port_profile_id=1,
+            time_constraint_s=0.05,
+            launch_policy_override_json=None,
+            vllm_log=None,
+            vllm_log_interval_s=1.0,
+            vllm_log_timeout_s=5.0,
+            agent_timeout_s=None,
+        )
+    )
+
+    assert exit_code == 0
+
+    summary = json.loads((output_dir / "replay" / "summary.json").read_text(encoding="utf-8"))
+    assert summary["workers_failed"] == 0
+    assert summary["workers_time_bound_finished"] == 1
+    assert summary["workers_time_bound_finished_reclassified_from_cancel_failed"] == 1
+    assert summary["requests_failed"] == 0
+    assert summary["time_constraint_reached"] is True
+    assert "workers_time_bound_finished_reclassification_note" in summary
+
+    worker_log = json.loads(
+        (output_dir / "replay" / "workers" / "worker-1.json").read_text(encoding="utf-8")
+    )
+    assert worker_log["status"] == "time_bound_finished"
+    assert worker_log["time_bound_finish_origin_outcome"] == "cancel_failed"
+    assert worker_log["notes"] == [
+        "Reclassified from cancel_failed to time_bound_finished because "
+        "the global replay time constraint fired while timed request "
+        "teardown was still in progress for path=chat/completions, "
+        "response_status=None, error='Remote end closed connection without response'."
+    ]
+
+
 def test_cmd_replay_accepts_long_running_client_disconnect_gateway_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2944,6 +3214,7 @@ def test_cmd_replay_accepts_long_running_client_disconnect_gateway_error(
                 "workers": [
                     {
                         "worker_id": "worker-1",
+                        "api_token": "token-1",
                         "delta_agent_start_s": 0.0,
                         "delta_first_request_s": 0.0,
                         "requests": [
@@ -2985,6 +3256,7 @@ def test_cmd_replay_accepts_long_running_client_disconnect_gateway_error(
             plan=str(plan_path),
             output_dir=str(output_dir),
             port_profile_id=1,
+            agent_timeout_s=3000.0,
             launch_policy_override_json=None,
             vllm_log=None,
             vllm_log_interval_s=1.0,
@@ -3102,6 +3374,7 @@ def test_cmd_replay_marks_worker_timed_out_at_agent_deadline(
                 "workers": [
                     {
                         "worker_id": "worker-1",
+                        "api_token": "token-1",
                         "delta_agent_start_s": 0.0,
                         "delta_first_request_s": 0.0,
                         "requests": [
@@ -3140,6 +3413,7 @@ def test_cmd_replay_marks_worker_timed_out_at_agent_deadline(
             plan=str(plan_path),
             output_dir=str(output_dir),
             port_profile_id=1,
+            agent_timeout_s=3000.0,
             launch_policy_override_json=None,
             vllm_log=None,
             vllm_log_interval_s=1.0,
@@ -3233,7 +3507,6 @@ def test_cmd_replay_gateway_calls_have_no_timeout(
     summary = json.loads((output_dir / "replay" / "summary.json").read_text(encoding="utf-8"))
     worker_result = summary["worker_results"]["worker-1"]
     assert worker_result["api_token"] == "token-1"
-
 
 def test_cmd_replay_randomize_seed_shuffles_launch_order(
     monkeypatch: pytest.MonkeyPatch,
@@ -3481,6 +3754,252 @@ def test_cmd_replay_time_constraint_marks_unfinished_workers_time_bound_finished
         (output_dir / "replay" / "workers" / "worker-1.json").read_text(encoding="utf-8")
     )
     assert worker_log["status"] == "time_bound_finished"
+
+
+def test_cmd_replay_time_constraint_reclassifies_cancel_failed_as_time_bound_finished(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plan_path = tmp_path / "replay-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "replay_target": {
+                    "port_profile_id": "1",
+                    "api_base": "http://127.0.0.1:9999/v1",
+                    "gateway_url": "http://127.0.0.1:9999",
+                    "tokenize_endpoint": "http://127.0.0.1:9998/tokenize",
+                },
+                "launch_policy": {
+                    "strategy": "config_ordered",
+                    "max_concurrent": 1,
+                    "pattern": {"name": "eager"},
+                },
+                "workers": [
+                    {
+                        "worker_id": "worker-1",
+                        "api_token": "token-1",
+                        "launch_priority": 0,
+                        "delta_agent_start_s": 0.0,
+                        "delta_first_request_s": 0.0,
+                        "requests": [
+                            {
+                                "method": "POST",
+                                "path": "v1/chat/completions",
+                                "body": {
+                                    "model": "Test-Model",
+                                    "messages": [{"role": "user", "content": "marker-1"}],
+                                },
+                                "expected_response_text": "ok",
+                                "delta_agent_action_after_s": 0.0,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_http_json(
+        *,
+        method: str,
+        url: str,
+        payload: object,
+        timeout_s: float | None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, object]:
+        del method, payload, timeout_s, headers
+        if (
+            url.endswith("/job/start")
+            or url.endswith("/agent/start")
+            or url.endswith("/agent/end")
+            or url.endswith("/job/end")
+        ):
+            return 200, {}
+        raise AssertionError("Deterministic request path should use timed_cancel_http_json")
+
+    def fake_timed_cancel_http_json(**_: object) -> dict[str, object]:
+        return {
+            "outcome": "cancel_failed",
+            "elapsed_s": 0.05,
+            "response_status": None,
+            "response_payload": None,
+            "error": "Remote end closed connection without response",
+        }
+
+    monkeypatch.setattr("replayer.cli.http_json", fake_http_json)
+    monkeypatch.setattr("replayer.cli.timed_cancel_http_json", fake_timed_cancel_http_json)
+
+    output_dir = tmp_path / "replay-output"
+    exit_code = cmd_replay(
+        argparse.Namespace(
+            plan=str(plan_path),
+            output_dir=str(output_dir),
+            num_tasks=None,
+            randomize_seed=None,
+            time_constraint_s=0.05,
+            port_profile_id=1,
+            launch_policy_override_json=None,
+            vllm_log=None,
+            vllm_log_interval_s=1.0,
+            vllm_log_timeout_s=5.0,
+        )
+    )
+
+    assert exit_code == 0
+    summary = json.loads((output_dir / "replay" / "summary.json").read_text(encoding="utf-8"))
+    assert summary["workers_failed"] == 0
+    assert summary["workers_timed_out"] == 0
+    assert summary["workers_time_bound_finished"] == 1
+    assert summary["workers_time_bound_finished_reclassified_from_cancel_failed"] == 1
+    assert summary["time_constraint_reached"] is True
+    assert summary["workers_total"] == 1
+    assert summary["requests_sent"] == 1
+    assert summary["requests_failed"] == 0
+    assert "workers_time_bound_finished_reclassification_note" in summary
+
+    worker_log = json.loads(
+        (output_dir / "replay" / "workers" / "worker-1.json").read_text(encoding="utf-8")
+    )
+    assert worker_log["status"] == "time_bound_finished"
+    assert worker_log["time_bound_finish_origin_outcome"] == "cancel_failed"
+    assert worker_log["notes"] == [
+        "Reclassified from cancel_failed to time_bound_finished because "
+        "the global replay time constraint fired while timed request "
+        "teardown was still in progress for path=chat/completions, "
+        "response_status=None, error='Remote end closed connection without response'."
+    ]
+
+
+def test_cmd_replay_retries_transient_agent_end_conflict_before_job_end(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plan_path = tmp_path / "replay-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "replay_target": {
+                    "port_profile_id": "1",
+                    "api_base": "http://127.0.0.1:9999/v1",
+                    "gateway_url": "http://127.0.0.1:9999",
+                    "tokenize_endpoint": "http://127.0.0.1:9998/tokenize",
+                },
+                "launch_policy": {
+                    "strategy": "config_ordered",
+                    "max_concurrent": 1,
+                    "pattern": {"name": "eager"},
+                },
+                "workers": [
+                    {
+                        "worker_id": "worker-1",
+                        "api_token": "token-1",
+                        "launch_priority": 0,
+                        "delta_agent_start_s": 0.0,
+                        "delta_first_request_s": 0.0,
+                        "requests": [
+                            {
+                                "method": "POST",
+                                "path": "v1/chat/completions",
+                                "body": {
+                                    "model": "Test-Model",
+                                    "messages": [{"role": "user", "content": "marker-1"}],
+                                },
+                                "expected_response_text": "ok",
+                                "delta_agent_action_after_s": 0.0,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    agent_end_attempts = {"count": 0}
+    observed_gateway_paths: list[str] = []
+
+    def fake_http_json(
+        *,
+        method: str,
+        url: str,
+        payload: object,
+        timeout_s: float | None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, object]:
+        del method, payload, timeout_s, headers
+        if url.endswith("/job/start"):
+            observed_gateway_paths.append("/job/start")
+            return 200, {}
+        if url.endswith("/agent/start"):
+            observed_gateway_paths.append("/agent/start")
+            return 200, {}
+        if url.endswith("/agent/end"):
+            agent_end_attempts["count"] += 1
+            observed_gateway_paths.append("/agent/end")
+            if agent_end_attempts["count"] == 1:
+                return 409, {"detail": "cannot end agent while requests are active"}
+            return 200, {}
+        if url.endswith("/job/end"):
+            observed_gateway_paths.append("/job/end")
+            return 200, {}
+        raise AssertionError("Deterministic request path should use timed_cancel_http_json")
+
+    def fake_timed_cancel_http_json(**kwargs: object) -> dict[str, object]:
+        cancel_after_s = kwargs.get("cancel_after_s")
+        assert isinstance(cancel_after_s, float)
+        assert cancel_after_s > 0.0
+        return {
+            "outcome": "cancelled",
+            "elapsed_s": cancel_after_s,
+            "response_status": None,
+            "response_payload": None,
+            "error": None,
+        }
+
+    monkeypatch.setattr("replayer.cli.http_json", fake_http_json)
+    monkeypatch.setattr("replayer.cli.timed_cancel_http_json", fake_timed_cancel_http_json)
+    monkeypatch.setattr("replayer.cli.time.sleep", lambda _seconds: None)
+
+    output_dir = tmp_path / "replay-output"
+    exit_code = cmd_replay(
+        argparse.Namespace(
+            plan=str(plan_path),
+            output_dir=str(output_dir),
+            num_tasks=None,
+            randomize_seed=None,
+            time_constraint_s=0.05,
+            port_profile_id=1,
+            launch_policy_override_json=None,
+            vllm_log=None,
+            vllm_log_interval_s=1.0,
+            vllm_log_timeout_s=5.0,
+        )
+    )
+
+    assert exit_code == 0
+    assert agent_end_attempts["count"] == 2
+    assert observed_gateway_paths == [
+        "/job/start",
+        "/agent/start",
+        "/agent/end",
+        "/agent/end",
+        "/job/end",
+    ]
+
+    summary = json.loads((output_dir / "replay" / "summary.json").read_text(encoding="utf-8"))
+    assert summary["workers_failed"] == 0
+    assert summary["workers_time_bound_finished"] == 1
+    assert summary["time_constraint_reached"] is True
+    assert "gateway_job_end_error" not in summary
+
+    worker_log = json.loads(
+        (output_dir / "replay" / "workers" / "worker-1.json").read_text(encoding="utf-8")
+    )
+    assert worker_log["status"] == "time_bound_finished"
+    assert worker_log["gateway_agent_end_retry_count"] == 1
+    assert "gateway_agent_end_error" not in worker_log
 
 
 def test_cmd_replay_rejects_time_constraint_with_num_tasks(tmp_path: Path) -> None:

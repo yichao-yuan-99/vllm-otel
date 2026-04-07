@@ -9,6 +9,15 @@ from pathlib import Path
 import sys
 from typing import Any
 
+THIS_DIR = Path(__file__).resolve().parent
+MODULE_ROOT = THIS_DIR.parent
+if str(MODULE_ROOT) not in sys.path:
+    sys.path.insert(0, str(MODULE_ROOT))
+
+from pp_common.profile_id import int_or_none
+from pp_common.profile_id import profile_ids_from_payload
+from pp_common.profile_id import profile_label
+
 
 DEFAULT_LLM_REQUESTS_INPUT_NAME = "llm-requests.json"
 DEFAULT_ACTIVITY_OUTPUT_NAME = "prefill-activities.json"
@@ -149,6 +158,10 @@ def _int_or_none(value: Any) -> int | None:
     if isinstance(value, float) and value.is_integer():
         return int(value)
     return None
+
+
+def _gateway_profile_id_or_none(value: Any) -> int | None:
+    return int_or_none(value)
 
 
 def _prefill_activity_sort_key(activity: dict[str, Any]) -> tuple[float, float, str]:
@@ -373,6 +386,54 @@ def _build_prefill_concurrency_stats(
     return min(values), max(values), round(sum(values) / len(values), 6)
 
 
+def _build_prefill_timeseries_and_stats_payloads(
+    request_records: list[dict[str, Any]],
+    prefill_activities: list[dict[str, Any]],
+    *,
+    total_duration_s: float,
+    tick_ms: int,
+    tick_s: float,
+    gateway_profile_id: int | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    prefill_concurrency_points = _build_prefill_concurrency_points(
+        prefill_activities,
+        total_duration_s=total_duration_s,
+        tick_s=tick_s,
+    )
+    concurrency_interval_length_stats = _build_concurrency_interval_length_stats(
+        prefill_concurrency_points,
+        tick_s=tick_s,
+    )
+    min_concurrency, max_concurrency, avg_concurrency = _build_prefill_concurrency_stats(
+        prefill_concurrency_points
+    )
+
+    common = {
+        "request_count": len(request_records),
+        "prefill_activity_count": len(prefill_activities),
+        "total_duration_s": total_duration_s,
+        "tick_ms": tick_ms,
+        "tick_s": tick_s,
+    }
+    if gateway_profile_id is not None:
+        common["gateway_profile_id"] = gateway_profile_id
+
+    timeseries_payload = {
+        **common,
+        "sample_count": len(prefill_concurrency_points),
+        "concurrency_points": prefill_concurrency_points,
+    }
+    stats_payload = {
+        **common,
+        "sample_count": len(prefill_concurrency_points),
+        "min_concurrency": min_concurrency,
+        "max_concurrency": max_concurrency,
+        "avg_concurrency": avg_concurrency,
+        "concurrency_interval_length_stats": concurrency_interval_length_stats,
+    }
+    return timeseries_payload, stats_payload
+
+
 def extract_prefill_concurrency_from_run_dir(
     run_dir: Path,
     *,
@@ -398,17 +459,33 @@ def extract_prefill_concurrency_from_run_dir(
 
     prefill_activities = _build_prefill_activities(request_records)
     total_duration_s = _resolve_total_duration_s(request_records, prefill_activities)
-    prefill_concurrency_points = _build_prefill_concurrency_points(
-        prefill_activities,
-        total_duration_s=total_duration_s,
-        tick_s=tick_s,
+    aggregate_timeseries_payload, aggregate_stats_payload = (
+        _build_prefill_timeseries_and_stats_payloads(
+            request_records,
+            prefill_activities,
+            total_duration_s=total_duration_s,
+            tick_ms=tick_ms,
+            tick_s=tick_s,
+        )
     )
-    concurrency_interval_length_stats = _build_concurrency_interval_length_stats(
-        prefill_concurrency_points,
-        tick_s=tick_s,
-    )
-    min_concurrency, max_concurrency, avg_concurrency = _build_prefill_concurrency_stats(
-        prefill_concurrency_points
+    port_profile_ids = sorted(
+        set(profile_ids_from_payload(llm_requests_payload))
+        | {
+            profile_id
+            for profile_id in (
+                _gateway_profile_id_or_none(record.get("gateway_profile_id"))
+                for record in request_records
+            )
+            if profile_id is not None
+        }
+        | {
+            profile_id
+            for profile_id in (
+                _gateway_profile_id_or_none(activity.get("gateway_profile_id"))
+                for activity in prefill_activities
+            )
+            if profile_id is not None
+        }
     )
 
     common = {
@@ -421,29 +498,70 @@ def extract_prefill_concurrency_from_run_dir(
         "service_failure_cutoff_time_utc": llm_requests_payload.get(
             "service_failure_cutoff_time_utc"
         ),
+        "multi_profile": len(port_profile_ids) > 1,
+        "port_profile_ids": port_profile_ids,
+        "series_keys": [profile_label(profile_id) for profile_id in port_profile_ids],
+    }
+
+    activities_by_profile: dict[str, dict[str, Any]] = {}
+    timeseries_by_profile: dict[str, dict[str, Any]] = {}
+    stats_by_profile: dict[str, dict[str, Any]] = {}
+    for gateway_profile_id in port_profile_ids:
+        series_key = profile_label(gateway_profile_id)
+        profile_request_records = [
+            record
+            for record in request_records
+            if _gateway_profile_id_or_none(record.get("gateway_profile_id")) == gateway_profile_id
+        ]
+        profile_prefill_activities = [
+            activity
+            for activity in prefill_activities
+            if _gateway_profile_id_or_none(activity.get("gateway_profile_id")) == gateway_profile_id
+        ]
+        profile_timeseries_payload, profile_stats_payload = (
+            _build_prefill_timeseries_and_stats_payloads(
+                profile_request_records,
+                profile_prefill_activities,
+                total_duration_s=total_duration_s,
+                tick_ms=tick_ms,
+                tick_s=tick_s,
+                gateway_profile_id=gateway_profile_id,
+            )
+        )
+        activities_by_profile[series_key] = {
+            "gateway_profile_id": gateway_profile_id,
+            "request_count": len(profile_request_records),
+            "prefill_activity_count": len(profile_prefill_activities),
+            "activities": profile_prefill_activities,
+        }
+        timeseries_by_profile[series_key] = {
+            **common,
+            **profile_timeseries_payload,
+        }
+        stats_by_profile[series_key] = {
+            **common,
+            **profile_stats_payload,
+        }
+
+    activities_payload = {
+        **common,
         "request_count": len(request_records),
         "prefill_activity_count": len(prefill_activities),
         "total_duration_s": total_duration_s,
         "tick_ms": tick_ms,
         "tick_s": tick_s,
-    }
-
-    activities_payload = {
-        **common,
         "activities": prefill_activities,
+        "activities_by_profile": activities_by_profile,
     }
     timeseries_payload = {
         **common,
-        "sample_count": len(prefill_concurrency_points),
-        "concurrency_points": prefill_concurrency_points,
+        **aggregate_timeseries_payload,
+        "series_by_profile": timeseries_by_profile,
     }
     stats_payload = {
         **common,
-        "sample_count": len(prefill_concurrency_points),
-        "min_concurrency": min_concurrency,
-        "max_concurrency": max_concurrency,
-        "avg_concurrency": avg_concurrency,
-        "concurrency_interval_length_stats": concurrency_interval_length_stats,
+        **aggregate_stats_payload,
+        "series_by_profile": stats_by_profile,
     }
     return activities_payload, timeseries_payload, stats_payload
 

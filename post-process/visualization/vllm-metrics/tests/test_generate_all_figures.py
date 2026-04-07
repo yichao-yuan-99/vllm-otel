@@ -65,6 +65,74 @@ def _write_timeseries_and_stats(run_dir: Path) -> tuple[Path, Path]:
     return timeseries_path, stats_path
 
 
+def _write_cluster_timeseries_and_stats(run_dir: Path) -> tuple[Path, Path]:
+    processed_dir = run_dir / "post-processed" / "vllm-log"
+    processed_dir.mkdir(parents=True)
+    timeseries_path = processed_dir / "gauge-counter-timeseries.json"
+    stats_path = processed_dir / "gauge-counter-timeseries.stats.json"
+
+    timeseries_path.write_text(
+        json.dumps(
+            {
+                "source_run_dir": str(run_dir),
+                "cluster_mode": True,
+                "port_profile_ids": [2, 13],
+                "metrics": {
+                    "vllm:num_requests_running|engine=0|port_profile_id=2": {
+                        "name": "vllm:num_requests_running",
+                        "labels": {"engine": "0", "port_profile_id": "2"},
+                        "time_from_start_s": [0.0, 1.0, 2.0],
+                        "value": [0.0, 1.0, 2.0],
+                    },
+                    "vllm:num_requests_running|engine=0|port_profile_id=13": {
+                        "name": "vllm:num_requests_running",
+                        "labels": {"engine": "0", "port_profile_id": "13"},
+                        "time_from_start_s": [0.0, 1.0, 2.0],
+                        "value": [1.0, 2.0, 3.0],
+                    },
+                    "vllm:cache_config_info|engine=0": {
+                        "name": "vllm:cache_config_info",
+                        "labels": {"engine": "0"},
+                        "time_from_start_s": [0.0, 1.0],
+                        "value": [16.0, 16.0],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    stats_path.write_text(
+        json.dumps(
+            {
+                "cluster_mode": True,
+                "port_profile_ids": [2, 13],
+                "metrics": {
+                    "vllm:num_requests_running|engine=0|port_profile_id=2": {
+                        "sample_count": 3,
+                        "min": 0.0,
+                        "max": 2.0,
+                        "avg": 1.0,
+                    },
+                    "vllm:num_requests_running|engine=0|port_profile_id=13": {
+                        "sample_count": 3,
+                        "min": 1.0,
+                        "max": 3.0,
+                        "avg": 2.0,
+                    },
+                    "vllm:cache_config_info|engine=0": {
+                        "sample_count": 2,
+                        "min": 16.0,
+                        "max": 16.0,
+                        "avg": 16.0,
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return timeseries_path, stats_path
+
+
 def test_discover_run_dirs_with_metric_stats_scans_recursively(tmp_path: Path) -> None:
     root_dir = tmp_path / "results"
     good_run = root_dir / "a" / "job-ok"
@@ -128,6 +196,81 @@ def test_generate_figures_for_run_dir_writes_manifest(tmp_path: Path, monkeypatc
     assert manifest["dpi"] == 150
     for figure in manifest["figures"]:
         assert Path(figure["figure_path"]).is_file()
+
+
+def test_generate_figures_for_cluster_run_uses_profile_subdirectories(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_dir = tmp_path / "job"
+    _write_cluster_timeseries_and_stats(run_dir)
+
+    def fake_render_metric_figure(
+        *,
+        series_key: str,
+        metric_payload: dict[str, object],
+        stats_payload: dict[str, object] | None,
+        output_path: Path,
+        image_format: str,
+        dpi: int,
+    ) -> bool:
+        del series_key, metric_payload, stats_payload, image_format, dpi
+        output_path.write_text("fake-image", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(
+        generate_all_figures,
+        "_render_metric_figure",
+        fake_render_metric_figure,
+    )
+
+    manifest_path = generate_all_figures.generate_figures_for_run_dir(
+        run_dir,
+        image_format="png",
+        dpi=150,
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["cluster_mode"] is True
+    assert manifest["port_profile_ids"] == [2, 13]
+
+    figure_by_series_key = {figure["series_key"]: figure for figure in manifest["figures"]}
+    assert figure_by_series_key["vllm:num_requests_running|engine=0|port_profile_id=2"][
+        "relative_output_subdir"
+    ] == "profile-2"
+    assert figure_by_series_key["vllm:num_requests_running|engine=0|port_profile_id=13"][
+        "relative_output_subdir"
+    ] == "profile-13"
+    assert figure_by_series_key["vllm:cache_config_info|engine=0"]["relative_output_subdir"] == "shared"
+
+    assert (
+        run_dir
+        / "post-processed"
+        / "visualization"
+        / "vllm-metrics"
+        / "profile-2"
+        / figure_by_series_key["vllm:num_requests_running|engine=0|port_profile_id=2"][
+            "figure_file_name"
+        ]
+    ).is_file()
+    assert (
+        run_dir
+        / "post-processed"
+        / "visualization"
+        / "vllm-metrics"
+        / "profile-13"
+        / figure_by_series_key["vllm:num_requests_running|engine=0|port_profile_id=13"][
+            "figure_file_name"
+        ]
+    ).is_file()
+    assert (
+        run_dir
+        / "post-processed"
+        / "visualization"
+        / "vllm-metrics"
+        / "shared"
+        / figure_by_series_key["vllm:cache_config_info|engine=0"]["figure_file_name"]
+    ).is_file()
 
 
 def test_generate_figures_for_run_dir_rejects_missing_stats_file(tmp_path: Path) -> None:

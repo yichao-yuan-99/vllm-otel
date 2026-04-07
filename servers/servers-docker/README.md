@@ -4,7 +4,8 @@ This package runs:
 
 - `jaeger` (trace backend + UI) in Docker
 - `vllm` (OpenAI-compatible server with OTEL packages) in Docker
-- `gateway` on host as a managed local daemon (`python -m gateway start ...`)
+- `gateway` on host as a managed local daemon by default
+- `gateway_ctx` on host instead when `start --gateway-ctx` is used
 
 Environment launch and operations are managed only through `servers/servers-docker/client.py`.
 Runtime compose uses pushed Docker Hub images only (no local Dockerfile build step).
@@ -29,6 +30,11 @@ Gateway config is resolved in this order:
 - `gateway/config.toml`
 - `gateway/config.example.toml`
 
+With `--gateway-ctx`, the launcher resolves the ctx-aware package config instead:
+
+- `gateway_ctx/config.toml`
+- `gateway_ctx/config.example.toml`
+
 ## 2) Daemon CLI Package
 
 If your system `python3` does not have `typer`, use `./.venv/bin/python` instead.
@@ -45,6 +51,7 @@ Start one environment:
 
 ```bash
 python3 servers/servers-docker/client.py start -m qwen3_coder_30b -p 0 -l h100_nvl_gpu23 -b
+python3 servers/servers-docker/client.py start -m qwen3_coder_30b -p 0 -l h100_nvl_gpu23 --gateway-ctx -b
 python3 servers/servers-docker/client.py start -m qwen3_coder_30b -p 0 -l h100_nvl_gpu23 --lmcache 100 -b
 python3 servers/servers-docker/client.py start -m qwen3_coder_30b_fp8 -p 2 -l h100_nvl_gpu2_single --gpu-memory-utilization 0.75 -b
 ```
@@ -52,6 +59,7 @@ python3 servers/servers-docker/client.py start -m qwen3_coder_30b_fp8 -p 2 -l h1
 Runtime names are suffixed with `<model>-<launch-profile>` (from `-m` and `-l`),
 so different model/launch selections can run in parallel as separate Docker Compose projects when ports do not collide.
 Gateway is started automatically for the selected `-p` port profile and stopped by `stop`/`daemon-stop`.
+Use `--gateway-ctx` on `start` to launch `gateway_ctx` instead of the plain gateway package for that environment.
 
 `start` materializes compose variables internally from:
 

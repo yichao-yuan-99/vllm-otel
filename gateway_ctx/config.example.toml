@@ -1,0 +1,26 @@
+schema_version = 1
+
+[run]
+# Optional. If omitted, gateway uses configs/port_profiles.toml default_profile.
+port_profile_id = 0
+output_root = "./tests/output/gateway-artifacts"
+
+[telemetry]
+service_name = "vllm-gateway-ctx"
+otlp_traces_insecure = true
+
+[gateway]
+artifact_compression = "none"
+job_end_trace_wait_seconds = 10
+
+[ipc]
+# IPC is enabled by default.
+# Set enabled = false to disable it.
+# enabled = false
+#
+# Optional override for the Unix domain socket path.
+# Default: /tmp/vllm-gateway-ctx-profile-<port_profile_id>.sock
+# socket_path = "/tmp/vllm-gateway-ctx.sock"
+# socket_permissions = "660"
+# socket_uid = 1000
+# socket_gid = 1000

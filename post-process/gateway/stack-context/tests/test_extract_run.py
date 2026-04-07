@@ -145,6 +145,9 @@ def test_extract_run_generates_context_ranges_and_histogram(tmp_path: Path) -> N
     )
 
     assert ranges_payload["entry_count"] == 6
+    assert ranges_payload["multi_profile"] is True
+    assert ranges_payload["port_profile_ids"] == [0, 1]
+    assert ranges_payload["series_keys"] == ["profile-0", "profile-1"]
     idle_entries = [entry for entry in ranges_payload["entries"] if entry["segment_type"] == "idle"]
     active_entries = [
         entry for entry in ranges_payload["entries"] if entry["segment_type"] == "active"
@@ -176,6 +179,11 @@ def test_extract_run_generates_context_ranges_and_histogram(tmp_path: Path) -> N
 
     points = histogram_payload["points"]
     assert histogram_payload["point_count"] == 5
+    assert histogram_payload["series_keys"] == ["profile-0", "profile-1"]
+    assert histogram_payload["series_by_profile"]["profile-0"]["gateway_profile_id"] == 0
+    assert histogram_payload["series_by_profile"]["profile-1"]["gateway_profile_id"] == 1
+    assert histogram_payload["series_by_profile"]["profile-0"]["point_count"] == 5
+    assert histogram_payload["series_by_profile"]["profile-1"]["point_count"] == 5
     assert [point["second"] for point in points] == [0, 1, 2, 3, 4]
     assert [point["accumulated_value"] for point in points] == pytest.approx(
         [27.5, 165.0, 176.0, 216.0, 216.0]

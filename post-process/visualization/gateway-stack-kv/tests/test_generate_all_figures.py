@@ -22,12 +22,39 @@ def _write_stack_kv_histogram(run_dir: Path) -> Path:
     payload = {
         "metric": "kv_usage_tokens",
         "phase": "request_lifetime",
+        "multi_profile": True,
+        "port_profile_ids": [2, 13],
+        "series_keys": ["profile-2", "profile-13"],
         "bucket_width_s": 1,
         "points": [
             {"second": 0, "accumulated_value": 1.0},
             {"second": 1, "accumulated_value": 3.0},
             {"second": 2, "accumulated_value": 2.0},
         ],
+        "series_by_profile": {
+            "profile-2": {
+                "metric": "kv_usage_tokens",
+                "phase": "request_lifetime",
+                "gateway_profile_id": 2,
+                "bucket_width_s": 1,
+                "points": [
+                    {"second": 0, "accumulated_value": 0.4},
+                    {"second": 1, "accumulated_value": 2.0},
+                    {"second": 2, "accumulated_value": 1.4},
+                ],
+            },
+            "profile-13": {
+                "metric": "kv_usage_tokens",
+                "phase": "request_lifetime",
+                "gateway_profile_id": 13,
+                "bucket_width_s": 1,
+                "points": [
+                    {"second": 0, "accumulated_value": 0.6},
+                    {"second": 1, "accumulated_value": 1.0},
+                    {"second": 2, "accumulated_value": 0.6},
+                ],
+            },
+        },
     }
     (stack_kv_dir / generate_all_figures.DEFAULT_INPUT_NAME).write_text(
         json.dumps(payload),
@@ -98,12 +125,15 @@ def test_generate_figures_for_run_dir_writes_manifest(tmp_path: Path, monkeypatc
     ).resolve()
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["multi_profile"] is True
+    assert manifest["port_profile_ids"] == [2, 13]
+    assert manifest["series_count"] == 3
     assert manifest["variant_count"] == 5
-    assert manifest["figure_count"] == 5
+    assert manifest["figure_count"] == 15
     assert manifest["skipped_variant_count"] == 0
     assert manifest["image_format"] == "png"
     assert manifest["dpi"] == 150
-    assert len(manifest["figures"]) == 5
+    assert len(manifest["figures"]) == 15
     assert any(
         entry["figure_file_name"] == "kv-usage-stacked-histogram.png"
         for entry in manifest["figures"]
@@ -114,6 +144,16 @@ def test_generate_figures_for_run_dir_writes_manifest(tmp_path: Path, monkeypatc
     )
     assert any(
         entry["figure_file_name"] == "kv-usage-stacked-histogram-smoothed-120s.png"
+        for entry in manifest["figures"]
+    )
+    assert any(
+        entry["figure_file_name"] == "kv-usage-stacked-histogram.png"
+        and entry["relative_output_subdir"] == "profile-2"
+        for entry in manifest["figures"]
+    )
+    assert any(
+        entry["figure_file_name"] == "kv-usage-stacked-histogram-smoothed-60s.png"
+        and entry["relative_output_subdir"] == "profile-13"
         for entry in manifest["figures"]
     )
     for entry in manifest["figures"]:

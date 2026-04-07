@@ -38,6 +38,9 @@ def _write_freq_control_summary(
                 "control_error_point_count": 2,
                 "decision_point_count": 2,
                 "decision_change_count": 1,
+                "multi_profile": False,
+                "port_profile_ids": [],
+                "series_keys": [],
                 "first_job_active_time_offset_s": 0.5,
                 "lower_bound": 100.0,
                 "upper_bound": 200.0,
@@ -115,12 +118,170 @@ def _write_freq_control_summary(
     return summary_path
 
 
+def _write_multi_profile_freq_control_summary(run_dir: Path) -> Path:
+    processed_dir = run_dir / "post-processed" / "freq-control-linespace"
+    processed_dir.mkdir(parents=True)
+    summary_path = processed_dir / "freq-control-summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "source_run_dir": str(run_dir),
+                "source_type": "replay",
+                "source_freq_control_log_dir_name": "freq-control-linespace",
+                "source_query_log_paths": [
+                    str(
+                        run_dir
+                        / "freq-control-linespace"
+                        / "profile-2"
+                        / "freq-controller-ls.query.20260402T000000Z.jsonl"
+                    ),
+                    str(
+                        run_dir
+                        / "freq-control-linespace"
+                        / "profile-13"
+                        / "freq-controller-ls.query.20260402T000000Z.jsonl"
+                    ),
+                ],
+                "source_decision_log_paths": [
+                    str(
+                        run_dir
+                        / "freq-control-linespace"
+                        / "profile-2"
+                        / "freq-controller-ls.decision.20260402T000000Z.jsonl"
+                    ),
+                    str(
+                        run_dir
+                        / "freq-control-linespace"
+                        / "profile-13"
+                        / "freq-controller-ls.decision.20260402T000000Z.jsonl"
+                    ),
+                ],
+                "source_control_error_log_paths": [],
+                "freq_control_log_found": True,
+                "query_log_found": True,
+                "decision_log_found": True,
+                "control_error_log_found": False,
+                "multi_profile": True,
+                "port_profile_ids": [2, 13],
+                "series_keys": ["profile-2", "profile-13"],
+                "query_point_count": 4,
+                "pending_query_point_count": 1,
+                "active_query_point_count": 3,
+                "query_error_count": 1,
+                "control_error_point_count": 0,
+                "decision_point_count": 4,
+                "decision_change_count": 2,
+                "first_job_active_time_offset_s": 0.5,
+                "lower_bound": None,
+                "upper_bound": None,
+                "segmented_policy_detected": False,
+                "linespace_policy_detected": True,
+                "target_context_usage_threshold": 300.0,
+                "segment_count": 3,
+                "segment_width_context_usage": 100.0,
+                "low_freq_threshold": None,
+                "low_freq_cap_mhz": None,
+                "max_context_usage": 240.0,
+                "max_window_context_usage": 220.0,
+                "min_frequency_mhz": 345,
+                "max_frequency_mhz": 1005,
+                "analysis_window_start_utc": "2026-04-02T00:00:00Z",
+                "query_points": [
+                    {
+                        "time_offset_s": -0.5,
+                        "context_usage": 0.0,
+                        "phase": "pending",
+                        "job_active": False,
+                        "agent_count": 0,
+                        "port_profile_id": 2,
+                    },
+                    {
+                        "time_offset_s": 0.5,
+                        "context_usage": 120.0,
+                        "phase": "active",
+                        "job_active": True,
+                        "agent_count": 1,
+                        "port_profile_id": 2,
+                    },
+                    {
+                        "time_offset_s": 0.8,
+                        "context_usage": 210.0,
+                        "phase": "active",
+                        "job_active": True,
+                        "agent_count": 1,
+                        "port_profile_id": 13,
+                    },
+                    {
+                        "time_offset_s": 1.6,
+                        "context_usage": 240.0,
+                        "phase": "active",
+                        "job_active": True,
+                        "agent_count": 1,
+                        "error": "Connection reset by peer",
+                        "port_profile_id": 13,
+                    },
+                ],
+                "decision_points": [
+                    {
+                        "time_offset_s": 5.0,
+                        "window_context_usage": 140.0,
+                        "current_frequency_mhz": 900,
+                        "target_frequency_mhz": 1005,
+                        "changed": True,
+                        "target_context_usage_threshold": 300.0,
+                        "segment_count": 3,
+                        "segment_width_context_usage": 100.0,
+                        "port_profile_id": 2,
+                    },
+                    {
+                        "time_offset_s": 10.0,
+                        "window_context_usage": 170.0,
+                        "current_frequency_mhz": 1005,
+                        "target_frequency_mhz": 1005,
+                        "changed": False,
+                        "target_context_usage_threshold": 300.0,
+                        "segment_count": 3,
+                        "segment_width_context_usage": 100.0,
+                        "port_profile_id": 2,
+                    },
+                    {
+                        "time_offset_s": 5.2,
+                        "window_context_usage": 200.0,
+                        "current_frequency_mhz": 345,
+                        "target_frequency_mhz": 765,
+                        "changed": True,
+                        "target_context_usage_threshold": 300.0,
+                        "segment_count": 3,
+                        "segment_width_context_usage": 100.0,
+                        "port_profile_id": 13,
+                    },
+                    {
+                        "time_offset_s": 9.5,
+                        "window_context_usage": 220.0,
+                        "current_frequency_mhz": 765,
+                        "target_frequency_mhz": 765,
+                        "changed": False,
+                        "target_context_usage_threshold": 300.0,
+                        "segment_count": 3,
+                        "segment_width_context_usage": 100.0,
+                        "port_profile_id": 13,
+                    },
+                ],
+                "control_error_points": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return summary_path
+
+
 def test_discover_run_dirs_with_freq_control_summary_scans_recursively(
     tmp_path: Path,
 ) -> None:
     root_dir = tmp_path / "results"
     good_run = root_dir / "a" / "job-ok"
     good_run_seg = root_dir / "b" / "job-ok-seg"
+    good_run_multi = root_dir / "c" / "job-ok-multi"
     bad_run = root_dir / "b" / "job-missing-summary"
 
     _write_freq_control_summary(good_run)
@@ -129,6 +290,10 @@ def test_discover_run_dirs_with_freq_control_summary_scans_recursively(
         summary_dir_name="freq-control-seg",
         segmented_policy=True,
     )
+    _write_freq_control_summary(
+        good_run_multi,
+        summary_dir_name="freq-control-linespace-multi",
+    )
     bad_processed_dir = bad_run / "post-processed" / "freq-control"
     bad_processed_dir.mkdir(parents=True)
 
@@ -136,7 +301,11 @@ def test_discover_run_dirs_with_freq_control_summary_scans_recursively(
         root_dir
     )
 
-    assert discovered == [good_run.resolve(), good_run_seg.resolve()]
+    assert discovered == [
+        good_run.resolve(),
+        good_run_seg.resolve(),
+        good_run_multi.resolve(),
+    ]
 
 
 def test_generate_figure_for_run_dir_writes_manifest(
@@ -301,6 +470,108 @@ def test_generate_figure_for_run_dir_uses_linespace_summary_family(
         ).resolve()
     )
     assert captured_payloads[0]["source_run_dir"] == str(run_dir)
+
+
+def test_generate_figure_for_run_dir_uses_multi_linespace_summary_family(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_dir = tmp_path / "job"
+    summary_path = _write_freq_control_summary(
+        run_dir,
+        summary_dir_name="freq-control-linespace-multi",
+    )
+    captured_payloads: list[dict[str, object]] = []
+
+    def fake_render_freq_control_figure(
+        *,
+        freq_control_payload: dict[str, object],
+        output_path: Path,
+        image_format: str,
+        dpi: int,
+    ) -> bool:
+        del image_format, dpi
+        captured_payloads.append(freq_control_payload)
+        output_path.write_text("fake-image", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(
+        generate_all_figures,
+        "_render_freq_control_figure",
+        fake_render_freq_control_figure,
+    )
+
+    manifest_path = generate_all_figures.generate_figure_for_run_dir(run_dir)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest_path == (
+        run_dir
+        / "post-processed"
+        / "visualization"
+        / "freq-control-linespace-multi"
+        / "figures-manifest.json"
+    ).resolve()
+    assert manifest["source_freq_control_summary_path"] == str(summary_path.resolve())
+    assert manifest["output_dir"] == str(
+        (
+            run_dir
+            / "post-processed"
+            / "visualization"
+            / "freq-control-linespace-multi"
+        ).resolve()
+    )
+    assert captured_payloads[0]["source_run_dir"] == str(run_dir)
+
+
+def test_generate_figure_for_run_dir_writes_one_figure_per_port_profile(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_dir = tmp_path / "job"
+    _write_multi_profile_freq_control_summary(run_dir)
+    captured_payloads: list[dict[str, object]] = []
+
+    def fake_render_freq_control_figure(
+        *,
+        freq_control_payload: dict[str, object],
+        output_path: Path,
+        image_format: str,
+        dpi: int,
+    ) -> bool:
+        del image_format, dpi
+        captured_payloads.append(freq_control_payload)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("fake-image", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(
+        generate_all_figures,
+        "_render_freq_control_figure",
+        fake_render_freq_control_figure,
+    )
+
+    manifest_path = generate_all_figures.generate_figure_for_run_dir(run_dir)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["multi_profile"] is True
+    assert manifest["port_profile_ids"] == [2, 13]
+    assert manifest["series_count"] == 2
+    assert manifest["figure_count"] == 2
+    assert [figure["series_key"] for figure in manifest["figures"]] == [
+        "profile-2",
+        "profile-13",
+    ]
+    assert all(figure["query_log_found"] for figure in manifest["figures"])
+    assert all(figure["decision_log_found"] for figure in manifest["figures"])
+    assert all(figure["relative_output_subdir"] for figure in manifest["figures"])
+    assert manifest["figure_path"].endswith("/profile-2/freq-control-timeline.png")
+    assert {
+        payload["port_profile_id"] for payload in captured_payloads
+    } == {2, 13}
+    assert {payload["query_point_count"] for payload in captured_payloads} == {2}
+    assert {
+        payload["decision_point_count"] for payload in captured_payloads
+    } == {2}
 
 
 def test_generate_figure_for_run_dir_rejects_missing_freq_control_summary_file(

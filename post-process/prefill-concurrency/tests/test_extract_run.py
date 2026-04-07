@@ -210,6 +210,48 @@ def test_extract_prefill_concurrency_handles_no_valid_prefill_activities(
     }
 
 
+def test_extract_prefill_concurrency_adds_profile_series(tmp_path: Path) -> None:
+    run_dir = tmp_path / "job"
+    _write_llm_requests(
+        run_dir,
+        {
+            "port_profile_ids": [2, 13],
+            "requests": [
+                {
+                    "request_id": "req-1",
+                    "gateway_profile_id": 2,
+                    "request_start_offset_s": 0.0,
+                    "request_end_offset_s": 0.04,
+                    "request_end_to_run_end_s": 0.01,
+                    "gen_ai.latency.time_in_queue": 0.01,
+                    "gen_ai.latency.time_in_model_prefill": 0.02,
+                },
+                {
+                    "request_id": "req-2",
+                    "gateway_profile_id": 13,
+                    "request_start_offset_s": 0.01,
+                    "request_end_offset_s": 0.04,
+                    "request_end_to_run_end_s": 0.01,
+                    "gen_ai.latency.time_in_queue": 0.0,
+                    "gen_ai.latency.time_in_model_prefill": 0.02,
+                },
+            ],
+        },
+    )
+
+    activities_payload, timeseries_payload, stats_payload = (
+        extract_run.extract_prefill_concurrency_from_run_dir(run_dir, tick_ms=10)
+    )
+
+    assert activities_payload["multi_profile"] is True
+    assert activities_payload["port_profile_ids"] == [2, 13]
+    assert sorted(activities_payload["activities_by_profile"]) == ["profile-13", "profile-2"]
+    assert timeseries_payload["series_by_profile"]["profile-2"]["prefill_activity_count"] == 1
+    assert timeseries_payload["series_by_profile"]["profile-13"]["prefill_activity_count"] == 1
+    assert stats_payload["series_by_profile"]["profile-2"]["max_concurrency"] == 1
+    assert stats_payload["series_by_profile"]["profile-13"]["max_concurrency"] == 1
+
+
 def test_build_concurrency_interval_length_stats_computes_std() -> None:
     points = [
         {"concurrency": 0},

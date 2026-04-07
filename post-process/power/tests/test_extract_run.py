@@ -70,6 +70,23 @@ def test_extract_power_summary_truncates_points_before_run_start(tmp_path: Path)
         {"time_offset_s": 1.0, "power_w": 300.0},
         {"time_offset_s": 3.0, "power_w": 100.0},
     ]
+    assert result["per_gpu_power"] == [
+        {
+            "gpu_key": "0",
+            "gpu_id": "0",
+            "display_label": "GPU 0",
+            "source_endpoint": "/var/run/zeusd.sock",
+            "power_sample_count": 3,
+            "power_stats_w": {"avg": 200.0, "min": 100.0, "max": 300.0},
+            "total_energy_j": 650.0,
+            "total_energy_kwh": 0.000180555556,
+            "power_points": [
+                {"time_offset_s": 0.0, "power_w": 200.0},
+                {"time_offset_s": 1.0, "power_w": 300.0},
+                {"time_offset_s": 3.0, "power_w": 100.0},
+            ],
+        }
+    ]
 
 
 def test_extract_power_summary_reports_missing_power_log_without_error(
@@ -98,6 +115,7 @@ def test_extract_power_summary_reports_missing_power_log_without_error(
     assert result["total_energy_j"] == 0.0
     assert result["total_energy_kwh"] == 0.0
     assert result["power_points"] == []
+    assert result["per_gpu_power"] == []
 
 
 def test_extract_power_summary_applies_service_failure_cutoff(tmp_path: Path) -> None:
@@ -148,6 +166,107 @@ def test_extract_power_summary_applies_service_failure_cutoff(tmp_path: Path) ->
     assert result["power_sample_count"] == 2
     assert result["power_stats_w"] == {"avg": 150.0, "min": 100.0, "max": 200.0}
     assert result["total_energy_j"] == 150.0
+
+
+def test_extract_power_summary_includes_per_gpu_series_for_multi_gpu_records(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "job"
+    replay_dir = run_dir / "replay"
+    power_dir = run_dir / "power"
+    replay_dir.mkdir(parents=True)
+    power_dir.mkdir(parents=True)
+
+    (replay_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "started_at": "2026-03-08T00:00:00.000Z",
+                "finished_at": "2026-03-08T00:00:02.000Z",
+                "worker_results": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_power_log(
+        power_dir / "power-log.jsonl",
+        [
+            {
+                "timestamp": "2026-03-08T00:00:00.000Z",
+                "payload": {
+                    "/var/run/zeusd.sock": {
+                        "gpu_power_w": {
+                            "0": 100.0,
+                            "1": 200.0,
+                        }
+                    }
+                },
+            },
+            {
+                "timestamp": "2026-03-08T00:00:01.000Z",
+                "payload": {
+                    "/var/run/zeusd.sock": {
+                        "gpu_power_w": {
+                            "0": 150.0,
+                            "1": 250.0,
+                        }
+                    }
+                },
+            },
+            {
+                "timestamp": "2026-03-08T00:00:02.000Z",
+                "payload": {
+                    "/var/run/zeusd.sock": {
+                        "gpu_power_w": {
+                            "0": 120.0,
+                            "1": 220.0,
+                        }
+                    }
+                },
+            },
+        ],
+    )
+
+    result = extract_run.extract_power_summary_from_run_dir(run_dir)
+
+    assert result["power_stats_w"] == {"avg": 346.666667, "min": 300.0, "max": 400.0}
+    assert result["total_energy_j"] == 720.0
+    assert result["power_points"] == [
+        {"time_offset_s": 0.0, "power_w": 300.0},
+        {"time_offset_s": 1.0, "power_w": 400.0},
+        {"time_offset_s": 2.0, "power_w": 340.0},
+    ]
+    assert result["per_gpu_power"] == [
+        {
+            "gpu_key": "0",
+            "gpu_id": "0",
+            "display_label": "GPU 0",
+            "source_endpoint": "/var/run/zeusd.sock",
+            "power_sample_count": 3,
+            "power_stats_w": {"avg": 123.333333, "min": 100.0, "max": 150.0},
+            "total_energy_j": 260.0,
+            "total_energy_kwh": 7.2222222e-05,
+            "power_points": [
+                {"time_offset_s": 0.0, "power_w": 100.0},
+                {"time_offset_s": 1.0, "power_w": 150.0},
+                {"time_offset_s": 2.0, "power_w": 120.0},
+            ],
+        },
+        {
+            "gpu_key": "1",
+            "gpu_id": "1",
+            "display_label": "GPU 1",
+            "source_endpoint": "/var/run/zeusd.sock",
+            "power_sample_count": 3,
+            "power_stats_w": {"avg": 223.333333, "min": 200.0, "max": 250.0},
+            "total_energy_j": 460.0,
+            "total_energy_kwh": 0.000127777778,
+            "power_points": [
+                {"time_offset_s": 0.0, "power_w": 200.0},
+                {"time_offset_s": 1.0, "power_w": 250.0},
+                {"time_offset_s": 2.0, "power_w": 220.0},
+            ],
+        },
+    ]
 
 
 def test_discover_run_dirs_with_power_sources_scans_recursively(tmp_path: Path) -> None:

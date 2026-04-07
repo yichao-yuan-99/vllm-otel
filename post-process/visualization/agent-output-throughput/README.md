@@ -1,13 +1,20 @@
 This directory contains figure-generation scripts for post-processed
 agent-output-throughput summaries.
 
-It renders two figures for each run:
+It always renders one base figure set for all agents:
 
 - a histogram of `output_throughput_tokens_per_s` using the extracted `1.0`
   token/s bins
 - a scatter plot with:
   - x-axis: `output_tokens`
   - y-axis: `output_throughput_tokens_per_s`
+
+When the extracted JSON includes replay completion metadata for every agent
+(`replay_worker_status` / `replay_completed`), it also renders a second figure
+set that keeps only agents with replay status `completed`.
+
+When the extracted JSON includes `series_by_profile`, it also renders the same
+figure sets under `profile-<id>/` subdirectories for each backend/profile.
 
 The plotting style matches the other post-process visualizations:
 
@@ -43,6 +50,18 @@ It writes:
 
 - `agent-output-throughput-histogram.<format>` (default `.png`)
 - `agent-output-throughput-vs-output-tokens.<format>` (default `.png`)
+- `agent-output-throughput-histogram-completed-replay-only.<format>` when
+  replay completion metadata is available (default `.png`)
+- `agent-output-throughput-vs-output-tokens-completed-replay-only.<format>`
+  when replay completion metadata is available (default `.png`)
+- `profile-<id>/agent-output-throughput-histogram.<format>` for multi-profile
+  runs
+- `profile-<id>/agent-output-throughput-vs-output-tokens.<format>` for
+  multi-profile runs
+- `profile-<id>/agent-output-throughput-histogram-completed-replay-only.<format>`
+  when replay completion metadata is available for multi-profile runs
+- `profile-<id>/agent-output-throughput-vs-output-tokens-completed-replay-only.<format>`
+  when replay completion metadata is available for multi-profile runs
 - `figures-manifest.json`
 
 Optional parameters (single-run mode):

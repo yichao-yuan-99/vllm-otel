@@ -140,27 +140,24 @@ def _record_timestamp_utc(record: dict[str, Any]) -> datetime | None:
     return parse_iso8601_to_utc(record.get("timestamp"))
 
 
-def _record_total_gpu_power_w(record: dict[str, Any]) -> float | None:
+def _iter_record_gpu_power_readings(
+    record: dict[str, Any],
+) -> Iterable[tuple[str, str, float]]:
     payload = record.get("payload")
     if not isinstance(payload, dict):
-        return None
-    total_power_w = 0.0
-    has_gpu_power = False
-    for endpoint_payload in payload.values():
+        return
+    for endpoint_name, endpoint_payload in payload.items():
         if not isinstance(endpoint_payload, dict):
             continue
         gpu_power_w = endpoint_payload.get("gpu_power_w")
         if not isinstance(gpu_power_w, dict):
             continue
-        for power_value in gpu_power_w.values():
+        endpoint_text = str(endpoint_name)
+        for gpu_id, power_value in gpu_power_w.items():
             numeric_power = _float_or_none(power_value)
             if numeric_power is None:
                 continue
-            has_gpu_power = True
-            total_power_w += numeric_power
-    if not has_gpu_power:
-        return None
-    return total_power_w
+            yield (endpoint_text, str(gpu_id), numeric_power)
 
 
 def _resolve_experiment_window(
@@ -246,6 +243,86 @@ def _integrate_energy_j(points: list[tuple[datetime, float, float]]) -> float:
     return energy_j
 
 
+def _build_power_stats(power_values: list[float]) -> dict[str, float | None]:
+    if not power_values:
+        return {
+            "avg": None,
+            "min": None,
+            "max": None,
+        }
+    return {
+        "avg": round(sum(power_values) / len(power_values), 6),
+        "min": round(min(power_values), 6),
+        "max": round(max(power_values), 6),
+    }
+
+
+def _summarize_power_points(points: list[tuple[datetime, float, float]]) -> dict[str, Any]:
+    sorted_points = sorted(points, key=lambda point: point[0])
+    power_values = [point[2] for point in sorted_points]
+    total_energy_j = round(_integrate_energy_j(sorted_points), 6)
+    return {
+        "power_sample_count": len(sorted_points),
+        "power_stats_w": _build_power_stats(power_values),
+        "total_energy_j": total_energy_j,
+        "total_energy_kwh": round(total_energy_j / 3_600_000.0, 12),
+        "power_points": [
+            {
+                "time_offset_s": time_offset_s,
+                "power_w": power_w,
+            }
+            for _, time_offset_s, power_w in sorted_points
+        ],
+    }
+
+
+def _gpu_sort_key(gpu_id: str, source_endpoint: str, gpu_key: str) -> tuple[int, str, str, str]:
+    try:
+        numeric_gpu_id = int(gpu_id)
+    except ValueError:
+        numeric_gpu_id = sys.maxsize
+    return (numeric_gpu_id, gpu_id, source_endpoint, gpu_key)
+
+
+def _build_per_gpu_power_entries(
+    points_by_gpu_key: dict[str, list[tuple[datetime, float, float]]],
+    gpu_meta_by_key: dict[str, dict[str, str]],
+) -> list[dict[str, Any]]:
+    gpu_id_counts: dict[str, int] = {}
+    for metadata in gpu_meta_by_key.values():
+        gpu_id = metadata["gpu_id"]
+        gpu_id_counts[gpu_id] = gpu_id_counts.get(gpu_id, 0) + 1
+
+    entries: list[dict[str, Any]] = []
+    for raw_gpu_key, points in points_by_gpu_key.items():
+        metadata = gpu_meta_by_key[raw_gpu_key]
+        gpu_id = metadata["gpu_id"]
+        source_endpoint = metadata["source_endpoint"]
+        duplicate_gpu_id = gpu_id_counts.get(gpu_id, 0) > 1
+        gpu_key = raw_gpu_key if duplicate_gpu_id else gpu_id
+        display_label = (
+            f"GPU {gpu_id} ({source_endpoint})" if duplicate_gpu_id else f"GPU {gpu_id}"
+        )
+        entries.append(
+            {
+                "gpu_key": gpu_key,
+                "gpu_id": gpu_id,
+                "display_label": display_label,
+                "source_endpoint": source_endpoint,
+                **_summarize_power_points(points),
+            }
+        )
+
+    entries.sort(
+        key=lambda entry: _gpu_sort_key(
+            str(entry["gpu_id"]),
+            str(entry["source_endpoint"]),
+            str(entry["gpu_key"]),
+        )
+    )
+    return entries
+
+
 def extract_power_summary_from_run_dir(run_dir: Path) -> dict[str, Any]:
     resolved_run_dir = run_dir.expanduser().resolve()
     service_failure_payload = ensure_service_failure_payload(resolved_run_dir)
@@ -285,40 +362,45 @@ def extract_power_summary_from_run_dir(run_dir: Path) -> dict[str, Any]:
             "total_energy_j": 0.0,
             "total_energy_kwh": 0.0,
             "power_points": [],
+            "per_gpu_power": [],
         }
 
     points: list[tuple[datetime, float, float]] = []
+    per_gpu_points_by_key: dict[str, list[tuple[datetime, float, float]]] = {}
+    per_gpu_meta_by_key: dict[str, dict[str, str]] = {}
     for record in _iter_jsonl_dict_records(power_log_path):
         timestamp_utc = _record_timestamp_utc(record)
-        power_w = _record_total_gpu_power_w(record)
-        if timestamp_utc is None or power_w is None:
+        gpu_power_readings = list(_iter_record_gpu_power_readings(record))
+        if timestamp_utc is None or not gpu_power_readings:
             continue
         if timestamp_utc < run_start_utc:
             continue
         if run_end_utc is not None and timestamp_utc > run_end_utc:
             continue
         time_offset_s = round((timestamp_utc - run_start_utc).total_seconds(), 6)
-        points.append((timestamp_utc, time_offset_s, round(power_w, 6)))
+        total_power_w = round(
+            sum(power_w for _, _, power_w in gpu_power_readings),
+            6,
+        )
+        points.append((timestamp_utc, time_offset_s, total_power_w))
+        for source_endpoint, gpu_id, power_w in gpu_power_readings:
+            raw_gpu_key = f"{source_endpoint}::{gpu_id}"
+            per_gpu_meta_by_key.setdefault(
+                raw_gpu_key,
+                {
+                    "gpu_id": gpu_id,
+                    "source_endpoint": source_endpoint,
+                },
+            )
+            per_gpu_points_by_key.setdefault(raw_gpu_key, []).append(
+                (timestamp_utc, time_offset_s, round(power_w, 6))
+            )
 
-    points.sort(key=lambda point: point[0])
-    power_values = [point[2] for point in points]
-    avg_power_w = None
-    min_power_w = None
-    max_power_w = None
-    if power_values:
-        avg_power_w = round(sum(power_values) / len(power_values), 6)
-        min_power_w = round(min(power_values), 6)
-        max_power_w = round(max(power_values), 6)
-
-    total_energy_j = round(_integrate_energy_j(points), 6)
-    total_energy_kwh = round(total_energy_j / 3_600_000.0, 12)
-    power_points = [
-        {
-            "time_offset_s": time_offset_s,
-            "power_w": power_w,
-        }
-        for _, time_offset_s, power_w in points
-    ]
+    aggregate_summary = _summarize_power_points(points)
+    per_gpu_power = _build_per_gpu_power_entries(
+        per_gpu_points_by_key,
+        per_gpu_meta_by_key,
+    )
 
     return {
         "source_run_dir": str(resolved_run_dir),
@@ -334,15 +416,12 @@ def extract_power_summary_from_run_dir(run_dir: Path) -> dict[str, Any]:
         ),
         "service_failure_cutoff_time_utc": service_failure_payload.get("cutoff_time_utc"),
         "power_log_found": True,
-        "power_sample_count": len(points),
-        "power_stats_w": {
-            "avg": avg_power_w,
-            "min": min_power_w,
-            "max": max_power_w,
-        },
-        "total_energy_j": total_energy_j,
-        "total_energy_kwh": total_energy_kwh,
-        "power_points": power_points,
+        "power_sample_count": aggregate_summary["power_sample_count"],
+        "power_stats_w": aggregate_summary["power_stats_w"],
+        "total_energy_j": aggregate_summary["total_energy_j"],
+        "total_energy_kwh": aggregate_summary["total_energy_kwh"],
+        "power_points": aggregate_summary["power_points"],
+        "per_gpu_power": per_gpu_power,
     }
 
 

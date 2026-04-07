@@ -307,6 +307,19 @@ def _render_prefill_concurrency_figure(
     axis.set_xlabel("Time From Run Start (s)")
     axis.set_ylabel("Active Prefill Requests")
 
+    variant_label = timeseries_payload.get("_figure_variant_label")
+    if isinstance(variant_label, str) and variant_label:
+        axis.text(
+            0.0,
+            1.02,
+            variant_label,
+            transform=axis.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=9,
+            color="#2A3B47",
+        )
+
     axis.text(
         0.99,
         0.98,
@@ -330,6 +343,43 @@ def _render_prefill_concurrency_figure(
     figure.savefig(output_path, format=image_format, dpi=dpi)
     plt.close(figure)
     return True
+
+
+def _series_specs_for_payload(timeseries_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    series_specs = [
+        {
+            "series_id": "aggregate",
+            "relative_output_subdir": Path(),
+            "series_payload": timeseries_payload,
+        }
+    ]
+    raw_series_by_profile = timeseries_payload.get("series_by_profile")
+    if not isinstance(raw_series_by_profile, dict):
+        return series_specs
+    for series_id in timeseries_payload.get("series_keys", []):
+        series_payload = raw_series_by_profile.get(series_id)
+        if not isinstance(series_payload, dict):
+            continue
+        series_specs.append(
+            {
+                "series_id": series_id,
+                "relative_output_subdir": Path(series_id),
+                "series_payload": series_payload,
+            }
+        )
+    for series_id, series_payload in sorted(raw_series_by_profile.items()):
+        if not isinstance(series_payload, dict):
+            continue
+        if any(item["series_id"] == series_id for item in series_specs):
+            continue
+        series_specs.append(
+            {
+                "series_id": series_id,
+                "relative_output_subdir": Path(series_id),
+                "series_payload": series_payload,
+            }
+        )
+    return series_specs
 
 
 def generate_figure_for_run_dir(
@@ -357,34 +407,76 @@ def generate_figure_for_run_dir(
     if not isinstance(timeseries_payload, dict):
         raise ValueError(f"Timeseries JSON must be an object: {resolved_timeseries_path}")
 
-    x_values, y_values = _extract_xy(timeseries_payload)
-    summary_stats = _build_summary_stats(x_values, y_values)
-
     resolved_output_dir.mkdir(parents=True, exist_ok=True)
-    figure_file_name = f"{DEFAULT_FIGURE_STEM}.{image_format}"
-    figure_path = resolved_output_dir / figure_file_name
-    rendered = _render_prefill_concurrency_figure(
-        timeseries_payload=timeseries_payload,
-        output_path=figure_path,
-        image_format=image_format,
-        dpi=dpi,
-    )
+    figure_entries: list[dict[str, Any]] = []
+    series_specs = _series_specs_for_payload(timeseries_payload)
 
+    for series_spec in series_specs:
+        series_payload = dict(series_spec["series_payload"])
+        if series_spec["series_id"] != "aggregate":
+            series_payload["_figure_variant_label"] = series_spec["series_id"]
+        x_values, y_values = _extract_xy(series_payload)
+        summary_stats = _build_summary_stats(x_values, y_values)
+        figure_file_name = f"{DEFAULT_FIGURE_STEM}.{image_format}"
+        figure_path = resolved_output_dir / series_spec["relative_output_subdir"] / figure_file_name
+        figure_path.parent.mkdir(parents=True, exist_ok=True)
+        rendered = _render_prefill_concurrency_figure(
+            timeseries_payload=series_payload,
+            output_path=figure_path,
+            image_format=image_format,
+            dpi=dpi,
+        )
+        figure_entries.append(
+            {
+                "series_id": series_spec["series_id"],
+                "gateway_profile_id": _int_or_none(series_payload.get("gateway_profile_id")),
+                "figure_generated": rendered,
+                "relative_output_subdir": (
+                    series_spec["relative_output_subdir"].as_posix()
+                    if series_spec["relative_output_subdir"].parts
+                    else ""
+                ),
+                "figure_file_name": figure_file_name if rendered else None,
+                "figure_path": str(figure_path.resolve()) if rendered else None,
+                "sample_count": summary_stats["sample_count"],
+                "avg_concurrency": _float_or_none(summary_stats.get("avg")),
+                "min_concurrency": _float_or_none(summary_stats.get("min")),
+                "max_concurrency": _float_or_none(summary_stats.get("max")),
+                "peak_time_s": _float_or_none(summary_stats.get("peak_time_s")),
+                "request_count": _int_or_none(series_payload.get("request_count")),
+                "prefill_activity_count": _int_or_none(series_payload.get("prefill_activity_count")),
+                "total_duration_s": _float_or_none(series_payload.get("total_duration_s")),
+                "tick_ms": _int_or_none(series_payload.get("tick_ms")),
+                "service_failure_detected": bool(
+                    series_payload.get("service_failure_detected", False)
+                ),
+                "service_failure_cutoff_time_utc": series_payload.get(
+                    "service_failure_cutoff_time_utc"
+                ),
+                "skip_reason": None if rendered else "No valid concurrency points",
+            }
+        )
+
+    primary_figure = figure_entries[0] if figure_entries else None
     manifest = {
         "source_run_dir": str(resolved_run_dir),
         "source_timeseries_path": str(resolved_timeseries_path),
         "output_dir": str(resolved_output_dir),
         "image_format": image_format,
         "dpi": dpi,
-        "figure_count": 1 if rendered else 0,
-        "figure_generated": rendered,
-        "figure_file_name": figure_file_name if rendered else None,
-        "figure_path": str(figure_path.resolve()) if rendered else None,
-        "sample_count": summary_stats["sample_count"],
-        "avg_concurrency": _float_or_none(summary_stats.get("avg")),
-        "min_concurrency": _float_or_none(summary_stats.get("min")),
-        "max_concurrency": _float_or_none(summary_stats.get("max")),
-        "peak_time_s": _float_or_none(summary_stats.get("peak_time_s")),
+        "multi_profile": bool(timeseries_payload.get("multi_profile", False)),
+        "port_profile_ids": timeseries_payload.get("port_profile_ids"),
+        "series_count": len(series_specs),
+        "figure_count": len([item for item in figure_entries if item["figure_generated"]]),
+        "figures": figure_entries,
+        "figure_generated": primary_figure["figure_generated"] if primary_figure else False,
+        "figure_file_name": primary_figure["figure_file_name"] if primary_figure else None,
+        "figure_path": primary_figure["figure_path"] if primary_figure else None,
+        "sample_count": primary_figure["sample_count"] if primary_figure else 0,
+        "avg_concurrency": primary_figure["avg_concurrency"] if primary_figure else None,
+        "min_concurrency": primary_figure["min_concurrency"] if primary_figure else None,
+        "max_concurrency": primary_figure["max_concurrency"] if primary_figure else None,
+        "peak_time_s": primary_figure["peak_time_s"] if primary_figure else None,
         "request_count": _int_or_none(timeseries_payload.get("request_count")),
         "prefill_activity_count": _int_or_none(timeseries_payload.get("prefill_activity_count")),
         "total_duration_s": _float_or_none(timeseries_payload.get("total_duration_s")),
@@ -395,7 +487,9 @@ def generate_figure_for_run_dir(
         "service_failure_cutoff_time_utc": timeseries_payload.get(
             "service_failure_cutoff_time_utc"
         ),
-        "skip_reason": None if rendered else "No valid concurrency points",
+        "skip_reason": (
+            primary_figure["skip_reason"] if primary_figure else "No valid concurrency points"
+        ),
     }
     manifest_path = resolved_output_dir / DEFAULT_MANIFEST_NAME
     manifest_path.write_text(

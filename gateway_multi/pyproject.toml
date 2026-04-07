@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=69.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-otel-gateway-multi"
+version = "0.1.0"
+description = "FastAPI gateway in front of multiple vLLM backends with OTEL trace capture and ctx-aware scheduling."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.111.0,<1.0.0",
+    "httpx>=0.27.0,<1.0.0",
+    "opentelemetry-api>=1.26.0,<1.27.0",
+    "opentelemetry-exporter-otlp>=1.26.0,<1.27.0",
+    "opentelemetry-sdk>=1.26.0,<1.27.0",
+    "requests>=2.31.0,<3.0.0",
+    "typer>=0.16.0,<1.0.0",
+    "uvicorn[standard]>=0.30.0,<1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0,<9.0.0",
+]
+
+[project.scripts]
+vllm-otel-gateway-multi = "gateway_multi.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = ".."}
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = [
+    "gateway",
+    "gateway.*",
+    "gateway_ctx",
+    "gateway_ctx.*",
+    "gateway_multi",
+    "gateway_multi.*",
+]
+exclude = [
+    "gateway.test",
+    "gateway.test.*",
+    "gateway_ctx.test",
+    "gateway_ctx.test.*",
+    "gateway_multi.test",
+    "gateway_multi.test.*",
+]

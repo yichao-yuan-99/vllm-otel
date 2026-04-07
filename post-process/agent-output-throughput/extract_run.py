@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
+import hashlib
 import json
 import math
 import os
@@ -21,6 +22,8 @@ if str(MODULE_ROOT) not in sys.path:
 from pp_common.service_failure import cutoff_datetime_utc_from_payload
 from pp_common.service_failure import ensure_service_failure_payload
 from pp_common.service_failure import parse_iso8601_to_utc
+from pp_common.profile_id import gateway_run_profile_id_from_manifest
+from pp_common.profile_id import profile_label
 
 
 DEFAULT_OUTPUT_NAME = "agent-output-throughput.json"
@@ -109,7 +112,7 @@ def discover_gateway_run_dirs(gateway_output_dir: Path) -> list[tuple[Path, int 
 
     for run_dir in sorted(gateway_output_dir.glob("run_*")):
         if run_dir.is_dir():
-            run_dirs.append((run_dir, None))
+            run_dirs.append((run_dir, gateway_run_profile_id_from_manifest(run_dir)))
 
     for child in sorted(gateway_output_dir.iterdir()):
         if not child.is_dir():
@@ -142,6 +145,10 @@ def _iter_jsonl_dict_records(path: Path) -> Iterable[dict[str, Any]]:
             payload = json.loads(stripped)
             if isinstance(payload, dict):
                 yield payload
+
+
+def _load_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _int_or_none(value: Any) -> int | None:
@@ -410,10 +417,45 @@ def _extract_api_token_hash(gateway_run_dir: Path) -> str | None:
     return None
 
 
+def _hash_api_token(api_token: Any) -> str | None:
+    if not isinstance(api_token, str) or not api_token:
+        return None
+    return hashlib.sha256(api_token.encode("utf-8")).hexdigest()
+
+
+def _replay_status_mapping_for_run(run_dir: Path) -> dict[str, str]:
+    summary_path = run_dir / "replay" / "summary.json"
+    if not summary_path.is_file():
+        return {}
+
+    try:
+        payload = _load_json(summary_path)
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    worker_results = payload.get("worker_results")
+    if not isinstance(worker_results, dict):
+        return {}
+
+    status_by_api_token_hash: dict[str, str] = {}
+    for worker_payload in worker_results.values():
+        if not isinstance(worker_payload, dict):
+            continue
+        api_token_hash = _hash_api_token(worker_payload.get("api_token"))
+        status = worker_payload.get("status")
+        if api_token_hash is None or not isinstance(status, str) or not status:
+            continue
+        status_by_api_token_hash[api_token_hash] = status
+    return status_by_api_token_hash
+
+
 def _collect_agent_output_throughput(
     gateway_run_dir: Path,
     *,
     profile_id: int | None,
+    replay_status_by_api_token_hash: dict[str, str] | None = None,
     cutoff_time_utc: datetime | None = None,
 ) -> tuple[dict[str, Any], dict[str, int | float]]:
     requests_path = gateway_run_dir / "requests" / "model_inference.jsonl"
@@ -430,51 +472,44 @@ def _collect_agent_output_throughput(
             request_duration_s=_extract_request_duration_s(record),
         )
 
+    api_token_hash = _extract_api_token_hash(gateway_run_dir)
+    replay_worker_status = None
+    if replay_status_by_api_token_hash and api_token_hash is not None:
+        replay_worker_status = replay_status_by_api_token_hash.get(api_token_hash)
+
     payload = _payload_from_accumulator(accumulator)
     payload.update(
         {
             "gateway_run_id": gateway_run_dir.name,
             "gateway_profile_id": profile_id,
-            "api_token_hash": _extract_api_token_hash(gateway_run_dir),
+            "api_token_hash": api_token_hash,
+            "replay_worker_status": replay_worker_status,
+            "replay_completed": (
+                replay_worker_status == "completed"
+                if replay_worker_status is not None
+                else None
+            ),
         }
     )
     return payload, accumulator
 
 
-def extract_agent_output_throughput_from_run_dir(run_dir: Path) -> dict[str, Any]:
-    resolved_run_dir = run_dir.expanduser().resolve()
-    service_failure_payload = ensure_service_failure_payload(resolved_run_dir)
-    cutoff_time_utc = cutoff_datetime_utc_from_payload(service_failure_payload)
-
-    gateway_output_dir = resolved_run_dir / "gateway-output"
-    if not gateway_output_dir.is_dir():
-        raise ValueError(f"Missing gateway-output directory: {gateway_output_dir}")
-
-    discovered_run_dirs = discover_gateway_run_dirs(gateway_output_dir)
-    if not discovered_run_dirs:
-        raise ValueError(
-            "No run_* artifacts found under gateway-output. "
-            "Expected either gateway-output/run_* or gateway-output/profile-*/run_*."
-        )
-
-    run_accumulator = _new_throughput_accumulator()
-    agents: list[dict[str, Any]] = []
-    for gateway_run_dir, profile_id in discovered_run_dirs:
-        agent_payload, agent_accumulator = _collect_agent_output_throughput(
-            gateway_run_dir,
-            profile_id=profile_id,
-            cutoff_time_utc=cutoff_time_utc,
-        )
-        agents.append(agent_payload)
-        _merge_accumulators(run_accumulator, agent_accumulator)
-
+def _build_result_payload(
+    *,
+    resolved_run_dir: Path,
+    gateway_output_dir: Path,
+    service_failure_payload: dict[str, Any],
+    agents: list[dict[str, Any]],
+    accumulator: dict[str, int | float],
+    gateway_profile_id: int | None = None,
+) -> dict[str, Any]:
     throughput_values = [
         float(agent["output_throughput_tokens_per_s"])
         for agent in agents
         if isinstance(agent.get("output_throughput_tokens_per_s"), (int, float))
     ]
 
-    result = _payload_from_accumulator(run_accumulator)
+    result = _payload_from_accumulator(accumulator)
     result.update(
         {
             "source_run_dir": str(resolved_run_dir),
@@ -495,11 +530,103 @@ def extract_agent_output_throughput_from_run_dir(run_dir: Path) -> dict[str, Any
             "agents": agents,
         }
     )
+    if gateway_profile_id is not None:
+        result["gateway_profile_id"] = gateway_profile_id
+    return result
+
+
+def extract_agent_output_throughput_from_run_dir(run_dir: Path) -> dict[str, Any]:
+    resolved_run_dir = run_dir.expanduser().resolve()
+    service_failure_payload = ensure_service_failure_payload(resolved_run_dir)
+    cutoff_time_utc = cutoff_datetime_utc_from_payload(service_failure_payload)
+
+    gateway_output_dir = resolved_run_dir / "gateway-output"
+    if not gateway_output_dir.is_dir():
+        raise ValueError(f"Missing gateway-output directory: {gateway_output_dir}")
+
+    discovered_run_dirs = discover_gateway_run_dirs(gateway_output_dir)
+    if not discovered_run_dirs:
+        raise ValueError(
+            "No run_* artifacts found under gateway-output. "
+            "Expected either gateway-output/run_* or gateway-output/profile-*/run_*."
+        )
+
+    replay_status_by_api_token_hash = _replay_status_mapping_for_run(resolved_run_dir)
+    run_accumulator = _new_throughput_accumulator()
+    accumulators_by_profile: dict[int, dict[str, int | float]] = {}
+    agents: list[dict[str, Any]] = []
+    agents_by_profile: dict[int, list[dict[str, Any]]] = {}
+    for gateway_run_dir, profile_id in discovered_run_dirs:
+        agent_payload, agent_accumulator = _collect_agent_output_throughput(
+            gateway_run_dir,
+            profile_id=profile_id,
+            replay_status_by_api_token_hash=replay_status_by_api_token_hash,
+            cutoff_time_utc=cutoff_time_utc,
+        )
+        agents.append(agent_payload)
+        _merge_accumulators(run_accumulator, agent_accumulator)
+        if profile_id is None:
+            continue
+        agents_by_profile.setdefault(profile_id, []).append(agent_payload)
+        profile_accumulator = accumulators_by_profile.setdefault(
+            profile_id,
+            _new_throughput_accumulator(),
+        )
+        _merge_accumulators(profile_accumulator, agent_accumulator)
+
+    port_profile_ids = sorted(agents_by_profile)
+    series_by_profile = {
+        profile_label(gateway_profile_id): _build_result_payload(
+            resolved_run_dir=resolved_run_dir,
+            gateway_output_dir=gateway_output_dir,
+            service_failure_payload=service_failure_payload,
+            agents=agents_by_profile[gateway_profile_id],
+            accumulator=accumulators_by_profile[gateway_profile_id],
+            gateway_profile_id=gateway_profile_id,
+        )
+        for gateway_profile_id in port_profile_ids
+    }
+
+    result = _build_result_payload(
+        resolved_run_dir=resolved_run_dir,
+        gateway_output_dir=gateway_output_dir,
+        service_failure_payload=service_failure_payload,
+        agents=agents,
+        accumulator=run_accumulator,
+    )
+    result.update(
+        {
+            "multi_profile": len(port_profile_ids) > 1,
+            "port_profile_ids": port_profile_ids,
+            "series_keys": list(series_by_profile.keys()),
+            "series_by_profile": series_by_profile,
+        }
+    )
     return result
 
 
 def _default_output_path_for_run(run_dir: Path) -> Path:
     return (run_dir / "post-processed" / "agent-output-throughput" / DEFAULT_OUTPUT_NAME).resolve()
+
+
+def _series_output_paths(
+    aggregate_output_path: Path,
+    result: dict[str, Any],
+) -> dict[str, Path]:
+    raw_series_by_profile = result.get("series_by_profile")
+    if not isinstance(raw_series_by_profile, dict):
+        return {}
+
+    output_paths: dict[str, Path] = {}
+    for series_key, series_payload in raw_series_by_profile.items():
+        if not isinstance(series_key, str) or not series_key:
+            continue
+        if not isinstance(series_payload, dict):
+            continue
+        output_paths[series_key] = (
+            aggregate_output_path.parent / series_key / aggregate_output_path.name
+        ).resolve()
+    return output_paths
 
 
 def extract_run_dir(run_dir: Path, *, output_path: Path | None = None) -> Path:
@@ -513,6 +640,17 @@ def extract_run_dir(run_dir: Path, *, output_path: Path | None = None) -> Path:
         json.dumps(result, ensure_ascii=True, indent=2) + "\n",
         encoding="utf-8",
     )
+
+    for series_key, series_output_path in _series_output_paths(
+        resolved_output_path,
+        result,
+    ).items():
+        series_payload = result["series_by_profile"][series_key]
+        series_output_path.parent.mkdir(parents=True, exist_ok=True)
+        series_output_path.write_text(
+            json.dumps(series_payload, ensure_ascii=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
     return resolved_output_path
 
 

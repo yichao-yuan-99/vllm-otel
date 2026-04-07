@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 import sys
 from pathlib import Path
 
@@ -13,7 +14,11 @@ if str(MODULE_ROOT) not in sys.path:
 import generate_all_figures
 
 
-def _write_power_summary(run_dir: Path) -> Path:
+def _write_power_summary(
+    run_dir: Path,
+    *,
+    per_gpu_power: list[dict[str, Any]] | None = None,
+) -> Path:
     processed_dir = run_dir / "post-processed" / "power"
     processed_dir.mkdir(parents=True)
     power_summary_path = processed_dir / "power-summary.json"
@@ -32,6 +37,7 @@ def _write_power_summary(run_dir: Path) -> Path:
                     {"time_offset_s": 1.0, "power_w": 300.0},
                     {"time_offset_s": 2.0, "power_w": 200.0},
                 ],
+                "per_gpu_power": per_gpu_power or [],
             }
         ),
         encoding="utf-8",
@@ -90,6 +96,7 @@ def test_generate_figure_for_run_dir_writes_manifest(tmp_path: Path, monkeypatch
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["figure_count"] == 1
+    assert manifest["per_gpu_figure_count"] == 0
     assert manifest["figure_generated"] is True
     assert manifest["figure_file_name"] == "gpu-power-over-time.png"
     assert manifest["image_format"] == "png"
@@ -100,6 +107,127 @@ def test_generate_figure_for_run_dir_writes_manifest(tmp_path: Path, monkeypatch
     assert manifest["peak_time_s"] == 1.0
     assert manifest["total_energy_j"] == 1400.0
     assert Path(manifest["figure_path"]).is_file()
+    assert manifest["figures"] == [
+        {
+            "figure_kind": "aggregate",
+            "figure_generated": True,
+            "figure_file_name": "gpu-power-over-time.png",
+            "figure_path": str(
+                (
+                    run_dir
+                    / "post-processed"
+                    / "visualization"
+                    / "power"
+                    / "gpu-power-over-time.png"
+                ).resolve()
+            ),
+            "display_label": "All GPUs",
+            "gpu_key": None,
+            "gpu_id": None,
+            "source_endpoint": None,
+            "sample_count": 3,
+            "avg_power_w": 200.0,
+            "min_power_w": 100.0,
+            "max_power_w": 300.0,
+            "peak_time_s": 1.0,
+            "total_energy_j": 1400.0,
+            "total_energy_kwh": 0.000388888889,
+            "skip_reason": None,
+        }
+    ]
+
+
+def test_generate_figure_for_run_dir_writes_per_gpu_figures_for_multi_gpu_summary(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_dir = tmp_path / "job"
+    _write_power_summary(
+        run_dir,
+        per_gpu_power=[
+            {
+                "gpu_key": "0",
+                "gpu_id": "0",
+                "display_label": "GPU 0",
+                "source_endpoint": "/var/run/zeusd.sock",
+                "power_sample_count": 3,
+                "power_stats_w": {"avg": 90.0, "min": 80.0, "max": 100.0},
+                "total_energy_j": 180.0,
+                "total_energy_kwh": 0.00005,
+                "power_points": [
+                    {"time_offset_s": 0.0, "power_w": 80.0},
+                    {"time_offset_s": 1.0, "power_w": 90.0},
+                    {"time_offset_s": 2.0, "power_w": 100.0},
+                ],
+            },
+            {
+                "gpu_key": "1",
+                "gpu_id": "1",
+                "display_label": "GPU 1",
+                "source_endpoint": "/var/run/zeusd.sock",
+                "power_sample_count": 3,
+                "power_stats_w": {"avg": 110.0, "min": 90.0, "max": 130.0},
+                "total_energy_j": 220.0,
+                "total_energy_kwh": 0.000061111111,
+                "power_points": [
+                    {"time_offset_s": 0.0, "power_w": 90.0},
+                    {"time_offset_s": 1.0, "power_w": 110.0},
+                    {"time_offset_s": 2.0, "power_w": 130.0},
+                ],
+            },
+        ],
+    )
+
+    rendered_labels: list[tuple[str | None, str]] = []
+
+    def fake_render_power_figure(
+        *,
+        power_summary_payload: dict[str, object],
+        output_path: Path,
+        image_format: str,
+        dpi: int,
+    ) -> bool:
+        del image_format, dpi
+        rendered_labels.append(
+            (
+                power_summary_payload.get("_figure_variant_label"),
+                output_path.name,
+            )
+        )
+        output_path.write_text("fake-image", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(
+        generate_all_figures,
+        "_render_power_figure",
+        fake_render_power_figure,
+    )
+
+    manifest_path = generate_all_figures.generate_figure_for_run_dir(run_dir)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert rendered_labels == [
+        (None, "gpu-power-over-time.png"),
+        ("GPU 0", "gpu-power-over-time-0.png"),
+        ("GPU 1", "gpu-power-over-time-1.png"),
+    ]
+    assert manifest["figure_count"] == 3
+    assert manifest["per_gpu_figure_count"] == 2
+    assert [figure["figure_kind"] for figure in manifest["figures"]] == [
+        "aggregate",
+        "per_gpu",
+        "per_gpu",
+    ]
+    assert [figure["figure_file_name"] for figure in manifest["figures"]] == [
+        "gpu-power-over-time.png",
+        "gpu-power-over-time-0.png",
+        "gpu-power-over-time-1.png",
+    ]
+    assert [figure["display_label"] for figure in manifest["figures"]] == [
+        "All GPUs",
+        "GPU 0",
+        "GPU 1",
+    ]
 
 
 def test_generate_figure_for_run_dir_rejects_missing_power_summary_file(
