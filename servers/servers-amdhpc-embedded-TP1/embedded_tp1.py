@@ -25,7 +25,7 @@ if str(REPO_ROOT) not in sys.path:
 if str(AMDHPC_ROOT) not in sys.path:
     sys.path.insert(0, str(AMDHPC_ROOT))
 
-from gateway.port_profiles import load_port_profile as load_gateway_port_profile  # type: ignore[import-not-found]
+from gateway_ctx.port_profiles import load_port_profile as load_gateway_port_profile  # type: ignore[import-not-found]
 from control_plane import (  # type: ignore[import-not-found]
     ControlPlaneError,
     _apply_lmcache_option,
@@ -362,8 +362,8 @@ class EmbeddedTp1Launcher:
         if no_async_scheduling:
             no_async_scheduling_args = "      --no-async-scheduling\n"
 
-        gateway_config_default = self._cfg.repo_root / "gateway" / "config.toml"
-        gateway_config_fallback = self._cfg.repo_root / "gateway" / "config.example.toml"
+        gateway_config_default = self._cfg.repo_root / "gateway_ctx" / "config.toml"
+        gateway_config_fallback = self._cfg.repo_root / "gateway_ctx" / "config.example.toml"
         gateway_venv_dir_default = self._cfg.repo_root / ".venv"
         service_ready_timeout_seconds = int(max(1, self._cfg.startup_timeout))
         service_ready_poll_interval_seconds = float(max(0.2, self._cfg.wait_up_poll_interval_seconds))
@@ -449,7 +449,11 @@ class EmbeddedTp1Launcher:
             mkdir -p "${{JOB_LOG_DIR}}" "${{AITER_JIT_DIR}}" "${{XDG_CACHE_HOME}}" "${{VLLM_CACHE_ROOT}}"
 
             JAEGER_LOG_SHARED="${{JOB_LOG_DIR}}/jaeger.${{SLURM_JOB_ID}}.shared.log"
+            AMD_SMI_POWER_DAEMON_BIN="${{AMD_SMI_POWER_DAEMON_BIN:-amd-smi-power-daemon}}"
+            AMD_SMI_POWER_SOCKET_PATH="${{AMD_SMI_POWER_SOCKET_PATH:-/tmp/amdsmi-power-reader.${{SLURM_JOB_ID}}.sock}}"
+            AMD_SMI_POWER_DAEMON_LOG="${{JOB_LOG_DIR}}/amd-smi-power-daemon.${{SLURM_JOB_ID}}.log"
 
+            AMD_SMI_POWER_DAEMON_PID=""
             declare -A PROFILE_VLLM_PID=()
             declare -A PROFILE_GATEWAY_PID=()
             declare -A PROFILE_EXPERIMENT_PID=()
@@ -488,6 +492,11 @@ class EmbeddedTp1Launcher:
               python3 -c "import socket, sys; sock = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=2); sock.close()" "$host" "$port" >/dev/null 2>&1
             }}
 
+            probe_unix_socket() {{
+              local socket_path="$1"
+              python3 -c "import socket, sys; sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); sock.settimeout(2); sock.connect(sys.argv[1]); sock.close()" "$socket_path" >/dev/null 2>&1
+            }}
+
             terminate_process() {{
               local name="$1"
               local pid="$2"
@@ -521,9 +530,39 @@ class EmbeddedTp1Launcher:
               for profile_id in "${{PROFILE_IDS[@]}}"; do
                 terminate_process "vllm profile=${{profile_id}}" "${{PROFILE_VLLM_PID[$profile_id]:-}}"
               done
+              terminate_process "amd-smi-power-daemon" "${{AMD_SMI_POWER_DAEMON_PID:-}}"
               terminate_process "jaeger" "${{JAEGER_PID:-}}"
             }}
             trap cleanup EXIT INT TERM
+
+            start_amd_smi_power_daemon() {{
+              if [[ -e "${{AMD_SMI_POWER_SOCKET_PATH}}" && ! -S "${{AMD_SMI_POWER_SOCKET_PATH}}" ]]; then
+                echo "AMD SMI power daemon socket path exists and is not a socket: ${{AMD_SMI_POWER_SOCKET_PATH}}" >&2
+                return 1
+              fi
+
+              echo "Launching AMD SMI power daemon socket=${{AMD_SMI_POWER_SOCKET_PATH}}"
+              "${{AMD_SMI_POWER_DAEMON_BIN}}" \
+                --socket-path "${{AMD_SMI_POWER_SOCKET_PATH}}" \
+                >"${{AMD_SMI_POWER_DAEMON_LOG}}" 2>&1 &
+              AMD_SMI_POWER_DAEMON_PID=$!
+
+              local deadline=$((SECONDS + SERVICE_READY_TIMEOUT_SECONDS))
+              while (( SECONDS < deadline )); do
+                if ! kill -0 "${{AMD_SMI_POWER_DAEMON_PID}}" >/dev/null 2>&1; then
+                  wait "${{AMD_SMI_POWER_DAEMON_PID}}" >/dev/null 2>&1 || true
+                  echo "AMD SMI power daemon exited before readiness. See ${{AMD_SMI_POWER_DAEMON_LOG}}" >&2
+                  return 1
+                fi
+                if [[ -S "${{AMD_SMI_POWER_SOCKET_PATH}}" ]] && probe_unix_socket "${{AMD_SMI_POWER_SOCKET_PATH}}"; then
+                  return 0
+                fi
+                sleep "${{SERVICE_READY_POLL_INTERVAL_SECONDS}}"
+              done
+
+              echo "Timed out waiting for AMD SMI power daemon readiness. See ${{AMD_SMI_POWER_DAEMON_LOG}}" >&2
+              return 1
+            }}
 
             start_shared_jaeger() {{
               apptainer run \
@@ -640,7 +679,7 @@ class EmbeddedTp1Launcher:
 
               local gateway_cmd=(
                 "${{gateway_python}}"
-                -m gateway
+                -m gateway_ctx
                 start
                 --config "${{gateway_config_path}}"
                 --host "${{GATEWAY_HOST}}"
@@ -651,7 +690,7 @@ class EmbeddedTp1Launcher:
                 gateway_cmd+=(--skip-install)
               fi
 
-              echo "Launching gateway profile=${{profile_id}} raw=${{gateway_port}} parsed=${{gateway_parse_port}}"
+              echo "Launching gateway-ctx profile=${{profile_id}} raw=${{gateway_port}} parsed=${{gateway_parse_port}}"
               GATEWAY_JAEGER_API_BASE_URL_OVERRIDE="http://127.0.0.1:${{JAEGER_UI_LOCAL_PORT}}/api/traces" \
               GATEWAY_OTLP_TRACES_ENDPOINT_OVERRIDE="grpc://127.0.0.1:${{JAEGER_OTLP_LOCAL_PORT}}" \
                 "${{gateway_cmd[@]}}" >"${{gateway_log}}" 2>&1 &
@@ -695,6 +734,7 @@ class EmbeddedTp1Launcher:
                 export GATEWAY_BASE_URL="http://127.0.0.1:${{PROFILE_GATEWAY_PORT[$profile_id]}}"
                 export GATEWAY_PARSE_BASE_URL="http://127.0.0.1:${{PROFILE_GATEWAY_PARSE_PORT[$profile_id]}}"
                 export JAEGER_BASE_URL="http://127.0.0.1:${{JAEGER_UI_LOCAL_PORT}}"
+                export AMD_SMI_POWER_SOCKET_PATH="${{AMD_SMI_POWER_SOCKET_PATH}}"
                 "${{EXPERIMENT_RUNNER}}" "${{EXPERIMENT_SCRIPT}}" "${{profile_id}}"
               ) >"${{experiment_log}}" 2>&1 &
               PROFILE_EXPERIMENT_PID["${{profile_id}}"]=$!
@@ -742,6 +782,7 @@ class EmbeddedTp1Launcher:
               done
             }}
 
+            start_amd_smi_power_daemon
             start_shared_jaeger
 {textwrap.indent(launch_vllm_lines, "            ")}
 {textwrap.indent(wait_vllm_lines, "            ")}
@@ -764,7 +805,7 @@ class EmbeddedTp1Launcher:
         return script_path
 
     def _extract_sbatch_job_id(self, text: str) -> str:
-        match = re.search(r"Submitted\\s+batch\\s+job\\s+(\\d+)", text)
+        match = re.search(r"\bSubmitted\s+batch\s+job\s+(\d+)\b", text)
         if match is None:
             raise ControlPlaneError(
                 message="unable to parse sbatch job id",
@@ -773,4 +814,3 @@ class EmbeddedTp1Launcher:
                 details={"sbatch_output": text.strip()},
             )
         return match.group(1)
-

@@ -219,6 +219,46 @@ def test_load_controller_config_uses_shared_context_threshold_default() -> None:
     assert config.target_output_throughput_tokens_per_s == 11.0
 
 
+def test_gateway_ipc_config_prefers_gateway_ctx_socket(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "freq_controller_linespace_slo.DEFAULT_GATEWAY_IPC_SOCKET_DIR",
+        tmp_path,
+    )
+    socket_path = tmp_path / "vllm-gateway-ctx-profile-2.sock"
+    socket_path.touch()
+
+    resolved = GatewayIPCConfig().resolved_socket_path(2)
+
+    assert resolved == socket_path.resolve()
+
+
+def test_gateway_ipc_config_falls_back_to_legacy_socket(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "freq_controller_linespace_slo.DEFAULT_GATEWAY_IPC_SOCKET_DIR",
+        tmp_path,
+    )
+    socket_path = tmp_path / "vllm-gateway-profile-6.sock"
+    socket_path.touch()
+
+    resolved = GatewayIPCConfig().resolved_socket_path(6)
+
+    assert resolved == socket_path.resolve()
+
+
+def test_gateway_ipc_config_defaults_to_gateway_ctx_socket_name(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "freq_controller_linespace_slo.DEFAULT_GATEWAY_IPC_SOCKET_DIR",
+        tmp_path,
+    )
+
+    resolved = GatewayIPCConfig().resolved_socket_path(7)
+
+    assert resolved == (tmp_path / "vllm-gateway-ctx-profile-7.sock").resolve()
+
+
 def test_load_controller_config_requires_output_throughput_target() -> None:
     with pytest.raises(
         ValueError,

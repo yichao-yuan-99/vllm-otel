@@ -27,6 +27,7 @@ def _write_freq_control_summary(
             {
                 "source_run_dir": str(run_dir),
                 "source_type": "replay",
+                "source_freq_control_log_dir_name": summary_dir_name,
                 "freq_control_log_found": True,
                 "query_log_found": True,
                 "decision_log_found": True,
@@ -282,7 +283,8 @@ def test_discover_run_dirs_with_freq_control_summary_scans_recursively(
     good_run = root_dir / "a" / "job-ok"
     good_run_seg = root_dir / "b" / "job-ok-seg"
     good_run_multi = root_dir / "c" / "job-ok-multi"
-    bad_run = root_dir / "b" / "job-missing-summary"
+    good_run_amd = root_dir / "d" / "job-ok-amd"
+    bad_run = root_dir / "e" / "job-missing-summary"
 
     _write_freq_control_summary(good_run)
     _write_freq_control_summary(
@@ -293,6 +295,10 @@ def test_discover_run_dirs_with_freq_control_summary_scans_recursively(
     _write_freq_control_summary(
         good_run_multi,
         summary_dir_name="freq-control-linespace-multi",
+    )
+    _write_freq_control_summary(
+        good_run_amd,
+        summary_dir_name="freq-control-linespace-amd",
     )
     bad_processed_dir = bad_run / "post-processed" / "freq-control"
     bad_processed_dir.mkdir(parents=True)
@@ -305,6 +311,7 @@ def test_discover_run_dirs_with_freq_control_summary_scans_recursively(
         good_run.resolve(),
         good_run_seg.resolve(),
         good_run_multi.resolve(),
+        good_run_amd.resolve(),
     ]
 
 
@@ -467,6 +474,57 @@ def test_generate_figure_for_run_dir_uses_linespace_summary_family(
             / "post-processed"
             / "visualization"
             / "freq-control-linespace"
+        ).resolve()
+    )
+    assert captured_payloads[0]["source_run_dir"] == str(run_dir)
+
+
+def test_generate_figure_for_run_dir_uses_amd_linespace_summary_family(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_dir = tmp_path / "job"
+    summary_path = _write_freq_control_summary(
+        run_dir,
+        summary_dir_name="freq-control-linespace-amd",
+    )
+    captured_payloads: list[dict[str, object]] = []
+
+    def fake_render_freq_control_figure(
+        *,
+        freq_control_payload: dict[str, object],
+        output_path: Path,
+        image_format: str,
+        dpi: int,
+    ) -> bool:
+        del image_format, dpi
+        captured_payloads.append(freq_control_payload)
+        output_path.write_text("fake-image", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(
+        generate_all_figures,
+        "_render_freq_control_figure",
+        fake_render_freq_control_figure,
+    )
+
+    manifest_path = generate_all_figures.generate_figure_for_run_dir(run_dir)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest_path == (
+        run_dir
+        / "post-processed"
+        / "visualization"
+        / "freq-control-linespace-amd"
+        / "figures-manifest.json"
+    ).resolve()
+    assert manifest["source_freq_control_summary_path"] == str(summary_path.resolve())
+    assert manifest["output_dir"] == str(
+        (
+            run_dir
+            / "post-processed"
+            / "visualization"
+            / "freq-control-linespace-amd"
         ).resolve()
     )
     assert captured_payloads[0]["source_run_dir"] == str(run_dir)

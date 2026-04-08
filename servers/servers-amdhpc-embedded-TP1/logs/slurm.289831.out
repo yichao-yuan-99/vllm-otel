@@ -1,0 +1,8 @@
+Embedded TP1 job 289831 starting on k002-004-v7.hpcfund at Tue Apr  7 05:08:30 PM CDT 2026
+Launching AMD SMI power daemon socket=/tmp/amdsmi-power-reader.289831.sock
+Launching vLLM profile=0 port=11451 gpu=0
+Launching gateway profile=0 raw=11457 parsed=18171
+Launching experiment profile=0 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-embedded-TP1/mi3001x/sweep-qps-docker-power-clean-amd/generated/20260407T220804Z/run_replay.sh
+All services are ready; waiting for experiment completion.
+Stopping experiment profile=0 (pid=69735)
+Stopping gateway profile=0 (pid=69705)

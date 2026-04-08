@@ -12,6 +12,7 @@ from typing import Any
 DEFAULT_INPUT_NAME = "freq-control-summary.json"
 SEGMENTED_INPUT_DIR_NAME = "freq-control-seg"
 MULTI_LINESPACE_INPUT_DIR_NAME = "freq-control-linespace-multi"
+AMD_LINESPACE_INPUT_DIR_NAME = "freq-control-linespace-amd"
 LINESPACE_INPUT_DIR_NAME = "freq-control-linespace"
 BASELINE_INPUT_DIR_NAME = "freq-control"
 DEFAULT_MANIFEST_NAME = "figures-manifest.json"
@@ -50,6 +51,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Run result root directory containing post-processed/freq-control/ "
             "or post-processed/freq-control-seg/ or "
             "post-processed/freq-control-linespace-multi/ or "
+            "post-processed/freq-control-linespace-amd/ or "
             "post-processed/freq-control-linespace/."
         ),
     )
@@ -61,6 +63,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "with post-processed/freq-control/freq-control-summary.json or "
             "post-processed/freq-control-seg/freq-control-summary.json or "
             "post-processed/freq-control-linespace-multi/freq-control-summary.json or "
+            "post-processed/freq-control-linespace-amd/freq-control-summary.json or "
             "post-processed/freq-control-linespace/freq-control-summary.json will be processed."
         ),
     )
@@ -71,6 +74,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Optional freq-control summary input path. Default: "
             f"<run-dir>/post-processed/freq-control-seg/{DEFAULT_INPUT_NAME} "
             f"if present, else <run-dir>/post-processed/freq-control-linespace-multi/{DEFAULT_INPUT_NAME} "
+            f"if present, else <run-dir>/post-processed/freq-control-linespace-amd/{DEFAULT_INPUT_NAME} "
             f"if present, else <run-dir>/post-processed/freq-control-linespace/{DEFAULT_INPUT_NAME} "
             f"if present, else <run-dir>/post-processed/freq-control/{DEFAULT_INPUT_NAME}"
         ),
@@ -126,6 +130,12 @@ def _candidate_freq_control_input_paths_for_run(run_dir: Path) -> list[Path]:
             / MULTI_LINESPACE_INPUT_DIR_NAME
             / DEFAULT_INPUT_NAME
         ).resolve(),
+        (
+            run_dir
+            / "post-processed"
+            / AMD_LINESPACE_INPUT_DIR_NAME
+            / DEFAULT_INPUT_NAME
+        ).resolve(),
         (run_dir / "post-processed" / LINESPACE_INPUT_DIR_NAME / DEFAULT_INPUT_NAME).resolve(),
         (run_dir / "post-processed" / BASELINE_INPUT_DIR_NAME / DEFAULT_INPUT_NAME).resolve(),
     ]
@@ -144,6 +154,8 @@ def _summary_dir_name_for_input_path(freq_control_input_path: Path) -> str:
         return SEGMENTED_INPUT_DIR_NAME
     if parent_name == MULTI_LINESPACE_INPUT_DIR_NAME:
         return MULTI_LINESPACE_INPUT_DIR_NAME
+    if parent_name == AMD_LINESPACE_INPUT_DIR_NAME:
+        return AMD_LINESPACE_INPUT_DIR_NAME
     if parent_name == LINESPACE_INPUT_DIR_NAME:
         return LINESPACE_INPUT_DIR_NAME
     return BASELINE_INPUT_DIR_NAME
@@ -163,6 +175,7 @@ def discover_run_dirs_with_freq_control_summary(root_dir: Path) -> list[Path]:
             BASELINE_INPUT_DIR_NAME,
             SEGMENTED_INPUT_DIR_NAME,
             MULTI_LINESPACE_INPUT_DIR_NAME,
+            AMD_LINESPACE_INPUT_DIR_NAME,
             LINESPACE_INPUT_DIR_NAME,
         }:
             continue
@@ -444,6 +457,7 @@ def _build_profile_payload(
         or segment_width_context_usage is not None
         or source_freq_control_log_dir_name in {
             LINESPACE_INPUT_DIR_NAME,
+            AMD_LINESPACE_INPUT_DIR_NAME,
             MULTI_LINESPACE_INPUT_DIR_NAME,
         }
     )

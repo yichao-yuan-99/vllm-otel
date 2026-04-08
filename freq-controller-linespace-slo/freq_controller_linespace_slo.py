@@ -100,7 +100,7 @@ def _parse_frequency_levels(value: object, key: str) -> tuple[int, ...]:
     return tuple(unique_sorted)
 
 
-def _default_gateway_ipc_socket_path(port_profile_id: int | str | None) -> Path:
+def _default_gateway_ipc_socket_paths(port_profile_id: int | str | None) -> tuple[Path, ...]:
     resolved_profile_id = (
         str(DEFAULT_GATEWAY_PORT_PROFILE_ID)
         if port_profile_id is None
@@ -108,7 +108,9 @@ def _default_gateway_ipc_socket_path(port_profile_id: int | str | None) -> Path:
     )
     return (
         DEFAULT_GATEWAY_IPC_SOCKET_DIR
-        / f"vllm-gateway-profile-{resolved_profile_id}.sock"
+        / f"vllm-gateway-ctx-profile-{resolved_profile_id}.sock",
+        DEFAULT_GATEWAY_IPC_SOCKET_DIR
+        / f"vllm-gateway-profile-{resolved_profile_id}.sock",
     )
 
 
@@ -162,7 +164,14 @@ class GatewayIPCConfig:
     def resolved_socket_path(self, port_profile_id: int) -> Path:
         if self.ipc_socket_path:
             return Path(self.ipc_socket_path).expanduser().resolve()
-        return _default_gateway_ipc_socket_path(port_profile_id).resolve()
+        candidates = tuple(
+            candidate.resolve()
+            for candidate in _default_gateway_ipc_socket_paths(port_profile_id)
+        )
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return candidates[0]
 
     def to_log_payload(self, *, port_profile_id: int) -> dict[str, Any]:
         return {
