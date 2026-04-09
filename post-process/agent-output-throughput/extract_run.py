@@ -28,6 +28,7 @@ from pp_common.profile_id import profile_label
 
 DEFAULT_OUTPUT_NAME = "agent-output-throughput.json"
 DEFAULT_THROUGHPUT_HISTOGRAM_BIN_SIZE = 1.0
+DEFAULT_SUMMARY_PERCENTILES = tuple(range(5, 100, 5))
 
 _INTEGER_PATTERN = re.compile(r"[-+]?\d+")
 
@@ -341,17 +342,48 @@ def _summarize_values(values: list[float]) -> dict[str, Any]:
             "min": None,
             "max": None,
             "std": None,
+            "percentiles": {
+                str(percentile): None for percentile in DEFAULT_SUMMARY_PERCENTILES
+            },
         }
 
-    avg_value = sum(values) / len(values)
+    sorted_values = sorted(float(value) for value in values)
+    avg_value = sum(sorted_values) / len(sorted_values)
     variance = sum((value - avg_value) ** 2 for value in values) / len(values)
     return {
         "sample_count": len(values),
         "avg": round(avg_value, 6),
-        "min": round(min(values), 6),
-        "max": round(max(values), 6),
+        "min": round(sorted_values[0], 6),
+        "max": round(sorted_values[-1], 6),
         "std": round(math.sqrt(variance), 6),
+        "percentiles": {
+            str(percentile): round(
+                _percentile_from_sorted(sorted_values, percentile / 100.0),
+                6,
+            )
+            for percentile in DEFAULT_SUMMARY_PERCENTILES
+        },
     }
+
+
+def _percentile_from_sorted(sorted_values: list[float], quantile: float) -> float | None:
+    if not sorted_values:
+        return None
+    if quantile <= 0.0:
+        return float(sorted_values[0])
+    if quantile >= 1.0:
+        return float(sorted_values[-1])
+
+    position = (len(sorted_values) - 1) * quantile
+    lower_index = int(math.floor(position))
+    upper_index = int(math.ceil(position))
+    if lower_index == upper_index:
+        return float(sorted_values[lower_index])
+
+    fraction = position - lower_index
+    lower_value = float(sorted_values[lower_index])
+    upper_value = float(sorted_values[upper_index])
+    return lower_value * (1.0 - fraction) + upper_value * fraction
 
 
 def build_agent_output_throughput_histogram(

@@ -90,6 +90,8 @@ Top-level fields include:
   - `min`
   - `max`
   - `std`
+  - `percentiles`
+    - keys `"5"`, `"10"`, ..., `"95"` with interpolated percentile values
 - `agent_output_throughput_tokens_per_s_histogram`
   - `metric`
   - `bin_size`

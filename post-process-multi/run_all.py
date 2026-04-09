@@ -45,6 +45,7 @@ VISUALIZATION_STEPS = [
     "visualization/prefill-concurrency/generate_all_figures.py",
     "visualization/gateway-stack/generate_all_figures.py",
     "visualization/gateway-stack-context/generate_all_figures.py",
+    "visualization/stacked-per-agent/generate_all_figures.py",
     "visualization/gateway-ctx-aware/generate_all_figures.py",
     "visualization/gateway-slo-aware/generate_all_figures.py",
     "visualization/gateway-stack-kv/generate_all_figures.py",

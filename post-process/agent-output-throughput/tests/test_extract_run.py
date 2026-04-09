@@ -25,6 +25,23 @@ def _write_jsonl(path: Path, records: list[dict[str, object]]) -> None:
     )
 
 
+def _expected_percentile(sorted_values: list[float], percentile: int) -> float:
+    quantile = percentile / 100.0
+    if quantile <= 0.0:
+        return float(sorted_values[0])
+    if quantile >= 1.0:
+        return float(sorted_values[-1])
+    position = (len(sorted_values) - 1) * quantile
+    lower_index = math.floor(position)
+    upper_index = math.ceil(position)
+    if lower_index == upper_index:
+        return float(sorted_values[lower_index])
+    fraction = position - lower_index
+    lower_value = float(sorted_values[lower_index])
+    upper_value = float(sorted_values[upper_index])
+    return lower_value * (1.0 - fraction) + upper_value * fraction
+
+
 def test_extract_run_generates_run_and_agent_output_throughput_summary(
     tmp_path: Path,
 ) -> None:
@@ -132,6 +149,14 @@ def test_extract_run_generates_run_and_agent_output_throughput_summary(
         / 2.0
     )
     assert throughput_summary["std"] == pytest.approx(expected_std)
+    sorted_throughputs = sorted([7.5, 20.0 / 6.5])
+    assert set(throughput_summary["percentiles"]) == {
+        str(percentile) for percentile in extract_run.DEFAULT_SUMMARY_PERCENTILES
+    }
+    for percentile in extract_run.DEFAULT_SUMMARY_PERCENTILES:
+        assert throughput_summary["percentiles"][str(percentile)] == pytest.approx(
+            _expected_percentile(sorted_throughputs, percentile)
+        )
 
     histogram = payload["agent_output_throughput_tokens_per_s_histogram"]
     assert histogram["metric"] == "output_throughput_tokens_per_s"
@@ -276,6 +301,25 @@ def test_extract_run_reads_profile_id_from_gateway_run_manifest_in_flat_layout(
     assert [agent["gateway_profile_id"] for agent in payload["agents"]] == [2, 13]
     assert payload["series_by_profile"]["profile-2"]["gateway_profile_id"] == 2
     assert payload["series_by_profile"]["profile-13"]["gateway_profile_id"] == 13
+
+
+def test_summarize_values_includes_every_5_percentile() -> None:
+    values = [1.0, 2.0, 4.0, 8.0]
+
+    summary = extract_run._summarize_values(values)
+
+    assert summary["sample_count"] == 4
+    assert summary["avg"] == pytest.approx(3.75)
+    assert summary["min"] == pytest.approx(1.0)
+    assert summary["max"] == pytest.approx(8.0)
+    assert set(summary["percentiles"]) == {
+        str(percentile) for percentile in extract_run.DEFAULT_SUMMARY_PERCENTILES
+    }
+    sorted_values = sorted(values)
+    for percentile in extract_run.DEFAULT_SUMMARY_PERCENTILES:
+        assert summary["percentiles"][str(percentile)] == pytest.approx(
+            _expected_percentile(sorted_values, percentile)
+        )
 
 
 def test_extract_run_dir_writes_separate_per_profile_files(tmp_path: Path) -> None:
