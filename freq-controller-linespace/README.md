@@ -82,6 +82,13 @@ freq-controller-linespace \
   --gpu-index 0
 ```
 
+If `gateway.ipc_socket_path` is not set, the controller auto-selects the
+per-profile IPC socket under `/tmp/` and prefers an active `gateway_ctx`
+listener when present:
+
+- `/tmp/vllm-gateway-ctx-profile-<port_profile_id>.sock`
+- `/tmp/vllm-gateway-profile-<port_profile_id>.sock`
+
 Logs are written as:
 
 ```text

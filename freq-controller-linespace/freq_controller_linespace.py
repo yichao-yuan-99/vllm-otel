@@ -8,6 +8,7 @@ from collections import deque
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import datetime, timezone
+import errno
 import http.client
 import json
 import math
@@ -37,6 +38,7 @@ DEFAULT_ZEUSD_SOCKET_PATH = "/var/run/zeusd.sock"
 DEFAULT_GPU_INDEX = 0
 DEFAULT_GATEWAY_TIMEOUT_S = 5.0
 DEFAULT_LOG_FILE_PREFIX = "freq-controller-ls"
+DEFAULT_GATEWAY_SOCKET_PROBE_TIMEOUT_S = 0.2
 
 
 def now_iso8601_utc() -> str:
@@ -100,16 +102,64 @@ def _parse_frequency_levels(value: object, key: str) -> tuple[int, ...]:
     return tuple(unique_sorted)
 
 
-def _default_gateway_ipc_socket_path(port_profile_id: int | str | None) -> Path:
+def _gateway_ipc_socket_path(
+    port_profile_id: int | str | None,
+    *,
+    gateway_ctx: bool,
+) -> Path:
     resolved_profile_id = (
         str(DEFAULT_GATEWAY_PORT_PROFILE_ID)
         if port_profile_id is None
         else str(port_profile_id)
     )
+    socket_prefix = (
+        "vllm-gateway-ctx-profile" if gateway_ctx else "vllm-gateway-profile"
+    )
     return (
         DEFAULT_GATEWAY_IPC_SOCKET_DIR
-        / f"vllm-gateway-profile-{resolved_profile_id}.sock"
+        / f"{socket_prefix}-{resolved_profile_id}.sock"
     )
+
+
+def _unix_socket_accepting_connections(socket_path: Path) -> bool:
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        probe.settimeout(DEFAULT_GATEWAY_SOCKET_PROBE_TIMEOUT_S)
+        probe.connect(str(socket_path))
+    except FileNotFoundError:
+        return False
+    except ConnectionRefusedError:
+        return False
+    except OSError as exc:
+        if exc.errno in {errno.ENOENT, errno.ECONNREFUSED}:
+            return False
+        return False
+    else:
+        return True
+    finally:
+        probe.close()
+
+
+def _default_gateway_ipc_socket_path(port_profile_id: int | str | None) -> Path:
+    gateway_socket_path = _gateway_ipc_socket_path(
+        port_profile_id,
+        gateway_ctx=False,
+    )
+    gateway_ctx_socket_path = _gateway_ipc_socket_path(
+        port_profile_id,
+        gateway_ctx=True,
+    )
+    gateway_socket_active = _unix_socket_accepting_connections(gateway_socket_path)
+    gateway_ctx_socket_active = _unix_socket_accepting_connections(
+        gateway_ctx_socket_path
+    )
+    if gateway_ctx_socket_active and not gateway_socket_active:
+        return gateway_ctx_socket_path
+    if gateway_socket_active and not gateway_ctx_socket_active:
+        return gateway_socket_path
+    if gateway_ctx_socket_path.exists() and not gateway_socket_path.exists():
+        return gateway_ctx_socket_path
+    return gateway_socket_path
 
 
 def _lookup_first(mapping: dict[str, Any], keys: Sequence[str]) -> Any:

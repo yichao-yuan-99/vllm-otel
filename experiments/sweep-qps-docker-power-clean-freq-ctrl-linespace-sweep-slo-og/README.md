@@ -16,7 +16,8 @@ For every `(qps, target_slo)` replay job:
 - `freq-controller-linespace` starts independently with its usual arguments:
   `--log-dir`, `--threshold`, `--port-profile-id`, and `--gpu-index`
 - the controller does not receive `--throughput-target`
-- the controller does not receive `--gateway-ipc-socket-path`
+- the controller does not receive `--gateway-ipc-socket-path`; it auto-detects
+  the matching per-profile `gateway_ctx` IPC socket when available
 - after the replay finishes, the runner stops the controller and calls
   `POST /slo-aware/end` and `POST /ctx-aware/end`
 
