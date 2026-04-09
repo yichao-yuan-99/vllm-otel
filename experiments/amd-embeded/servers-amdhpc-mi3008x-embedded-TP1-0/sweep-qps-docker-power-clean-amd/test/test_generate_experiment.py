@@ -12,13 +12,13 @@ from pathlib import Path
 def load_generator_module() -> object:
     module_path = (Path(__file__).resolve().parents[1] / "generate_experiment.py").resolve()
     spec = importlib.util.spec_from_file_location(
-        "generate_amd_embedded_tp1_sweep_qps_freq_ctrl_linespace_amd_experiment",
+        "generate_amd_embedded_tp1_sweep_qps_power_clean_amd_experiment",
         module_path,
     )
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Unable to load module from {module_path}")
     module = importlib.util.module_from_spec(spec)
-    sys.modules["generate_amd_embedded_tp1_sweep_qps_freq_ctrl_linespace_amd_experiment"] = (
+    sys.modules["generate_amd_embedded_tp1_sweep_qps_power_clean_amd_experiment"] = (
         module
     )
     spec.loader.exec_module(module)
@@ -96,7 +96,7 @@ def prepare_module_and_source_run(
     return module, source_run_dir
 
 
-def test_main_generates_embedded_tp1_amd_freq_ctrl_bundle(tmp_path: Path) -> None:
+def test_main_generates_mi3008x_amd_power_clean_bundle(tmp_path: Path) -> None:
     module, source_run_dir = prepare_module_and_source_run(tmp_path)
     output_config_dir = tmp_path / "generated"
 
@@ -138,8 +138,8 @@ def test_main_generates_embedded_tp1_amd_freq_ctrl_bundle(tmp_path: Path) -> Non
     assert replay_qps025["launch_policy_override"]["seed"] == 7
     assert replay_qps025["plan"] == module.BASE.path_for_config(expected_plan_copy)
     assert replay_qps025["output_dir"].endswith(
-        "results/replay/amd-embeded/servers-amdhpc-mi3001x-embedded-TP1/"
-        "sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/"
+        "results/replay/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1-0/"
+        "sweep-qps-docker-power-clean-amd/"
         f"dataset-a/agent-a/split/rest/qps0_25/{batch_timestamp}"
     )
 
@@ -159,95 +159,41 @@ def test_main_generates_embedded_tp1_amd_freq_ctrl_bundle(tmp_path: Path) -> Non
     assert manifest["gpu_index"] == 0
     assert manifest["gpu_index_runtime_default"] == 0
     assert manifest["profile_output_suffix"] == "profile-<port_profile_id>"
-    assert (
-        manifest["ctx_aware_usage_threshold_tokens"]
-        == module.DEFAULT_CTX_AWARE_USAGE_THRESHOLD_TOKENS
-    )
-    assert (
-        manifest["ctx_aware_scheduling_threshold_tokens"]
-        == module.DEFAULT_CTX_AWARE_SCHEDULING_THRESHOLD_TOKENS
-    )
-    assert manifest["freq_controller_threshold"] == module.DEFAULT_FREQ_CONTROLLER_THRESHOLD
     assert manifest["selected_source_plan"].endswith("replay-plan.clean.token.rest.json")
     assert manifest["selected_plan_copy"] == str(expected_plan_copy)
     assert len(manifest["qps_points"]) == 2
     assert manifest["qps_points"][0]["qps"] == 0.25
     assert manifest["qps_points"][0]["qps_slug"] == "qps0_25"
     assert manifest["qps_points"][0]["replay_output_dir"].endswith(
-        "results/replay/amd-embeded/servers-amdhpc-mi3001x-embedded-TP1/"
-        "sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/"
+        "results/replay/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1-0/"
+        "sweep-qps-docker-power-clean-amd/"
         f"dataset-a/agent-a/split/rest/qps0_25/{batch_timestamp}/profile-<port_profile_id>"
     )
     assert manifest["qps_points"][0]["power_output_dir"].endswith(
-        "results/replay/amd-embeded/servers-amdhpc-mi3001x-embedded-TP1/"
-        "sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/"
+        "results/replay/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1-0/"
+        "sweep-qps-docker-power-clean-amd/"
         f"dataset-a/agent-a/split/rest/qps0_25/{batch_timestamp}/profile-<port_profile_id>/power"
-    )
-    assert manifest["qps_points"][0]["freq_controller_log_dir"].endswith(
-        "results/replay/amd-embeded/servers-amdhpc-mi3001x-embedded-TP1/"
-        "sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/"
-        f"dataset-a/agent-a/split/rest/qps0_25/{batch_timestamp}/"
-        "profile-<port_profile_id>/freq-control-linespace-amd"
     )
     assert manifest["run_command_with_port_profile"].endswith("run_replay.sh 0")
     assert manifest["submit_command_default"].endswith("submit_embedded_tp1.sh")
-    assert "servers/servers-amdhpc-mi3001x-embedded-TP1/launch.py submit" in manifest[
+    assert "servers/servers-amdhpc-mi3008x-embedded-TP1-0/launch.py submit" in manifest[
         "embedded_tp1_submit_command"
     ]
 
     run_script_path = batch_dir / "run_replay.sh"
     run_script_text = run_script_path.read_text(encoding="utf-8")
-    default_amd_power_reader_bin = (
-        module.REPO_ROOT / ".venv" / "bin" / "amd-power-reader"
-    ).resolve()
-    default_freq_controller_bin = (
-        module.REPO_ROOT / ".venv" / "bin" / "freq-controller-linespace-amd"
-    ).resolve()
-    default_reset_gpu_core_freq_bin = (
-        module.REPO_ROOT / ".venv" / "bin" / "amd-reset-gpu-core-freq"
-    ).resolve()
-    assert "[amd-embeded-servers-amdhpc-mi3001x-embedded-TP1-sweep-qps-docker-power-clean-freq-ctrl-linespace-amd]" in run_script_text
+    assert "[amd-embeded-servers-amdhpc-mi3008x-embedded-TP1-0-sweep-qps-docker-power-clean-amd]" in run_script_text
     assert "DEFAULT_PORT_PROFILE_ID=0" in run_script_text
     assert "DEFAULT_GPU_INDEX=0" in run_script_text
+    assert 'PORT_PROFILE_ID_VALUE="${1:-${PORT_PROFILE_ID:-${DEFAULT_PORT_PROFILE_ID}}}"' in run_script_text
     assert 'GPU_INDEX_VALUE="${GPU_INDEX:-${DEFAULT_GPU_INDEX}}"' in run_script_text
-    assert f"DEFAULT_AMD_POWER_READER_BIN={default_amd_power_reader_bin}" in run_script_text
-    assert f"DEFAULT_FREQ_CONTROLLER_BIN={default_freq_controller_bin}" in run_script_text
-    assert (
-        f"DEFAULT_RESET_GPU_CORE_FREQ_BIN={default_reset_gpu_core_freq_bin}"
-        in run_script_text
-    )
-    assert (
-        'AMD_POWER_READER_BIN="${AMD_POWER_READER_BIN:-${DEFAULT_AMD_POWER_READER_BIN}}"'
-        in run_script_text
-    )
-    assert (
-        'FREQ_CONTROLLER_BIN="${FREQ_CONTROLLER_BIN:-${DEFAULT_FREQ_CONTROLLER_BIN}}"'
-        in run_script_text
-    )
-    assert (
-        'RESET_GPU_CORE_FREQ_BIN="${RESET_GPU_CORE_FREQ_BIN:-${DEFAULT_RESET_GPU_CORE_FREQ_BIN}}"'
-        in run_script_text
-    )
+    assert 'AMD_POWER_READER_BIN="${AMD_POWER_READER_BIN:-amd-power-reader}"' in run_script_text
     assert 'AMD_SMI_POWER_SOCKET_PATH_VALUE="${AMD_SMI_POWER_SOCKET_PATH:-/tmp/amdsmi-power-reader.sock}"' in run_script_text
-    assert 'GATEWAY_BASE_URL_VALUE="${GATEWAY_BASE_URL:-}"' in run_script_text
-    assert 'FREQ_CONTROLLER_CONFIG_VALUE="${FREQ_CONTROLLER_CONFIG:-}"' in run_script_text
     assert "normalize_port_profile_id() {" in run_script_text
     assert "normalize_gpu_index() {" in run_script_text
-    assert "start_ctx_aware_mode" in run_script_text
-    assert "end_ctx_aware_mode" in run_script_text
-    assert "stop_freq_controller" in run_script_text
-    assert "reset_gpu_core_if_needed" in run_script_text
-    assert '${GATEWAY_BASE_URL_RESOLVED}/ctx-aware/start' in run_script_text
-    assert '${GATEWAY_BASE_URL_RESOLVED}/ctx-aware/end' in run_script_text
     assert 'replay_output_dir="${replay_output_base_dir}/profile-${PORT_PROFILE_ID_VALUE}"' in run_script_text
-    assert 'power_output_dir="${replay_output_dir}/power"' in run_script_text
-    assert 'freq_controller_log_dir="${replay_output_dir}/freq-control-linespace-amd"' in run_script_text
+    assert 'local power_output_dir="${replay_output_dir}/power"' in run_script_text
     assert '"${AMD_POWER_READER_BIN}" --output-dir "${power_output_dir}" --gpu-indices "${GPU_INDEX_VALUE}" --socket-path "${AMD_SMI_POWER_SOCKET_PATH_VALUE}" &' in run_script_text
-    assert '"${FREQ_CONTROLLER_BIN}"' in run_script_text
-    assert '"--threshold" "${FREQ_CONTROLLER_THRESHOLD_VALUE}"' in run_script_text
-    assert '"--port-profile-id" "${PORT_PROFILE_ID_VALUE}"' in run_script_text
-    assert '"--gpu-index" "${GPU_INDEX_VALUE}"' in run_script_text
-    assert '"${RESET_GPU_CORE_FREQ_BIN}" --gpu-index "${GPU_INDEX_VALUE}"' in run_script_text
     assert '    --output-dir "${replay_output_dir}" \\' in run_script_text
     assert '    --port-profile-id "${PORT_PROFILE_ID_VALUE}"' in run_script_text
     assert "run_one_qps 0.25 qps0_25 qps0_25/replay.toml" in run_script_text
@@ -259,7 +205,7 @@ def test_main_generates_embedded_tp1_amd_freq_ctrl_bundle(tmp_path: Path) -> Non
     assert 'PYTHON_BIN="${PYTHON_BIN:-python3}"' in submit_script_text
     assert (
         'EMBEDDED_TP1_LAUNCH_SCRIPT="${EMBEDDED_TP1_LAUNCH_SCRIPT:-'
-        'servers/servers-amdhpc-mi3001x-embedded-TP1/launch.py}"'
+        'servers/servers-amdhpc-mi3008x-embedded-TP1-0/launch.py}"'
     ) in submit_script_text
     assert 'RUN_SCRIPT_PATH="${SCRIPT_DIR}/run_replay.sh"' in submit_script_text
     assert 'exec "${PYTHON_BIN}" "${EMBEDDED_TP1_LAUNCH_SCRIPT}" submit \\' in submit_script_text
@@ -271,9 +217,7 @@ def test_main_generates_embedded_tp1_amd_freq_ctrl_bundle(tmp_path: Path) -> Non
     assert submit_script_path.stat().st_mode & stat.S_IXUSR
 
 
-def test_main_supports_gpu_index_additional_suffix_output_suffix_and_custom_thresholds(
-    tmp_path: Path,
-) -> None:
+def test_main_supports_additional_suffix(tmp_path: Path) -> None:
     module, source_run_dir = prepare_module_and_source_run(tmp_path, suffix="fp8")
     output_config_dir = tmp_path / "generated"
 
@@ -291,22 +235,10 @@ def test_main_supports_gpu_index_additional_suffix_output_suffix_and_custom_thre
             "600",
             "--target-model",
             "test_model",
-            "--port-profile",
-            "0",
-            "--gpu-index",
-            "0",
             "--split",
             "full",
             "--additional-suffix",
             "fp8",
-            "--output-suffix",
-            "lmcache",
-            "--ctx-aware-usage-threshold-tokens",
-            "600000",
-            "--ctx-aware-scheduling-threshold-tokens",
-            "500000",
-            "--freq-controller-threshold",
-            "200",
             "--output-config-dir",
             str(output_config_dir),
         ]
@@ -321,8 +253,8 @@ def test_main_supports_gpu_index_additional_suffix_output_suffix_and_custom_thre
         (batch_dir / "qps0_5" / "replay.toml").read_text(encoding="utf-8")
     )
     assert replay_config["replay"]["output_dir"].endswith(
-        "results/replay/amd-embeded/servers-amdhpc-mi3001x-embedded-TP1/"
-        "sweep-qps-docker-power-clean-freq-ctrl-linespace-amd-lmcache/"
+        "results/replay/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1-0/"
+        "sweep-qps-docker-power-clean-amd/"
         f"dataset-a/agent-a/split/exclude-unranked/qps0_5/{batch_timestamp}"
     )
     assert replay_config["replay"]["plan"] == module.BASE.path_for_config(expected_plan_copy)
@@ -331,33 +263,20 @@ def test_main_supports_gpu_index_additional_suffix_output_suffix_and_custom_thre
     manifest = json.loads((batch_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["split"] == "exclude-unranked"
     assert manifest["additional_suffix"] == "fp8"
-    assert manifest["output_suffix"] == "lmcache"
-    assert manifest["port_profile"] == 0
-    assert manifest["default_port_profile"] == 0
+    assert manifest["gpu_index"] == 0
+    assert manifest["gpu_index_runtime_default"] == 0
+    assert manifest["submit_command_default"].endswith("submit_embedded_tp1.sh")
     assert manifest["selected_source_plan"].endswith(
         "replay-plan.clean.token.exclude-unranked.fp8.json"
     )
     assert manifest["selected_plan_copy"] == str(expected_plan_copy)
-    assert manifest["gpu_index"] == 0
-    assert manifest["gpu_index_runtime_default"] == 0
-    assert manifest["ctx_aware_usage_threshold_tokens"] == 600000
-    assert manifest["ctx_aware_scheduling_threshold_tokens"] == 500000
-    assert manifest["freq_controller_threshold"] == 200.0
-    assert manifest["submit_command_default"].endswith("submit_embedded_tp1.sh")
-    assert manifest["replay_output_root_dir"].endswith(
-        "results/replay/amd-embeded/servers-amdhpc-mi3001x-embedded-TP1/"
-        "sweep-qps-docker-power-clean-freq-ctrl-linespace-amd-lmcache"
-    )
 
     run_script_text = (batch_dir / "run_replay.sh").read_text(encoding="utf-8")
     assert "DEFAULT_PORT_PROFILE_ID=0" in run_script_text
     assert "DEFAULT_GPU_INDEX=0" in run_script_text
-    assert "DEFAULT_CTX_AWARE_USAGE_THRESHOLD_TOKENS=600000" in run_script_text
-    assert "DEFAULT_CTX_AWARE_SCHEDULING_THRESHOLD_TOKENS=500000" in run_script_text
-    assert "DEFAULT_FREQ_CONTROLLER_THRESHOLD=200.0" in run_script_text
 
 
-def test_main_rejects_negative_default_port_profile(tmp_path: Path) -> None:
+def test_main_rejects_nonzero_port_profile(tmp_path: Path) -> None:
     module, source_run_dir = prepare_module_and_source_run(tmp_path)
     output_config_dir = tmp_path / "generated"
 
@@ -376,7 +295,7 @@ def test_main_rejects_negative_default_port_profile(tmp_path: Path) -> None:
             "--target-model",
             "test_model",
             "--port-profile",
-            "-1",
+            "1",
             "--split",
             "rest",
             "--output-config-dir",
@@ -387,7 +306,7 @@ def test_main_rejects_negative_default_port_profile(tmp_path: Path) -> None:
     assert exit_code == 1
 
 
-def test_main_rejects_invalid_ctx_aware_threshold_order(tmp_path: Path) -> None:
+def test_main_rejects_nonzero_gpu_index(tmp_path: Path) -> None:
     module, source_run_dir = prepare_module_and_source_run(tmp_path)
     output_config_dir = tmp_path / "generated"
 
@@ -405,42 +324,10 @@ def test_main_rejects_invalid_ctx_aware_threshold_order(tmp_path: Path) -> None:
             "600",
             "--target-model",
             "test_model",
+            "--gpu-index",
+            "1",
             "--split",
             "rest",
-            "--ctx-aware-usage-threshold-tokens",
-            "5000",
-            "--ctx-aware-scheduling-threshold-tokens",
-            "5000",
-            "--output-config-dir",
-            str(output_config_dir),
-        ]
-    )
-
-    assert exit_code == 1
-
-
-def test_main_rejects_empty_output_suffix(tmp_path: Path) -> None:
-    module, source_run_dir = prepare_module_and_source_run(tmp_path)
-    output_config_dir = tmp_path / "generated"
-
-    exit_code = module.main(
-        [
-            "--source-run-dir",
-            str(source_run_dir),
-            "--poisson-seed",
-            "7",
-            "--randomize-seed",
-            "11",
-            "--qps-list",
-            "0.25",
-            "--time-constraint-s",
-            "600",
-            "--target-model",
-            "test_model",
-            "--split",
-            "rest",
-            "--output-suffix",
-            "   ",
             "--output-config-dir",
             str(output_config_dir),
         ]

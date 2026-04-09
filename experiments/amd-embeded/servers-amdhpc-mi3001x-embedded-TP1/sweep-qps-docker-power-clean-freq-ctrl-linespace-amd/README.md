@@ -30,15 +30,34 @@ python3 -m pip install -e './freq-controller-linespace-amd'
 
 ## Generate One Sweep Bundle
 
+Non-FP8 example that works with the clean plans already present under
+`results/qwen3-coder-30b/swebench-verified/mini-swe-agent/swebench-verified-20260306T062226Z/`:
+
 ```bash
 python3 experiments/amd-embeded/servers-amdhpc-mi3001x-embedded-TP1/sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/generate_experiment.py \
-  --source-run-dir results/qwen3-coder-30b/dabstep/mini-swe-agent/dabstep-20260306T194929Z \
+  --source-run-dir results/qwen3-coder-30b/swebench-verified/mini-swe-agent/swebench-verified-20260306T062226Z/ \
   --poisson-seed 7 \
   --randomize-seed 11 \
-  --qps-list 0.25,0.3,0.35 \
-  --time-constraint-s 12600 \
+  --qps-list 0.1 \
+  --time-constraint-s 3600 \
+  --target-model qwen3_coder_30b \
+  --split exclude-unranked
+```
+
+FP8 example with the same source run and shape as the non-FP8 example.
+This requires suffixed clean plans such as
+`replay-plan.clean.token.exclude-unranked.qwen3_fp8.json`:
+
+```bash
+python3 experiments/amd-embeded/servers-amdhpc-mi3001x-embedded-TP1/sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/generate_experiment.py \
+  --source-run-dir results/qwen3-coder-30b/swebench-verified/mini-swe-agent/swebench-verified-20260306T062226Z/ \
+  --poisson-seed 7 \
+  --randomize-seed 11 \
+  --qps-list 0.1 \
+  --time-constraint-s 3600 \
   --target-model qwen3_coder_30b_fp8 \
-  --split rest
+  --split exclude-unranked \
+  --additional-suffix qwen3_fp8
 ```
 
 Optional overrides:
@@ -48,6 +67,9 @@ Optional overrides:
 - `--freq-controller-threshold`
 - `--additional-suffix`
 - `--output-suffix`
+
+Use `--additional-suffix qwen3_fp8` when the source run only has suffixed
+clean plans, for example `replay-plan.clean.token.exclude-unranked.qwen3_fp8.json`.
 
 This `mi3001x` workflow assumes `port_profile_id=0` and `gpu_index=0`.
 The compatibility flags `--port-profile` and `--gpu-index` still exist, but
@@ -89,9 +111,11 @@ Equivalent raw command:
 
 ```bash
 python3 servers/servers-amdhpc-mi3001x-embedded-TP1/launch.py submit \
-  -m qwen3_coder_30b_fp8 \
+  -m <target-model> \
   -e ./experiments/amd-embeded/servers-amdhpc-mi3001x-embedded-TP1/sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/generated/<timestamp>/run_replay.sh
 ```
+
+`<target-model>` must match the `--target-model` used when generating the bundle.
 
 Default replay output layout:
 

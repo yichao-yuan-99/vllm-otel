@@ -138,7 +138,7 @@ def test_main_generates_embedded_tp1_amd_freq_ctrl_bundle(tmp_path: Path) -> Non
     assert replay_qps025["launch_policy_override"]["seed"] == 7
     assert replay_qps025["plan"] == module.BASE.path_for_config(expected_plan_copy)
     assert replay_qps025["output_dir"].endswith(
-        "results/replay/amd-embeded/servers-amdhpc-mi3001x-embedded-TP1/"
+        "results/replay/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1-0/"
         "sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/"
         f"dataset-a/agent-a/split/rest/qps0_25/{batch_timestamp}"
     )
@@ -174,60 +174,36 @@ def test_main_generates_embedded_tp1_amd_freq_ctrl_bundle(tmp_path: Path) -> Non
     assert manifest["qps_points"][0]["qps"] == 0.25
     assert manifest["qps_points"][0]["qps_slug"] == "qps0_25"
     assert manifest["qps_points"][0]["replay_output_dir"].endswith(
-        "results/replay/amd-embeded/servers-amdhpc-mi3001x-embedded-TP1/"
+        "results/replay/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1-0/"
         "sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/"
         f"dataset-a/agent-a/split/rest/qps0_25/{batch_timestamp}/profile-<port_profile_id>"
     )
     assert manifest["qps_points"][0]["power_output_dir"].endswith(
-        "results/replay/amd-embeded/servers-amdhpc-mi3001x-embedded-TP1/"
+        "results/replay/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1-0/"
         "sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/"
         f"dataset-a/agent-a/split/rest/qps0_25/{batch_timestamp}/profile-<port_profile_id>/power"
     )
     assert manifest["qps_points"][0]["freq_controller_log_dir"].endswith(
-        "results/replay/amd-embeded/servers-amdhpc-mi3001x-embedded-TP1/"
+        "results/replay/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1-0/"
         "sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/"
         f"dataset-a/agent-a/split/rest/qps0_25/{batch_timestamp}/"
         "profile-<port_profile_id>/freq-control-linespace-amd"
     )
     assert manifest["run_command_with_port_profile"].endswith("run_replay.sh 0")
     assert manifest["submit_command_default"].endswith("submit_embedded_tp1.sh")
-    assert "servers/servers-amdhpc-mi3001x-embedded-TP1/launch.py submit" in manifest[
+    assert "servers/servers-amdhpc-mi3008x-embedded-TP1-0/launch.py submit" in manifest[
         "embedded_tp1_submit_command"
     ]
 
     run_script_path = batch_dir / "run_replay.sh"
     run_script_text = run_script_path.read_text(encoding="utf-8")
-    default_amd_power_reader_bin = (
-        module.REPO_ROOT / ".venv" / "bin" / "amd-power-reader"
-    ).resolve()
-    default_freq_controller_bin = (
-        module.REPO_ROOT / ".venv" / "bin" / "freq-controller-linespace-amd"
-    ).resolve()
-    default_reset_gpu_core_freq_bin = (
-        module.REPO_ROOT / ".venv" / "bin" / "amd-reset-gpu-core-freq"
-    ).resolve()
-    assert "[amd-embeded-servers-amdhpc-mi3001x-embedded-TP1-sweep-qps-docker-power-clean-freq-ctrl-linespace-amd]" in run_script_text
+    assert "[amd-embeded-servers-amdhpc-mi3008x-embedded-TP1-0-sweep-qps-docker-power-clean-freq-ctrl-linespace-amd]" in run_script_text
     assert "DEFAULT_PORT_PROFILE_ID=0" in run_script_text
     assert "DEFAULT_GPU_INDEX=0" in run_script_text
     assert 'GPU_INDEX_VALUE="${GPU_INDEX:-${DEFAULT_GPU_INDEX}}"' in run_script_text
-    assert f"DEFAULT_AMD_POWER_READER_BIN={default_amd_power_reader_bin}" in run_script_text
-    assert f"DEFAULT_FREQ_CONTROLLER_BIN={default_freq_controller_bin}" in run_script_text
-    assert (
-        f"DEFAULT_RESET_GPU_CORE_FREQ_BIN={default_reset_gpu_core_freq_bin}"
-        in run_script_text
-    )
-    assert (
-        'AMD_POWER_READER_BIN="${AMD_POWER_READER_BIN:-${DEFAULT_AMD_POWER_READER_BIN}}"'
-        in run_script_text
-    )
-    assert (
-        'FREQ_CONTROLLER_BIN="${FREQ_CONTROLLER_BIN:-${DEFAULT_FREQ_CONTROLLER_BIN}}"'
-        in run_script_text
-    )
-    assert (
-        'RESET_GPU_CORE_FREQ_BIN="${RESET_GPU_CORE_FREQ_BIN:-${DEFAULT_RESET_GPU_CORE_FREQ_BIN}}"'
-        in run_script_text
-    )
+    assert 'AMD_POWER_READER_BIN="${AMD_POWER_READER_BIN:-amd-power-reader}"' in run_script_text
+    assert 'FREQ_CONTROLLER_BIN="${FREQ_CONTROLLER_BIN:-freq-controller-linespace-amd}"' in run_script_text
+    assert 'RESET_GPU_CORE_FREQ_BIN="${RESET_GPU_CORE_FREQ_BIN:-amd-reset-gpu-core-freq}"' in run_script_text
     assert 'AMD_SMI_POWER_SOCKET_PATH_VALUE="${AMD_SMI_POWER_SOCKET_PATH:-/tmp/amdsmi-power-reader.sock}"' in run_script_text
     assert 'GATEWAY_BASE_URL_VALUE="${GATEWAY_BASE_URL:-}"' in run_script_text
     assert 'FREQ_CONTROLLER_CONFIG_VALUE="${FREQ_CONTROLLER_CONFIG:-}"' in run_script_text
@@ -259,7 +235,7 @@ def test_main_generates_embedded_tp1_amd_freq_ctrl_bundle(tmp_path: Path) -> Non
     assert 'PYTHON_BIN="${PYTHON_BIN:-python3}"' in submit_script_text
     assert (
         'EMBEDDED_TP1_LAUNCH_SCRIPT="${EMBEDDED_TP1_LAUNCH_SCRIPT:-'
-        'servers/servers-amdhpc-mi3001x-embedded-TP1/launch.py}"'
+        'servers/servers-amdhpc-mi3008x-embedded-TP1-0/launch.py}"'
     ) in submit_script_text
     assert 'RUN_SCRIPT_PATH="${SCRIPT_DIR}/run_replay.sh"' in submit_script_text
     assert 'exec "${PYTHON_BIN}" "${EMBEDDED_TP1_LAUNCH_SCRIPT}" submit \\' in submit_script_text
@@ -321,7 +297,7 @@ def test_main_supports_gpu_index_additional_suffix_output_suffix_and_custom_thre
         (batch_dir / "qps0_5" / "replay.toml").read_text(encoding="utf-8")
     )
     assert replay_config["replay"]["output_dir"].endswith(
-        "results/replay/amd-embeded/servers-amdhpc-mi3001x-embedded-TP1/"
+        "results/replay/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1-0/"
         "sweep-qps-docker-power-clean-freq-ctrl-linespace-amd-lmcache/"
         f"dataset-a/agent-a/split/exclude-unranked/qps0_5/{batch_timestamp}"
     )
@@ -345,7 +321,7 @@ def test_main_supports_gpu_index_additional_suffix_output_suffix_and_custom_thre
     assert manifest["freq_controller_threshold"] == 200.0
     assert manifest["submit_command_default"].endswith("submit_embedded_tp1.sh")
     assert manifest["replay_output_root_dir"].endswith(
-        "results/replay/amd-embeded/servers-amdhpc-mi3001x-embedded-TP1/"
+        "results/replay/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1-0/"
         "sweep-qps-docker-power-clean-freq-ctrl-linespace-amd-lmcache"
     )
 

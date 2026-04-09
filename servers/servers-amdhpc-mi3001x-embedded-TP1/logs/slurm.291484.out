@@ -1,0 +1,25 @@
+MI3001X embedded TP1 service stack starting on k002-004-v6.hpcfund at Thu Apr  9 12:58:24 PM CDT 2026
+Run ID: 291484
+Resolved model key 'qwen3_coder_30b_fp8' -> 'Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8' (served as 'Qwen3-Coder-30B-A3B-Instruct-FP8')
+Launching AMD SMI power daemon socket=/tmp/amdsmi-power-reader.291484.sock
+Launching shared Jaeger on ui=16686 otlp=4317
+Launching vLLM profile=0 port=11451 gpu=0
+Launching gateway-ctx profile=0 raw=11457 parsed=18171
+Services are ready.
+  amd-smi-power-socket: /tmp/amdsmi-power-reader.291484.sock
+  vLLM:   http://127.0.0.1:11451
+  gateway-ctx: http://127.0.0.1:11457
+  gateway-ctx-parse: http://127.0.0.1:18171
+  jaeger: http://127.0.0.1:16686
+Logs:
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3001x-embedded-TP1/logs/amd-smi-power-daemon.291484.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3001x-embedded-TP1/logs/jaeger.291484.shared.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3001x-embedded-TP1/logs/vllm.291484.p0.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3001x-embedded-TP1/logs/gateway-ctx.291484.p0.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3001x-embedded-TP1/logs/experiment.291484.p0.log
+Launching experiment profile=0 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi3001x-embedded-TP1/sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/generated/20260409T175802Z/run_replay.sh
+Experiment phase finished with exit code 0 at Thu Apr  9 01:01:44 PM CDT 2026
+Stopping gateway-ctx profile=0 (pid=208604)
+Stopping vllm profile=0 (pid=206619)
+Stopping amd-smi-power-daemon (pid=206549)
+Stopping jaeger (pid=206553)

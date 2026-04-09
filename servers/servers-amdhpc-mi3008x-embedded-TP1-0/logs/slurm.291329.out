@@ -1,0 +1,62 @@
+MI3008X embedded TP1 profile 0 service stack starting on k002-003.hpcfund at Thu Apr  9 10:10:30 AM CDT 2026
+Run ID: 291329
+Resolved model key 'qwen3_coder_30b' -> 'Qwen/Qwen3-Coder-30B-A3B-Instruct' (served as 'Qwen3-Coder-30B-A3B-Instruct')
+Launching AMD SMI power daemon socket=/tmp/amdsmi-power-reader.291329.sock
+Launching shared Jaeger on ui=16686 otlp=4317
+Launching vLLM profile=0 port=11451 gpu=0
+Launching gateway-ctx profile=0 raw=11457 parsed=18171
+Services are ready.
+  amd-smi-power-socket: /tmp/amdsmi-power-reader.291329.sock
+  vLLM:   http://127.0.0.1:11451
+  gateway-ctx: http://127.0.0.1:11457
+  gateway-ctx-parse: http://127.0.0.1:18171
+  jaeger: http://127.0.0.1:16686
+Logs:
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1-0/logs/amd-smi-power-daemon.291329.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1-0/logs/jaeger.291329.shared.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1-0/logs/vllm.291329.p0.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1-0/logs/gateway-ctx.291329.p0.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1-0/logs/experiment.291329.p0.log
+Launching experiment profile=0 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1-0/sweep-qps-docker-power-clean-amd/generated/20260409T151002Z/run_replay.sh
+Experiment phase finished with exit code 0 at Thu Apr  9 01:17:13 PM CDT 2026
+Stopping gateway-ctx profile=0 (pid=2656881)
+Stopping vllm profile=0 (pid=2654821)
+Stopping amd-smi-power-daemon (pid=2654745)
+Stopping jaeger (pid=2654750)
+
+----------------------------------------------------------------------
+Omnistat Report Card for Job Id: 291329
+----------------------------------------------------------------------
+
+Job Overview (Num Nodes = 1, Machine = HPC Fund)
+ --> Start time = 2026-04-09 10:11:01
+ --> End   time = 2026-04-09 13:20:31
+ --> Duration   = 11370 secs
+
+GPU Statistics:
+
+           | Utilization (%)  |  Memory Use (%)  | Temperature (C)  |    Power (W)     | Energy (kWh) |
+     GPU # |    Max     Mean  |    Max     Mean  |    Max     Mean  |    Max     Mean  |    Total     |
+    ---------------------------------------------------------------------------------------------------
+         0 |  100.00   92.67  |   90.45   89.68  |   76.00   61.25  |  712.00  478.77  |   1.51e+00   |
+         1 |    0.00    0.00  |    0.14    0.14  |   45.00   43.88  |  144.00  141.86  |   4.48e-01   |
+         2 |    0.00    0.00  |    0.14    0.14  |   45.00   43.14  |  144.00  142.68  |   4.51e-01   |
+         3 |    0.00    0.00  |    0.14    0.14  |   40.00   39.07  |  144.00  142.79  |   4.51e-01   |
+         4 |    0.00    0.00  |    0.14    0.14  |   44.00   43.08  |  147.00  145.94  |   4.61e-01   |
+         5 |    0.00    0.00  |    0.14    0.14  |   41.00   40.07  |  141.00  139.96  |   4.42e-01   |
+         6 |    0.00    0.00  |    0.14    0.14  |   45.00   43.21  |  143.00  141.99  |   4.48e-01   |
+         7 |    0.00    0.00  |    0.14    0.14  |   43.00   42.12  |  141.00  139.91  |   4.42e-01   |
+
+Approximate Total GPU Energy Consumed = 4.66e+00 kWh
+
+Host Statistics:
+
+    # CPUs | CPU Utilization (%)  |    Memory Use (%)    |
+           |    Max       Mean    |    Max       Mean    |
+    ------------------------------------------------------
+       384 |   60.22      6.20    |    8.56      7.74    |
+
+--
+Query interval = 30.000 secs
+Query execution time = 0.8 secs
+Version = 1.10.0

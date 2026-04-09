@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate one embedded-TP1 AMD sweep-QPS + power + freq-control replay bundle."""
+"""Generate one single-node mi3008x embedded TP1 profile 0 AMD ctx-aware sweep-QPS bundle."""
 
 from __future__ import annotations
 
@@ -16,14 +16,14 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 RESULTS_ROOT = REPO_ROOT / "results"
-EXPERIMENT_DIR_NAME = "sweep-qps-docker-power-clean-freq-ctrl-linespace-amd"
-DEFAULT_MI3001X_PORT_PROFILE_ID = 0
-DEFAULT_MI3001X_GPU_INDEX = 0
+EXPERIMENT_DIR_NAME = "sweep-qps-docker-power-clean-ctx-aware-amd"
+DEFAULT_PROFILE0_PORT_PROFILE_ID = 0
+DEFAULT_PROFILE0_GPU_INDEX = 0
 DEFAULT_OUTPUT_CONFIG_DIR = (
     REPO_ROOT
     / "experiments"
     / "amd-embeded"
-    / "servers-amdhpc-mi3001x-embedded-TP1"
+    / "servers-amdhpc-mi3008x-embedded-TP1-0"
     / EXPERIMENT_DIR_NAME
     / "generated"
 )
@@ -31,26 +31,24 @@ DEFAULT_REPLAY_OUTPUT_ROOT = (
     Path("results")
     / "replay"
     / "amd-embeded"
-    / "servers-amdhpc-mi3001x-embedded-TP1"
+    / "servers-amdhpc-mi3008x-embedded-TP1-0"
     / EXPERIMENT_DIR_NAME
 )
 MODEL_CONFIG_PATH = REPO_ROOT / "configs" / "model_config.toml"
 EXPERIMENT_PATH = (
-    "experiments/amd-embeded/servers-amdhpc-mi3001x-embedded-TP1/"
+    "experiments/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1-0/"
     f"{EXPERIMENT_DIR_NAME}"
 )
 EXPERIMENT_LOG_TAG = (
-    "amd-embeded-servers-amdhpc-mi3001x-embedded-TP1-"
-    "sweep-qps-docker-power-clean-freq-ctrl-linespace-amd"
+    "amd-embeded-servers-amdhpc-mi3008x-embedded-TP1-0-"
+    "sweep-qps-docker-power-clean-ctx-aware-amd"
 )
 PROFILE_OUTPUT_PLACEHOLDER = "profile-<port_profile_id>"
 DEFAULT_CTX_AWARE_USAGE_THRESHOLD_TOKENS = 1445793
 DEFAULT_CTX_AWARE_SCHEDULING_THRESHOLD_TOKENS = 1369699
 CTX_AWARE_NEW_AGENT_PSEUDO_TOKENS = 3000
-DEFAULT_FREQ_CONTROLLER_THRESHOLD = 1141416.0
-DEFAULT_FREQ_CONTROL_LOG_DIR_NAME = "freq-control-linespace-amd"
 _BASE_GENERATOR_MODULE_NAME = (
-    "generate_sweep_qps_docker_power_clean_experiment_for_embedded_tp1_freq_ctrl_linespace_amd"
+    "generate_sweep_qps_docker_power_clean_ctx_aware_experiment_for_mi3008x_embedded_tp1_profile0_amd"
 )
 
 
@@ -63,7 +61,6 @@ class QpsReplayJob:
     replay_config_path: Path
     replay_output_dir: Path
     power_output_dir: Path
-    freq_controller_log_dir: Path
 
 
 def _load_base_generator_module() -> object:
@@ -133,39 +130,8 @@ def parse_optional_gpu_index(raw: str | None) -> int | None:
     return int(gpu_indices[0])
 
 
-def safe_name(value: str) -> str:
-    chars: list[str] = []
-    for ch in value:
-        if ch.isalnum() or ch in {"-", "_", "."}:
-            chars.append(ch)
-        else:
-            chars.append("_")
-    return "".join(chars) or "value"
-
-
-def normalize_output_suffix(raw: str | None) -> str | None:
-    if raw is None:
-        return None
-    stripped = raw.strip()
-    if not stripped:
-        raise ValueError("--output-suffix cannot be empty")
-    return safe_name(stripped)
-
-
-def apply_output_suffix_to_replay_root(root: Path, output_suffix: str | None) -> Path:
-    if output_suffix is None:
-        return root
-    if not root.name:
-        raise ValueError("--output-suffix cannot be applied to an empty replay output root")
-    return root.parent / f"{root.name}-{output_suffix}"
-
-
 def _shell_quote(value: str) -> str:
     return shlex.quote(value)
-
-
-def default_repo_venv_bin_path(binary_name: str) -> Path:
-    return (REPO_ROOT / ".venv" / "bin" / binary_name).resolve()
 
 
 def write_replay_config(path: Path, *, replay_payload: dict[str, Any]) -> None:
@@ -185,16 +151,11 @@ def write_run_script(
     default_port_profile: int,
     target_model: str,
     split: str,
-    default_gpu_index: int | None,
+    default_gpu_index: int,
     qps_jobs: list[QpsReplayJob],
     ctx_aware_usage_threshold_tokens: int,
     ctx_aware_scheduling_threshold_tokens: int,
-    freq_controller_threshold: float,
 ) -> None:
-    encoded_default_gpu_index = "" if default_gpu_index is None else str(default_gpu_index)
-    default_amd_power_reader_bin = default_repo_venv_bin_path("amd-power-reader")
-    default_freq_controller_bin = default_repo_venv_bin_path("freq-controller-linespace-amd")
-    default_reset_gpu_core_freq_bin = default_repo_venv_bin_path("amd-reset-gpu-core-freq")
     lines = [
         "#!/usr/bin/env bash",
         "set -euo pipefail",
@@ -202,20 +163,14 @@ def write_run_script(
         "SCRIPT_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")\" && pwd)\"",
         f"REPO_ROOT={_shell_quote(str(REPO_ROOT.resolve()))}",
         f"DEFAULT_PORT_PROFILE_ID={default_port_profile}",
-        f"DEFAULT_GPU_INDEX={_shell_quote(encoded_default_gpu_index)}",
+        f"DEFAULT_GPU_INDEX={default_gpu_index}",
         "PORT_PROFILE_ID_VALUE=\"${1:-${PORT_PROFILE_ID:-${DEFAULT_PORT_PROFILE_ID}}}\"",
         "GPU_INDEX_VALUE=\"${GPU_INDEX:-${DEFAULT_GPU_INDEX}}\"",
         "PYTHON_BIN=\"${PYTHON_BIN:-python3}\"",
         "CURL_BIN=\"${CURL_BIN:-curl}\"",
-        f"DEFAULT_AMD_POWER_READER_BIN={_shell_quote(str(default_amd_power_reader_bin))}",
-        f"DEFAULT_FREQ_CONTROLLER_BIN={_shell_quote(str(default_freq_controller_bin))}",
-        f"DEFAULT_RESET_GPU_CORE_FREQ_BIN={_shell_quote(str(default_reset_gpu_core_freq_bin))}",
-        "AMD_POWER_READER_BIN=\"${AMD_POWER_READER_BIN:-${DEFAULT_AMD_POWER_READER_BIN}}\"",
-        "FREQ_CONTROLLER_BIN=\"${FREQ_CONTROLLER_BIN:-${DEFAULT_FREQ_CONTROLLER_BIN}}\"",
-        "RESET_GPU_CORE_FREQ_BIN=\"${RESET_GPU_CORE_FREQ_BIN:-${DEFAULT_RESET_GPU_CORE_FREQ_BIN}}\"",
+        "AMD_POWER_READER_BIN=\"${AMD_POWER_READER_BIN:-amd-power-reader}\"",
         "AMD_SMI_POWER_SOCKET_PATH_VALUE=\"${AMD_SMI_POWER_SOCKET_PATH:-/tmp/amdsmi-power-reader.sock}\"",
         "GATEWAY_BASE_URL_VALUE=\"${GATEWAY_BASE_URL:-}\"",
-        "FREQ_CONTROLLER_CONFIG_VALUE=\"${FREQ_CONTROLLER_CONFIG:-}\"",
         f"DEFAULT_CTX_AWARE_USAGE_THRESHOLD_TOKENS={ctx_aware_usage_threshold_tokens}",
         (
             "DEFAULT_CTX_AWARE_SCHEDULING_THRESHOLD_TOKENS="
@@ -229,17 +184,10 @@ def write_run_script(
             "CTX_AWARE_SCHEDULING_THRESHOLD_TOKENS_VALUE="
             "\"${CTX_AWARE_SCHEDULING_THRESHOLD_TOKENS:-${DEFAULT_CTX_AWARE_SCHEDULING_THRESHOLD_TOKENS}}\""
         ),
-        f"DEFAULT_FREQ_CONTROLLER_THRESHOLD={freq_controller_threshold}",
-        (
-            "FREQ_CONTROLLER_THRESHOLD_VALUE="
-            "\"${FREQ_CONTROLLER_THRESHOLD:-${DEFAULT_FREQ_CONTROLLER_THRESHOLD}}\""
-        ),
         "",
         "POWER_READER_PID=\"\"",
-        "FREQ_CONTROLLER_PID=\"\"",
-        "CTX_AWARE_STARTED=0",
-        "FREQ_CONTROLLER_STARTED=0",
         "GATEWAY_BASE_URL_RESOLVED=\"\"",
+        "CTX_AWARE_STARTED=0",
         "",
         "stop_power_reader() {",
         "  if [[ -n \"${POWER_READER_PID}\" ]]; then",
@@ -247,60 +195,6 @@ def write_run_script(
         "    wait \"${POWER_READER_PID}\" 2>/dev/null || true",
         "    POWER_READER_PID=\"\"",
         "  fi",
-        "}",
-        "",
-        "stop_freq_controller() {",
-        "  if [[ -n \"${FREQ_CONTROLLER_PID}\" ]]; then",
-        "    kill \"${FREQ_CONTROLLER_PID}\" >/dev/null 2>&1 || true",
-        "    wait \"${FREQ_CONTROLLER_PID}\" 2>/dev/null || true",
-        "    FREQ_CONTROLLER_PID=\"\"",
-        "  fi",
-        "}",
-        "",
-        "reset_gpu_core_if_needed() {",
-        "  if [[ \"${FREQ_CONTROLLER_STARTED}\" -eq 1 ]]; then",
-        "    if ! \"${RESET_GPU_CORE_FREQ_BIN}\" --gpu-index \"${GPU_INDEX_VALUE}\"; then",
-        (
-            f"      echo \"[{EXPERIMENT_LOG_TAG}] warning: failed to reset GPU "
-            "${GPU_INDEX_VALUE} core clocks\" >&2"
-        ),
-        "    fi",
-        "    FREQ_CONTROLLER_STARTED=0",
-        "  fi",
-        "}",
-        "",
-        "normalize_port_profile_id() {",
-        "  local raw_value=\"$1\"",
-        "  local normalized_value=\"${raw_value//[[:space:]]/}\"",
-        "  if [[ -z \"${normalized_value}\" || ! \"${normalized_value}\" =~ ^[0-9]+$ ]]; then",
-        f"    echo \"[{EXPERIMENT_LOG_TAG}] error: invalid port profile id: ${{raw_value}}\" >&2",
-        "    exit 1",
-        "  fi",
-        f"  if [[ \"${{normalized_value}}\" != \"{DEFAULT_MI3001X_PORT_PROFILE_ID}\" ]]; then",
-        (
-            f"    echo \"[{EXPERIMENT_LOG_TAG}] error: this mi3001x workflow only "
-            f"supports port profile {DEFAULT_MI3001X_PORT_PROFILE_ID}\" >&2"
-        ),
-        "    exit 1",
-        "  fi",
-        "  PORT_PROFILE_ID_VALUE=\"${normalized_value}\"",
-        "}",
-        "",
-        "normalize_gpu_index() {",
-        "  local raw_value=\"$1\"",
-        "  local normalized_value=\"${raw_value//[[:space:]]/}\"",
-        "  if [[ -z \"${normalized_value}\" || ! \"${normalized_value}\" =~ ^[0-9]+$ ]]; then",
-        f"    echo \"[{EXPERIMENT_LOG_TAG}] error: invalid gpu index: ${{raw_value}}\" >&2",
-        "    exit 1",
-        "  fi",
-        f"  if [[ \"${{normalized_value}}\" != \"{DEFAULT_MI3001X_GPU_INDEX}\" ]]; then",
-        (
-            f"    echo \"[{EXPERIMENT_LOG_TAG}] error: this mi3001x workflow only "
-            f"supports gpu index {DEFAULT_MI3001X_GPU_INDEX}\" >&2"
-        ),
-        "    exit 1",
-        "  fi",
-        "  GPU_INDEX_VALUE=\"${normalized_value}\"",
         "}",
         "",
         "resolve_gateway_base_url() {",
@@ -376,15 +270,47 @@ def write_run_script(
         "",
         "cleanup() {",
         "  local exit_code=\"$1\"",
-        "  stop_freq_controller",
         "  end_ctx_aware_mode || true",
         "  stop_power_reader",
-        "  reset_gpu_core_if_needed",
         "  return \"${exit_code}\"",
         "}",
         "",
         "trap '__exit_code=$?; trap - EXIT INT TERM; cleanup \"${__exit_code}\"; exit \"${__exit_code}\"' EXIT",
         f"trap 'echo \"[{EXPERIMENT_LOG_TAG}] interrupted\" >&2; exit 130' INT TERM",
+        "",
+        "normalize_port_profile_id() {",
+        "  local raw_value=\"$1\"",
+        "  local normalized_value=\"${raw_value//[[:space:]]/}\"",
+        "  if [[ -z \"${normalized_value}\" || ! \"${normalized_value}\" =~ ^[0-9]+$ ]]; then",
+        f"    echo \"[{EXPERIMENT_LOG_TAG}] error: invalid port profile id: ${{raw_value}}\" >&2",
+        "    exit 1",
+        "  fi",
+        f"  if [[ \"${{normalized_value}}\" != \"{DEFAULT_PROFILE0_PORT_PROFILE_ID}\" ]]; then",
+        (
+            f"    echo \"[{EXPERIMENT_LOG_TAG}] error: this mi3008x TP1-0 workflow only "
+            f"supports port profile {DEFAULT_PROFILE0_PORT_PROFILE_ID}\" >&2"
+        ),
+        "    exit 1",
+        "  fi",
+        "  PORT_PROFILE_ID_VALUE=\"${normalized_value}\"",
+        "}",
+        "",
+        "normalize_gpu_index() {",
+        "  local raw_value=\"$1\"",
+        "  local normalized_value=\"${raw_value//[[:space:]]/}\"",
+        "  if [[ -z \"${normalized_value}\" || ! \"${normalized_value}\" =~ ^[0-9]+$ ]]; then",
+        f"    echo \"[{EXPERIMENT_LOG_TAG}] error: invalid gpu index: ${{raw_value}}\" >&2",
+        "    exit 1",
+        "  fi",
+        f"  if [[ \"${{normalized_value}}\" != \"{DEFAULT_PROFILE0_GPU_INDEX}\" ]]; then",
+        (
+            f"    echo \"[{EXPERIMENT_LOG_TAG}] error: this mi3008x TP1-0 workflow only "
+            f"supports gpu index {DEFAULT_PROFILE0_GPU_INDEX}\" >&2"
+        ),
+        "    exit 1",
+        "  fi",
+        "  GPU_INDEX_VALUE=\"${normalized_value}\"",
+        "}",
         "",
         "normalize_port_profile_id \"${PORT_PROFILE_ID_VALUE}\"",
         "normalize_gpu_index \"${GPU_INDEX_VALUE}\"",
@@ -397,9 +323,6 @@ def write_run_script(
         "  local replay_config_path=\"\"",
         "  local replay_output_base_dir=\"\"",
         "  local replay_output_dir=\"\"",
-        "  local power_output_dir=\"\"",
-        "  local freq_controller_log_dir=\"\"",
-        "  local -a FREQ_CONTROLLER_CMD=()",
         "",
         "  if [[ \"${replay_config_ref}\" = /* ]]; then",
         "    replay_config_path=\"${replay_config_ref}\"",
@@ -413,66 +336,29 @@ def write_run_script(
         "    replay_output_base_dir=\"${REPO_ROOT}/${replay_output_ref}\"",
         "  fi",
         "  replay_output_dir=\"${replay_output_base_dir}/profile-${PORT_PROFILE_ID_VALUE}\"",
-        "  power_output_dir=\"${replay_output_dir}/power\"",
-        (
-            "  freq_controller_log_dir="
-            f"\"${{replay_output_dir}}/{DEFAULT_FREQ_CONTROL_LOG_DIR_NAME}\""
-        ),
+        "  local power_output_dir=\"${replay_output_dir}/power\"",
         "",
         (
             f"  echo \"[{EXPERIMENT_LOG_TAG}] qps=${{qps_value}} slug=${{qps_slug}} "
             "usage=${CTX_AWARE_USAGE_THRESHOLD_TOKENS_VALUE} "
             "scheduling=${CTX_AWARE_SCHEDULING_THRESHOLD_TOKENS_VALUE} "
-            "threshold=${FREQ_CONTROLLER_THRESHOLD_VALUE} "
             "output=${replay_output_dir} "
-            "gpu_index=${GPU_INDEX_VALUE} "
-            "port_profile=${PORT_PROFILE_ID_VALUE}\""
+            "port_profile=${PORT_PROFILE_ID_VALUE} "
+            "gpu_index=${GPU_INDEX_VALUE}\""
         ),
-        "  mkdir -p \"${power_output_dir}\" \"${freq_controller_log_dir}\"",
+        "  mkdir -p \"${power_output_dir}\"",
         "  \"${AMD_POWER_READER_BIN}\" --output-dir \"${power_output_dir}\" --gpu-indices \"${GPU_INDEX_VALUE}\" --socket-path \"${AMD_SMI_POWER_SOCKET_PATH_VALUE}\" &",
         "  POWER_READER_PID=\"$!\"",
         "",
         "  start_ctx_aware_mode",
-        "",
-        (
-            f"  echo \"[{EXPERIMENT_LOG_TAG}] starting freq-controller-linespace-amd "
-            "port_profile=${PORT_PROFILE_ID_VALUE} "
-            "gpu_index=${GPU_INDEX_VALUE} "
-            "log_dir=${freq_controller_log_dir}\""
-        ),
-        "  FREQ_CONTROLLER_CMD=(",
-        "    \"${FREQ_CONTROLLER_BIN}\"",
-        "    \"--log-dir\" \"${freq_controller_log_dir}\"",
-        "    \"--threshold\" \"${FREQ_CONTROLLER_THRESHOLD_VALUE}\"",
-        "    \"--port-profile-id\" \"${PORT_PROFILE_ID_VALUE}\"",
-        "    \"--gpu-index\" \"${GPU_INDEX_VALUE}\"",
-        "  )",
-        "  if [[ -n \"${FREQ_CONTROLLER_CONFIG_VALUE}\" ]]; then",
-        "    FREQ_CONTROLLER_CMD+=(\"--config\" \"${FREQ_CONTROLLER_CONFIG_VALUE}\")",
-        "  fi",
-        "  \"${FREQ_CONTROLLER_CMD[@]}\" &",
-        "  FREQ_CONTROLLER_PID=\"$!\"",
-        "  FREQ_CONTROLLER_STARTED=1",
-        "  sleep 1",
-        "  if ! kill -0 \"${FREQ_CONTROLLER_PID}\" >/dev/null 2>&1; then",
-        (
-            f"    echo \"[{EXPERIMENT_LOG_TAG}] "
-            "freq-controller-linespace-amd failed to stay alive after startup "
-            "for port_profile=${PORT_PROFILE_ID_VALUE} gpu_index=${GPU_INDEX_VALUE}\" >&2"
-        ),
-        "    wait \"${FREQ_CONTROLLER_PID}\" || true",
-        "    exit 1",
-        "  fi",
         "",
         "  \"${PYTHON_BIN}\" -m replayer replay \\",
         "    --config \"${replay_config_path}\" \\",
         "    --output-dir \"${replay_output_dir}\" \\",
         "    --port-profile-id \"${PORT_PROFILE_ID_VALUE}\"",
         "",
-        "  stop_freq_controller",
         "  end_ctx_aware_mode",
         "  stop_power_reader",
-        "  reset_gpu_core_if_needed",
         "}",
         "",
         (
@@ -480,7 +366,6 @@ def write_run_script(
             f"qps_points={len(qps_jobs)} gpu_index=${{GPU_INDEX_VALUE}} "
             "usage=${CTX_AWARE_USAGE_THRESHOLD_TOKENS_VALUE} "
             "scheduling=${CTX_AWARE_SCHEDULING_THRESHOLD_TOKENS_VALUE} "
-            "threshold=${FREQ_CONTROLLER_THRESHOLD_VALUE} "
             "port_profile=${PORT_PROFILE_ID_VALUE}\""
         ),
         "",
@@ -511,7 +396,7 @@ def build_embedded_tp1_submit_command(*, run_script_path: Path, target_model: st
     return shlex.join(
         [
             "python3",
-            "servers/servers-amdhpc-mi3001x-embedded-TP1/launch.py",
+            "servers/servers-amdhpc-mi3008x-embedded-TP1-0/launch.py",
             "submit",
             "-m",
             target_model,
@@ -536,7 +421,7 @@ def write_submit_script(
         "PYTHON_BIN=\"${PYTHON_BIN:-python3}\"",
         (
             "EMBEDDED_TP1_LAUNCH_SCRIPT="
-            "\"${EMBEDDED_TP1_LAUNCH_SCRIPT:-servers/servers-amdhpc-mi3001x-embedded-TP1/launch.py}\""
+            "\"${EMBEDDED_TP1_LAUNCH_SCRIPT:-servers/servers-amdhpc-mi3008x-embedded-TP1-0/launch.py}\""
         ),
         f"TARGET_MODEL={_shell_quote(target_model)}",
         "RUN_SCRIPT_PATH=\"${SCRIPT_DIR}/run_replay.sh\"",
@@ -546,7 +431,10 @@ def write_submit_script(
         "  -m \"${TARGET_MODEL}\" \\",
         "  -e \"${RUN_SCRIPT_PATH}\"",
         "",
-        f"# Equivalent raw command: {build_embedded_tp1_submit_command(run_script_path=run_script_path, target_model=target_model)}",
+        (
+            "# Equivalent raw command: "
+            f"{build_embedded_tp1_submit_command(run_script_path=run_script_path, target_model=target_model)}"
+        ),
         "",
     ]
 
@@ -559,32 +447,35 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="generate_experiment.py",
         description=(
-            "Generate a single-node mi3001x embedded-TP1 AMD sweep-QPS replay bundle with "
-            "amd-power-reader, gateway ctx-aware control, and "
-            "freq-controller-linespace-amd."
+            "Generate a single-node mi3008x embedded TP1 profile 0 sweep-QPS replay bundle "
+            "with amd-power-reader power logging and gateway ctx-aware control."
         ),
     )
     parser.add_argument("--source-run-dir", required=True, help="Profiled source run directory under results/.")
     parser.add_argument("--poisson-seed", required=True, type=BASE.parse_non_negative_int, help="Poisson launch seed.")
     parser.add_argument("--randomize-seed", required=True, type=BASE.parse_non_negative_int, help="Replay randomization seed.")
-    parser.add_argument("--qps-list", required=True, help="Comma-separated Poisson rates, e.g. 0.1,0.2,0.3")
+    parser.add_argument(
+        "--qps-list",
+        required=True,
+        help="Comma-separated Poisson rates, e.g. 0.1,0.2,0.3",
+    )
     parser.add_argument("--time-constraint-s", required=True, type=float, help="Replay time limit in seconds.")
     parser.add_argument("--target-model", required=True, help="Target model key from configs/model_config.toml.")
     parser.add_argument(
         "--port-profile",
         "-P",
-        default=DEFAULT_MI3001X_PORT_PROFILE_ID,
+        default=DEFAULT_PROFILE0_PORT_PROFILE_ID,
         type=int,
         help=(
-            "mi3001x single-node embedded TP1 uses port profile 0. "
+            "mi3008x single-node embedded TP1 uses port profile 0. "
             "This option is accepted only for compatibility and must remain 0."
         ),
     )
     parser.add_argument(
         "--gpu-index",
-        default=str(DEFAULT_MI3001X_GPU_INDEX),
+        default=str(DEFAULT_PROFILE0_GPU_INDEX),
         help=(
-            "mi3001x single-node embedded TP1 uses GPU index 0. "
+            "mi3008x single-node embedded TP1 uses GPU index 0. "
             "This option is accepted only for compatibility and must remain 0."
         ),
     )
@@ -621,15 +512,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--freq-controller-threshold",
-        type=float,
-        default=DEFAULT_FREQ_CONTROLLER_THRESHOLD,
-        help=(
-            "Default freq-controller-linespace-amd context threshold. "
-            f"Default: {int(DEFAULT_FREQ_CONTROLLER_THRESHOLD)}."
-        ),
-    )
-    parser.add_argument(
         "--output-config-dir",
         default=str(DEFAULT_OUTPUT_CONFIG_DIR),
         help=f"Generated bundle root (default: {DEFAULT_OUTPUT_CONFIG_DIR}).",
@@ -648,20 +530,10 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Replay output root. Default appends "
             "<dataset-lineage>/split/<split>/<qps>/<timestamp>/profile-<port_profile_id> "
-            "under results/replay/amd-embeded/servers-amdhpc-mi3001x-embedded-TP1/"
-            "sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/. "
+            "under results/replay/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1-0/"
+            "sweep-qps-docker-power-clean-ctx-aware-amd/. "
             "dataset-lineage is inferred from --source-run-dir by dropping "
             "the first (<model>) and last (<run-dir>) path segments."
-        ),
-    )
-    parser.add_argument(
-        "--output-suffix",
-        default=None,
-        help=(
-            "Optional suffix appended to the replay output root directory name. "
-            "For example, --output-suffix lmcache writes under results/replay/"
-            "amd-embeded/servers-amdhpc-mi3001x-embedded-TP1/"
-            "sweep-qps-docker-power-clean-freq-ctrl-linespace-amd-lmcache/."
         ),
     )
     return parser
@@ -688,14 +560,14 @@ def main(argv: list[str] | None = None) -> int:
             str(args.time_constraint_s),
             field_name="--time-constraint-s",
         )
-        if args.port_profile != DEFAULT_MI3001X_PORT_PROFILE_ID:
+        if args.port_profile != DEFAULT_PROFILE0_PORT_PROFILE_ID:
             raise ValueError(
-                "--port-profile must be 0 for the single-node mi3001x workflow"
+                "--port-profile must be 0 for the single-node mi3008x workflow"
             )
         gpu_index = parse_optional_gpu_index(args.gpu_index)
-        if gpu_index != DEFAULT_MI3001X_GPU_INDEX:
+        if gpu_index != DEFAULT_PROFILE0_GPU_INDEX:
             raise ValueError(
-                "--gpu-index must be 0 for the single-node mi3001x workflow"
+                "--gpu-index must be 0 for the single-node mi3008x workflow"
             )
         ctx_aware_usage_threshold_tokens = parse_positive_int(
             str(args.ctx_aware_usage_threshold_tokens),
@@ -715,10 +587,6 @@ def main(argv: list[str] | None = None) -> int:
                 "--ctx-aware-scheduling-threshold-tokens must be >= "
                 f"{CTX_AWARE_NEW_AGENT_PSEUDO_TOKENS}"
             )
-        freq_controller_threshold = BASE.parse_positive_float(
-            str(args.freq_controller_threshold),
-            field_name="--freq-controller-threshold",
-        )
 
         target_model = str(args.target_model).strip()
         if not target_model:
@@ -742,11 +610,6 @@ def main(argv: list[str] | None = None) -> int:
             replay_output_root = (REPO_ROOT / replay_output_root).resolve()
         else:
             replay_output_root = replay_output_root.resolve()
-        output_suffix = normalize_output_suffix(getattr(args, "output_suffix", None))
-        replay_output_root = apply_output_suffix_to_replay_root(
-            replay_output_root,
-            output_suffix,
-        )
         source_dataset_lineage = BASE.derive_dataset_lineage_from_source_run_dir(source_run_dir)
 
         batch_timestamp = BASE.build_utc_timestamp_slug()
@@ -807,9 +670,6 @@ def main(argv: list[str] | None = None) -> int:
                     replay_config_path=replay_config_path,
                     replay_output_dir=replay_output_dir,
                     power_output_dir=(replay_output_dir / "power").resolve(),
-                    freq_controller_log_dir=(
-                        replay_output_dir / DEFAULT_FREQ_CONTROL_LOG_DIR_NAME
-                    ).resolve(),
                 )
             )
 
@@ -823,7 +683,6 @@ def main(argv: list[str] | None = None) -> int:
             qps_jobs=qps_jobs,
             ctx_aware_usage_threshold_tokens=ctx_aware_usage_threshold_tokens,
             ctx_aware_scheduling_threshold_tokens=ctx_aware_scheduling_threshold_tokens,
-            freq_controller_threshold=freq_controller_threshold,
         )
         submit_script_path = (batch_dir / "submit_embedded_tp1.sh").resolve()
         write_submit_script(
@@ -844,10 +703,6 @@ def main(argv: list[str] | None = None) -> int:
                 "replay_output_dir_base": BASE.path_for_config(job.replay_output_dir),
                 "replay_output_dir": path_with_profile_placeholder(job.replay_output_dir),
                 "power_output_dir": f"{path_with_profile_placeholder(job.replay_output_dir)}/power",
-                "freq_controller_log_dir": (
-                    f"{path_with_profile_placeholder(job.replay_output_dir)}/"
-                    f"{DEFAULT_FREQ_CONTROL_LOG_DIR_NAME}"
-                ),
             }
             for job in qps_jobs
         ]
@@ -867,14 +722,11 @@ def main(argv: list[str] | None = None) -> int:
             "port_profile": int(args.port_profile),
             "default_port_profile": int(args.port_profile),
             "gpu_index": gpu_index,
-            "gpu_index_runtime_default": DEFAULT_MI3001X_GPU_INDEX,
+            "gpu_index_runtime_default": DEFAULT_PROFILE0_GPU_INDEX,
             "profile_output_suffix": PROFILE_OUTPUT_PLACEHOLDER,
             "ctx_aware_usage_threshold_tokens": ctx_aware_usage_threshold_tokens,
             "ctx_aware_scheduling_threshold_tokens": ctx_aware_scheduling_threshold_tokens,
-            "freq_controller_threshold": freq_controller_threshold,
             "additional_suffix": additional_suffix,
-            "output_suffix": output_suffix,
-            "replay_output_root_dir": BASE.path_for_config(replay_output_root),
             "output_config_root_dir": str(output_config_root),
             "output_batch_dir": str(batch_dir),
             "plan_lookup_only": True,

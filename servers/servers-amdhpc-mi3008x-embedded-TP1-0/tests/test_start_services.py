@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smoke tests for the mi3001x embedded TP1 launcher script/docs."""
+"""Smoke tests for the mi3008x embedded TP1 profile 0 launcher script/docs."""
 
 from __future__ import annotations
 
@@ -25,12 +25,20 @@ class StartServicesScriptTest(unittest.TestCase):
         self.assertIn('echo "  amd-smi-power-socket: ${AMD_SMI_POWER_SOCKET_PATH}"', script_text)
         self.assertIn("start_amd_smi_power_daemon\nstart_shared_jaeger", script_text)
 
+    def test_start_services_only_launches_profile_zero(self) -> None:
+        script_text = START_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("PROFILE_ID=0", script_text)
+        self.assertIn('ROCR_VISIBLE_DEVICES="${ROCR_VISIBLE_DEVICES:-0}"', script_text)
+        self.assertIn('JOB_LOG_DIR="${JOB_LOG_DIR:-${REPO_ROOT}/servers/servers-amdhpc-mi3008x-embedded-TP1-0/logs}"', script_text)
+        self.assertNotIn("PROFILE_IDS=(", script_text)
+        self.assertNotIn("launch_vllm 1", script_text)
+        self.assertIn('echo "MI3008X embedded TP1 profile 0 service stack starting', script_text)
+
     def test_start_services_launches_gateway_and_experiment(self) -> None:
         script_text = START_SCRIPT.read_text(encoding="utf-8")
 
         self.assertIn('GATEWAY_CONFIG_DEFAULT="${GATEWAY_CONFIG_DEFAULT:-${REPO_ROOT}/gateway_ctx/config.toml}"', script_text)
-        self.assertIn('REPO_VENV_BIN_DIR="${REPO_VENV_BIN_DIR:-${REPO_ROOT}/.venv/bin}"', script_text)
-        self.assertIn('export PATH="${REPO_VENV_BIN_DIR}:${PATH}"', script_text)
         self.assertIn("-m gateway_ctx", script_text)
         self.assertIn('echo "Launching gateway-ctx profile=${PROFILE_ID} raw=${GATEWAY_PORT} parsed=${GATEWAY_PARSE_PORT}"', script_text)
         self.assertIn('launch_experiment()', script_text)
@@ -39,8 +47,6 @@ class StartServicesScriptTest(unittest.TestCase):
         self.assertIn('export GATEWAY_BASE_URL="http://127.0.0.1:${GATEWAY_PORT}"', script_text)
         self.assertIn('export AMD_SMI_POWER_SOCKET_PATH="${AMD_SMI_POWER_SOCKET_PATH}"', script_text)
         self.assertIn('wait_for_experiment_phase()', script_text)
-        self.assertIn("if wait_for_experiment_phase; then", script_text)
-        self.assertIn("EXPERIMENT_PHASE_EXIT_CODE=$?", script_text)
         self.assertIn('GATEWAY_LOG="${JOB_LOG_DIR}/gateway-ctx.${RUN_ID}.p${PROFILE_ID}.log"', script_text)
         self.assertIn('echo "  gateway-ctx: http://${GATEWAY_HOST}:${GATEWAY_PORT}"', script_text)
         self.assertIn('echo "  gateway-ctx-parse: http://${GATEWAY_HOST}:${GATEWAY_PARSE_PORT}"', script_text)
@@ -57,12 +63,13 @@ class StartServicesScriptTest(unittest.TestCase):
         readme_text = README.read_text(encoding="utf-8")
 
         self.assertIn("one shared AMD SMI power daemon for `amd-power-reader`", readme_text)
+        self.assertIn("one TP=1 vLLM on port profile `0`", readme_text)
         self.assertIn("one ctx-aware gateway (`gateway_ctx`) on port profile `0`", readme_text)
         self.assertIn("one experiment-script invocation after the services are ready", readme_text)
-        self.assertIn("python3 servers/servers-amdhpc-mi3001x-embedded-TP1/launch.py render", readme_text)
-        self.assertIn("python3 servers/servers-amdhpc-mi3001x-embedded-TP1/launch.py submit", readme_text)
-        self.assertIn("pip install -e ./amd-power-reader", readme_text)
-        self.assertIn("pip install -e ./gateway_ctx", readme_text)
+        self.assertIn("python3 servers/servers-amdhpc-mi3008x-embedded-TP1-0/launch.py render", readme_text)
+        self.assertIn("python3 servers/servers-amdhpc-mi3008x-embedded-TP1-0/launch.py submit", readme_text)
+        self.assertIn("Only one GPU is used even though the job runs on the `mi3008x` partition.", readme_text)
+        self.assertIn("Compared with `servers/servers-amdhpc-mi3008x-embedded-TP1`, this variant", readme_text)
         self.assertIn("gateway-ctx: `11457`", readme_text)
 
 

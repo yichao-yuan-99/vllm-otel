@@ -17,13 +17,13 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[4]
 RESULTS_ROOT = REPO_ROOT / "results"
 EXPERIMENT_DIR_NAME = "sweep-qps-docker-power-clean-freq-ctrl-linespace-amd"
-DEFAULT_MI3001X_PORT_PROFILE_ID = 0
-DEFAULT_MI3001X_GPU_INDEX = 0
+DEFAULT_PROFILE0_PORT_PROFILE_ID = 0
+DEFAULT_PROFILE0_GPU_INDEX = 0
 DEFAULT_OUTPUT_CONFIG_DIR = (
     REPO_ROOT
     / "experiments"
     / "amd-embeded"
-    / "servers-amdhpc-mi3001x-embedded-TP1"
+    / "servers-amdhpc-mi3008x-embedded-TP1-0"
     / EXPERIMENT_DIR_NAME
     / "generated"
 )
@@ -31,16 +31,16 @@ DEFAULT_REPLAY_OUTPUT_ROOT = (
     Path("results")
     / "replay"
     / "amd-embeded"
-    / "servers-amdhpc-mi3001x-embedded-TP1"
+    / "servers-amdhpc-mi3008x-embedded-TP1-0"
     / EXPERIMENT_DIR_NAME
 )
 MODEL_CONFIG_PATH = REPO_ROOT / "configs" / "model_config.toml"
 EXPERIMENT_PATH = (
-    "experiments/amd-embeded/servers-amdhpc-mi3001x-embedded-TP1/"
+    "experiments/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1-0/"
     f"{EXPERIMENT_DIR_NAME}"
 )
 EXPERIMENT_LOG_TAG = (
-    "amd-embeded-servers-amdhpc-mi3001x-embedded-TP1-"
+    "amd-embeded-servers-amdhpc-mi3008x-embedded-TP1-0-"
     "sweep-qps-docker-power-clean-freq-ctrl-linespace-amd"
 )
 PROFILE_OUTPUT_PLACEHOLDER = "profile-<port_profile_id>"
@@ -164,10 +164,6 @@ def _shell_quote(value: str) -> str:
     return shlex.quote(value)
 
 
-def default_repo_venv_bin_path(binary_name: str) -> Path:
-    return (REPO_ROOT / ".venv" / "bin" / binary_name).resolve()
-
-
 def write_replay_config(path: Path, *, replay_payload: dict[str, Any]) -> None:
     _sync_base_module_globals()
     lines: list[str] = [
@@ -192,9 +188,6 @@ def write_run_script(
     freq_controller_threshold: float,
 ) -> None:
     encoded_default_gpu_index = "" if default_gpu_index is None else str(default_gpu_index)
-    default_amd_power_reader_bin = default_repo_venv_bin_path("amd-power-reader")
-    default_freq_controller_bin = default_repo_venv_bin_path("freq-controller-linespace-amd")
-    default_reset_gpu_core_freq_bin = default_repo_venv_bin_path("amd-reset-gpu-core-freq")
     lines = [
         "#!/usr/bin/env bash",
         "set -euo pipefail",
@@ -204,15 +197,12 @@ def write_run_script(
         f"DEFAULT_PORT_PROFILE_ID={default_port_profile}",
         f"DEFAULT_GPU_INDEX={_shell_quote(encoded_default_gpu_index)}",
         "PORT_PROFILE_ID_VALUE=\"${1:-${PORT_PROFILE_ID:-${DEFAULT_PORT_PROFILE_ID}}}\"",
-        "GPU_INDEX_VALUE=\"${GPU_INDEX:-${DEFAULT_GPU_INDEX}}\"",
+            "GPU_INDEX_VALUE=\"${GPU_INDEX:-${DEFAULT_GPU_INDEX}}\"",
         "PYTHON_BIN=\"${PYTHON_BIN:-python3}\"",
         "CURL_BIN=\"${CURL_BIN:-curl}\"",
-        f"DEFAULT_AMD_POWER_READER_BIN={_shell_quote(str(default_amd_power_reader_bin))}",
-        f"DEFAULT_FREQ_CONTROLLER_BIN={_shell_quote(str(default_freq_controller_bin))}",
-        f"DEFAULT_RESET_GPU_CORE_FREQ_BIN={_shell_quote(str(default_reset_gpu_core_freq_bin))}",
-        "AMD_POWER_READER_BIN=\"${AMD_POWER_READER_BIN:-${DEFAULT_AMD_POWER_READER_BIN}}\"",
-        "FREQ_CONTROLLER_BIN=\"${FREQ_CONTROLLER_BIN:-${DEFAULT_FREQ_CONTROLLER_BIN}}\"",
-        "RESET_GPU_CORE_FREQ_BIN=\"${RESET_GPU_CORE_FREQ_BIN:-${DEFAULT_RESET_GPU_CORE_FREQ_BIN}}\"",
+        "AMD_POWER_READER_BIN=\"${AMD_POWER_READER_BIN:-amd-power-reader}\"",
+        "FREQ_CONTROLLER_BIN=\"${FREQ_CONTROLLER_BIN:-freq-controller-linespace-amd}\"",
+        "RESET_GPU_CORE_FREQ_BIN=\"${RESET_GPU_CORE_FREQ_BIN:-amd-reset-gpu-core-freq}\"",
         "AMD_SMI_POWER_SOCKET_PATH_VALUE=\"${AMD_SMI_POWER_SOCKET_PATH:-/tmp/amdsmi-power-reader.sock}\"",
         "GATEWAY_BASE_URL_VALUE=\"${GATEWAY_BASE_URL:-}\"",
         "FREQ_CONTROLLER_CONFIG_VALUE=\"${FREQ_CONTROLLER_CONFIG:-}\"",
@@ -276,10 +266,10 @@ def write_run_script(
         f"    echo \"[{EXPERIMENT_LOG_TAG}] error: invalid port profile id: ${{raw_value}}\" >&2",
         "    exit 1",
         "  fi",
-        f"  if [[ \"${{normalized_value}}\" != \"{DEFAULT_MI3001X_PORT_PROFILE_ID}\" ]]; then",
+        f"  if [[ \"${{normalized_value}}\" != \"{DEFAULT_PROFILE0_PORT_PROFILE_ID}\" ]]; then",
         (
-            f"    echo \"[{EXPERIMENT_LOG_TAG}] error: this mi3001x workflow only "
-            f"supports port profile {DEFAULT_MI3001X_PORT_PROFILE_ID}\" >&2"
+            f"    echo \"[{EXPERIMENT_LOG_TAG}] error: this mi3008x TP1-0 workflow only "
+            f"supports port profile {DEFAULT_PROFILE0_PORT_PROFILE_ID}\" >&2"
         ),
         "    exit 1",
         "  fi",
@@ -293,10 +283,10 @@ def write_run_script(
         f"    echo \"[{EXPERIMENT_LOG_TAG}] error: invalid gpu index: ${{raw_value}}\" >&2",
         "    exit 1",
         "  fi",
-        f"  if [[ \"${{normalized_value}}\" != \"{DEFAULT_MI3001X_GPU_INDEX}\" ]]; then",
+        f"  if [[ \"${{normalized_value}}\" != \"{DEFAULT_PROFILE0_GPU_INDEX}\" ]]; then",
         (
-            f"    echo \"[{EXPERIMENT_LOG_TAG}] error: this mi3001x workflow only "
-            f"supports gpu index {DEFAULT_MI3001X_GPU_INDEX}\" >&2"
+            f"    echo \"[{EXPERIMENT_LOG_TAG}] error: this mi3008x TP1-0 workflow only "
+            f"supports gpu index {DEFAULT_PROFILE0_GPU_INDEX}\" >&2"
         ),
         "    exit 1",
         "  fi",
@@ -511,7 +501,7 @@ def build_embedded_tp1_submit_command(*, run_script_path: Path, target_model: st
     return shlex.join(
         [
             "python3",
-            "servers/servers-amdhpc-mi3001x-embedded-TP1/launch.py",
+            "servers/servers-amdhpc-mi3008x-embedded-TP1-0/launch.py",
             "submit",
             "-m",
             target_model,
@@ -536,7 +526,7 @@ def write_submit_script(
         "PYTHON_BIN=\"${PYTHON_BIN:-python3}\"",
         (
             "EMBEDDED_TP1_LAUNCH_SCRIPT="
-            "\"${EMBEDDED_TP1_LAUNCH_SCRIPT:-servers/servers-amdhpc-mi3001x-embedded-TP1/launch.py}\""
+            "\"${EMBEDDED_TP1_LAUNCH_SCRIPT:-servers/servers-amdhpc-mi3008x-embedded-TP1-0/launch.py}\""
         ),
         f"TARGET_MODEL={_shell_quote(target_model)}",
         "RUN_SCRIPT_PATH=\"${SCRIPT_DIR}/run_replay.sh\"",
@@ -559,7 +549,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="generate_experiment.py",
         description=(
-            "Generate a single-node mi3001x embedded-TP1 AMD sweep-QPS replay bundle with "
+            "Generate a single-node mi3008x embedded-TP1 AMD sweep-QPS replay bundle with "
             "amd-power-reader, gateway ctx-aware control, and "
             "freq-controller-linespace-amd."
         ),
@@ -573,18 +563,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--port-profile",
         "-P",
-        default=DEFAULT_MI3001X_PORT_PROFILE_ID,
+        default=DEFAULT_PROFILE0_PORT_PROFILE_ID,
         type=int,
         help=(
-            "mi3001x single-node embedded TP1 uses port profile 0. "
+            "mi3008x single-node embedded TP1 uses port profile 0. "
             "This option is accepted only for compatibility and must remain 0."
         ),
     )
     parser.add_argument(
         "--gpu-index",
-        default=str(DEFAULT_MI3001X_GPU_INDEX),
+        default=str(DEFAULT_PROFILE0_GPU_INDEX),
         help=(
-            "mi3001x single-node embedded TP1 uses GPU index 0. "
+            "mi3008x single-node embedded TP1 uses GPU index 0. "
             "This option is accepted only for compatibility and must remain 0."
         ),
     )
@@ -648,7 +638,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Replay output root. Default appends "
             "<dataset-lineage>/split/<split>/<qps>/<timestamp>/profile-<port_profile_id> "
-            "under results/replay/amd-embeded/servers-amdhpc-mi3001x-embedded-TP1/"
+            "under results/replay/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1-0/"
             "sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/. "
             "dataset-lineage is inferred from --source-run-dir by dropping "
             "the first (<model>) and last (<run-dir>) path segments."
@@ -660,7 +650,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Optional suffix appended to the replay output root directory name. "
             "For example, --output-suffix lmcache writes under results/replay/"
-            "amd-embeded/servers-amdhpc-mi3001x-embedded-TP1/"
+            "amd-embeded/servers-amdhpc-mi3008x-embedded-TP1-0/"
             "sweep-qps-docker-power-clean-freq-ctrl-linespace-amd-lmcache/."
         ),
     )
@@ -688,14 +678,14 @@ def main(argv: list[str] | None = None) -> int:
             str(args.time_constraint_s),
             field_name="--time-constraint-s",
         )
-        if args.port_profile != DEFAULT_MI3001X_PORT_PROFILE_ID:
+        if args.port_profile != DEFAULT_PROFILE0_PORT_PROFILE_ID:
             raise ValueError(
-                "--port-profile must be 0 for the single-node mi3001x workflow"
+                "--port-profile must be 0 for the single-node mi3008x workflow"
             )
         gpu_index = parse_optional_gpu_index(args.gpu_index)
-        if gpu_index != DEFAULT_MI3001X_GPU_INDEX:
+        if gpu_index != DEFAULT_PROFILE0_GPU_INDEX:
             raise ValueError(
-                "--gpu-index must be 0 for the single-node mi3001x workflow"
+                "--gpu-index must be 0 for the single-node mi3008x workflow"
             )
         ctx_aware_usage_threshold_tokens = parse_positive_int(
             str(args.ctx_aware_usage_threshold_tokens),
@@ -867,7 +857,7 @@ def main(argv: list[str] | None = None) -> int:
             "port_profile": int(args.port_profile),
             "default_port_profile": int(args.port_profile),
             "gpu_index": gpu_index,
-            "gpu_index_runtime_default": DEFAULT_MI3001X_GPU_INDEX,
+            "gpu_index_runtime_default": DEFAULT_PROFILE0_GPU_INDEX,
             "profile_output_suffix": PROFILE_OUTPUT_PLACEHOLDER,
             "ctx_aware_usage_threshold_tokens": ctx_aware_usage_threshold_tokens,
             "ctx_aware_scheduling_threshold_tokens": ctx_aware_scheduling_threshold_tokens,

@@ -58,17 +58,12 @@ VLLM_EXTRA_ENV_B64="${VLLM_EXTRA_ENV_B64:-}"
 GATEWAY_CONFIG_DEFAULT="${GATEWAY_CONFIG_DEFAULT:-${REPO_ROOT}/gateway_ctx/config.toml}"
 GATEWAY_CONFIG_FALLBACK="${GATEWAY_CONFIG_FALLBACK:-${REPO_ROOT}/gateway_ctx/config.example.toml}"
 GATEWAY_VENV_DIR="${GATEWAY_VENV_DIR:-${REPO_ROOT}/.venv}"
-REPO_VENV_BIN_DIR="${REPO_VENV_BIN_DIR:-${REPO_ROOT}/.venv/bin}"
 GATEWAY_HOST="${GATEWAY_HOST:-127.0.0.1}"
 GATEWAY_SKIP_INSTALL="${GATEWAY_SKIP_INSTALL:-1}"
 
-if [[ -d "${REPO_VENV_BIN_DIR}" ]]; then
-  export PATH="${REPO_VENV_BIN_DIR}:${PATH}"
-fi
-
 EXPERIMENT_RUNNER="${EXPERIMENT_RUNNER:-bash}"
 
-JOB_LOG_DIR="${JOB_LOG_DIR:-${REPO_ROOT}/servers/servers-amdhpc-mi3001x-embedded-TP1/logs}"
+JOB_LOG_DIR="${JOB_LOG_DIR:-${REPO_ROOT}/servers/servers-amdhpc-mi3008x-embedded-TP1-0/logs}"
 mkdir -p "${JOB_LOG_DIR}" "${AITER_JIT_DIR}" "${XDG_CACHE_HOME}" "${VLLM_CACHE_ROOT}"
 
 JAEGER_LOG_SHARED="${JOB_LOG_DIR}/jaeger.${RUN_ID}.shared.log"
@@ -457,7 +452,7 @@ wait_for_experiment_phase() {
   done
 }
 
-echo "MI3001X embedded TP1 service stack starting on $(hostname) at $(date)"
+echo "MI3008X embedded TP1 profile 0 service stack starting on $(hostname) at $(date)"
 echo "Run ID: ${RUN_ID}"
 resolve_model_launch_settings
 load_vllm_extra_env_args
@@ -490,9 +485,7 @@ echo "  ${EXPERIMENT_LOG}"
 launch_experiment
 
 EXPERIMENT_PHASE_EXIT_CODE=0
-if wait_for_experiment_phase; then
-  EXPERIMENT_PHASE_EXIT_CODE=0
-else
+if ! wait_for_experiment_phase; then
   EXPERIMENT_PHASE_EXIT_CODE=$?
 fi
 
