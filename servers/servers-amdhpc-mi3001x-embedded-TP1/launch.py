@@ -27,6 +27,7 @@ START_SCRIPT = MODULE_ROOT / "start-services.sh"
 RUN_DIR = MODULE_ROOT / "run"
 LOG_DIR = MODULE_ROOT / "logs"
 DEFAULT_MODEL_CONFIG_PATH = REPO_ROOT / "configs" / "model_config.toml"
+DEFAULT_AMD_SMI_POWER_DAEMON_BIN = REPO_ROOT / ".venv" / "bin" / "amd-smi-power-daemon"
 
 PARTITION = "mi3001x"
 MAX_TIME = "04:00:00"
@@ -341,6 +342,7 @@ class Mi3001xEmbeddedTp1Launcher:
             export VLLM_MODEL_EXTRA_ARGS_B64={shlex.quote(encoded_model_extra_args)}
             export VLLM_EXTRA_ENV_B64={shlex.quote(encoded_extra_env)}
             export ROCR_VISIBLE_DEVICES="${{ROCR_VISIBLE_DEVICES:-0}}"
+            export AMD_SMI_POWER_DAEMON_BIN="${{AMD_SMI_POWER_DAEMON_BIN:-{shlex.quote(str(DEFAULT_AMD_SMI_POWER_DAEMON_BIN))}}}"
             export AMD_SMI_POWER_SOCKET_PATH="${{AMD_SMI_POWER_SOCKET_PATH:-/tmp/amdsmi-power-reader.${{SLURM_JOB_ID}}.sock}}"
 
             bash {shlex.quote(str(self.start_script))}

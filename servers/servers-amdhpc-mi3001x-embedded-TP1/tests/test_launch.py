@@ -102,6 +102,11 @@ class Mi3001xEmbeddedTp1LauncherTest(unittest.TestCase):
             self.assertIn("#SBATCH --time=08:30:00", script_text)
             self.assertIn(f"export EXPERIMENT_SCRIPT={shlex.quote(str(experiment_script.resolve()))}", script_text)
             self.assertIn(f"export VLLM_MODEL_KEY={shlex.quote('qwen3_coder_30b_fp8')}", script_text)
+            self.assertIn(
+                'export AMD_SMI_POWER_DAEMON_BIN="${AMD_SMI_POWER_DAEMON_BIN:-'
+                '/work1/talati/yichaoy/vllm-otel/.venv/bin/amd-smi-power-daemon}"',
+                script_text,
+            )
             self.assertIn('export AMD_SMI_POWER_SOCKET_PATH="${AMD_SMI_POWER_SOCKET_PATH:-/tmp/amdsmi-power-reader.${SLURM_JOB_ID}.sock}"', script_text)
             self.assertIn(f"bash {shlex.quote(str(start_script.resolve()))}", script_text)
 
