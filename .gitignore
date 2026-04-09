@@ -45,3 +45,5 @@ analysis/gram-freq/output
 analysis/gram-freq-fine/output
 
 tmp/
+
+/home1/yichaoy/vllm-otel/servers/servers-amdhpc-embedded-TP1/logs

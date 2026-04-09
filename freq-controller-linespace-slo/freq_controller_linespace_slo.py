@@ -213,7 +213,14 @@ class GatewayIPCConfig:
     def resolved_socket_path(self, port_profile_id: int) -> Path:
         if self.ipc_socket_path:
             return Path(self.ipc_socket_path).expanduser().resolve()
-        return _default_gateway_ipc_socket_path(port_profile_id).resolve()
+        candidates = tuple(
+            candidate.resolve()
+            for candidate in _default_gateway_ipc_socket_paths(port_profile_id)
+        )
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return candidates[0]
 
     def to_log_payload(self, *, port_profile_id: int) -> dict[str, Any]:
         return {

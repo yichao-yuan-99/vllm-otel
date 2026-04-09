@@ -1,0 +1,41 @@
+Embedded TP1 job 289656 starting on k002-004-v4.hpcfund at Tue Apr  7 04:38:41 PM CDT 2026
+Launching AMD SMI power daemon socket=/tmp/amdsmi-power-reader.289656.sock
+Launching vLLM profile=0 port=11451 gpu=0
+Launching gateway profile=0 raw=11457 parsed=18171
+Launching experiment profile=0 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-embedded-TP1/mi3001x/sweep-qps-docker-power-clean-amd/generated/20260407T202506Z/run_replay.sh
+All services are ready; waiting for experiment completion.
+Experiment phase finished with exit code 0 at Tue Apr  7 05:02:44 PM CDT 2026
+Stopping gateway profile=0 (pid=115916)
+Stopping vllm profile=0 (pid=113956)
+Stopping amd-smi-power-daemon (pid=113881)
+Stopping jaeger (pid=113885)
+
+----------------------------------------------------------------------
+Omnistat Report Card for Job Id: 289656
+----------------------------------------------------------------------
+
+Job Overview (Num Nodes = 1, Machine = HPC Fund)
+ --> Start time = 2026-04-07 16:38:52
+ --> End   time = 2026-04-07 17:05:52
+ --> Duration   = 1620 secs
+
+GPU Statistics:
+
+           | Utilization (%)  |  Memory Use (%)  | Temperature (C)  |    Power (W)     | Energy (kWh) |
+     GPU # |    Max     Mean  |    Max     Mean  |    Max     Mean  |    Max     Mean  |    Total     |
+    ---------------------------------------------------------------------------------------------------
+         0 |   98.00   56.78  |   90.54   81.51  |   85.00   67.45  |  715.00  434.47  |   1.98e-01   |
+
+Approximate Total GPU Energy Consumed = 1.98e-01 kWh
+
+Host Statistics:
+
+    # CPUs | CPU Utilization (%)  |    Memory Use (%)    |
+           |    Max       Mean    |    Max       Mean    |
+    ------------------------------------------------------
+        16 |    5.95      1.66    |   21.04     10.36    |
+
+--
+Query interval = 30.000 secs
+Query execution time = 0.1 secs
+Version = 1.10.0

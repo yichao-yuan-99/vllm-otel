@@ -444,6 +444,51 @@ def test_extract_run_dir_accepts_multi_linespace_layout_and_prefix(
     assert payload["decision_points"][0]["target_frequency_index"] == 1
 
 
+def test_extract_run_dir_accepts_amd_linespace_layout_and_prefix(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "job"
+    _write_replay_summary(run_dir)
+    query_log_path = _write_query_log(
+        run_dir,
+        log_dir_name="freq-control-linespace-amd",
+        prefix="freq-controller-ls-amd",
+    )
+    decision_log_path = _write_decision_log(
+        run_dir,
+        log_dir_name="freq-control-linespace-amd",
+        prefix="freq-controller-ls-amd",
+        linespace_policy=True,
+    )
+    control_error_log_path = _write_control_error_log(
+        run_dir,
+        log_dir_name="freq-control-linespace-amd",
+        prefix="freq-controller-ls-amd",
+    )
+
+    output_path = extract_run.extract_run_dir(run_dir)
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert output_path == (
+        run_dir
+        / "post-processed"
+        / "freq-control-linespace-amd"
+        / "freq-control-summary.json"
+    ).resolve()
+    assert payload["source_freq_control_log_dir_name"] == "freq-control-linespace-amd"
+    assert payload["source_query_log_paths"] == [str(query_log_path.resolve())]
+    assert payload["source_decision_log_paths"] == [str(decision_log_path.resolve())]
+    assert payload["source_control_error_log_paths"] == [
+        str(control_error_log_path.resolve())
+    ]
+    assert payload["linespace_policy_detected"] is True
+    assert payload["segmented_policy_detected"] is False
+    assert payload["target_context_usage_threshold"] == 300.0
+    assert payload["segment_count"] == 3
+    assert payload["segment_width_context_usage"] == 100.0
+    assert payload["decision_points"][0]["target_frequency_index"] == 1
+
+
 def test_extract_run_dir_accepts_nested_profile_linespace_logs(
     tmp_path: Path,
 ) -> None:
@@ -569,6 +614,27 @@ def test_extract_run_dir_uses_multi_linespace_output_when_multi_log_dir_exists_b
     assert payload["linespace_policy_detected"] is True
 
 
+def test_extract_run_dir_uses_amd_linespace_output_when_amd_log_dir_exists_but_is_empty(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "job"
+    _write_replay_summary(run_dir)
+    (run_dir / "freq-control-linespace-amd").mkdir(parents=True)
+
+    output_path = extract_run.extract_run_dir(run_dir)
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert output_path == (
+        run_dir
+        / "post-processed"
+        / "freq-control-linespace-amd"
+        / "freq-control-summary.json"
+    ).resolve()
+    assert payload["source_freq_control_log_dir_name"] == "freq-control-linespace-amd"
+    assert payload["freq_control_log_found"] is False
+    assert payload["linespace_policy_detected"] is True
+
+
 def test_extract_run_dir_accepts_legacy_root_level_freq_control_logs(
     tmp_path: Path,
 ) -> None:
@@ -679,6 +745,35 @@ def test_extract_run_dir_accepts_legacy_root_level_multi_linespace_logs(
 
     assert payload["query_log_found"] is True
     assert payload["source_freq_control_log_dir_name"] == "freq-control-linespace-multi"
+    assert payload["source_query_log_paths"] == [str(legacy_query_path.resolve())]
+    assert payload["linespace_policy_detected"] is True
+
+
+def test_extract_run_dir_accepts_legacy_root_level_amd_linespace_logs(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "job"
+    _write_replay_summary(run_dir)
+    legacy_query_path = run_dir / "freq-controller-ls-amd.query.20260402T000000Z.jsonl"
+    legacy_query_path.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-02T00:00:00.500Z",
+                "phase": "active",
+                "context_usage": 10.0,
+                "job_active": True,
+                "agent_count": 1,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    output_path = extract_run.extract_run_dir(run_dir)
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert payload["query_log_found"] is True
+    assert payload["source_freq_control_log_dir_name"] == "freq-control-linespace-amd"
     assert payload["source_query_log_paths"] == [str(legacy_query_path.resolve())]
     assert payload["linespace_policy_detected"] is True
 

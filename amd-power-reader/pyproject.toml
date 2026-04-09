@@ -1,0 +1,26 @@
+[project]
+name = "amd-power-reader"
+version = "0.1.0"
+description = "Stream AMD GPU power readings from a local AMD SMI daemon and manage core clocks"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+amd-power-reader = "amd_power_reader:main"
+amd-set-gpu-core-freq = "set_gpu_core_freq:main"
+amd-reset-gpu-core-freq = "reset_gpu_core_freq:main"
+amd-smi-power-daemon = "deamon.amdsmi_power_service:daemon_main"
+amd-smi-power-client = "deamon.amdsmi_power_service:client_main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["deamon"]
+py-modules = [
+    "amd_power_reader",
+    "set_gpu_core_freq",
+    "reset_gpu_core_freq",
+]
