@@ -46,9 +46,10 @@ CTX_AWARE_JOB_LOG_DIRNAME = "job"
 CTX_AWARE_POLICY_MODE_AGE = "age"
 CTX_AWARE_POLICY_MODE_THROUGHPUT = "throughput"
 SLO_AWARE_POLICY_MODE_PUSH_BACK_HALF_SLACK = "push-back-half-slack"
+SLO_AWARE_POLICY_MODE_PUSH_BACK_80P_SLACK = "push-back-80p-slack"
 
 CtxAwarePolicyMode = Literal["age", "throughput"]
-SloAwarePolicyMode = Literal["push-back-half-slack"]
+SloAwarePolicyMode = Literal["push-back-half-slack", "push-back-80p-slack"]
 ScheduleState = Literal["ongoing", "pending", "ralexation"]
 
 
@@ -543,7 +544,12 @@ class GatewayService:
         normalized = policy_mode.strip().lower()
         if normalized == SLO_AWARE_POLICY_MODE_PUSH_BACK_HALF_SLACK:
             return SLO_AWARE_POLICY_MODE_PUSH_BACK_HALF_SLACK
-        raise ValueError("policy_mode must be one of: push-back-half-slack")
+        if normalized == SLO_AWARE_POLICY_MODE_PUSH_BACK_80P_SLACK:
+            return SLO_AWARE_POLICY_MODE_PUSH_BACK_80P_SLACK
+        raise ValueError(
+            "policy_mode must be one of: "
+            "push-back-half-slack, push-back-80p-slack"
+        )
 
     def _stored_throughput_runs_locked(self) -> list[RunState]:
         return [
@@ -576,13 +582,23 @@ class GatewayService:
         if (
             not self.slo_aware_enabled
             or self.slo_target_tokens_per_s is None
-            or self.slo_policy_mode != SLO_AWARE_POLICY_MODE_PUSH_BACK_HALF_SLACK
+            or self.slo_policy_mode is None
         ):
             return False
         min_throughput = self._min_stored_output_tokens_per_s_locked()
         if min_throughput is None:
             return False
         return min_throughput < self.slo_target_tokens_per_s
+
+    def _slo_ralexation_duration_s_locked(self, run: RunState) -> float | None:
+        slack_s = self._slo_slack_s_locked(run)
+        if slack_s is None or slack_s <= 0.0:
+            return None
+        if self.slo_policy_mode == SLO_AWARE_POLICY_MODE_PUSH_BACK_HALF_SLACK:
+            return slack_s * 0.5
+        if self.slo_policy_mode == SLO_AWARE_POLICY_MODE_PUSH_BACK_80P_SLACK:
+            return slack_s * 0.8
+        return None
 
     def _slo_slack_s_locked(self, run: RunState) -> float | None:
         if not self.slo_aware_enabled or self.slo_target_tokens_per_s is None:
@@ -1888,9 +1904,10 @@ class GatewayService:
                     self._start_agent_action_span_locked(active)
                     self._rebalance_ctx_aware_locked()
                     if self._should_enter_ralexation_locked(active):
-                        slack_s = self._slo_slack_s_locked(active)
-                        if slack_s is not None and slack_s > 0.0:
-                            ralexation_duration_s = slack_s / 2.0
+                        ralexation_duration_s = self._slo_ralexation_duration_s_locked(
+                            active
+                        )
+                        if ralexation_duration_s is not None and ralexation_duration_s > 0.0:
                             self._mark_run_ralexation_locked(
                                 active,
                                 duration_s=ralexation_duration_s,

@@ -31,7 +31,7 @@ Enable request body:
 ```json
 {
   "target_tokens_per_s": 25.0,
-  "policy_mode": "push-back-half-slack"
+  "policy_mode": "push-back-80p-slack"
 }
 ```
 
@@ -39,7 +39,7 @@ Rules:
 
 - `target_tokens_per_s` must be positive
 - `policy_mode` is required
-- v1 only supports `push-back-half-slack`
+- supported values are `push-back-half-slack` and `push-back-80p-slack`
 - SLO-aware control changes are only allowed while no job is active
 - settings persist across jobs until `POST /slo-aware/end` or `POST /ctx-aware/end`
 
@@ -111,9 +111,10 @@ state cancels an already forwarded upstream request.
 
 ## Policy
 
-The only supported SLO-aware policy is:
+Supported SLO-aware policies are:
 
 - `push-back-half-slack`
+- `push-back-80p-slack`
 
 The policy is globally active only when the minimum stored throughput among
 active agents with usable throughput is below the configured SLO target.
@@ -142,7 +143,8 @@ An agent enters `ralexation` only if all of these are true:
 Duration:
 
 ```text
-ralexation_duration_s = slo_slack_s / 2
+push-back-half-slack: ralexation_duration_s = slo_slack_s * 0.5
+push-back-80p-slack: ralexation_duration_s = slo_slack_s * 0.8
 ```
 
 ## Leaving `ralexation`

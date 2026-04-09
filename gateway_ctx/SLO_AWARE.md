@@ -35,11 +35,11 @@ This definition intentionally reuses the throughput already tracked on each agen
 
 
 Besides the slo target, the user also need to provide a policy.
-Now we only provide one policy "push-back-half-slack".
+Now we provide two policies: "push-back-half-slack" and "push-back-80p-slack".
 
 If the minimum stored throughput among all alive agents is smaller than the SLO, the policy will be triggered.
 
-Whenever an ongoing agent returns from a request, if its stored throughput is larger than the average stored throughput of all active agents and the SLO target, we push it into a "ralexation" state for half of its SLO slack time.
+Whenever an ongoing agent returns from a request, if its stored throughput is larger than the average stored throughput of all active agents and the SLO target, we push it into a "ralexation" state. The ralexation time is half of its SLO slack for "push-back-half-slack", or 80% of its SLO slack for "push-back-80p-slack".
 
 The "ralexation" state is similar to the normal pending state, but the wake-up condition is different. Normal pending is woken up by the regular scheduler admission logic, while "ralexation" is woken up by the SLO-aware policy.
 

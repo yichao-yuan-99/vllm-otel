@@ -85,9 +85,10 @@ Agents without stored throughput yet:
 
 ### 2.4 Policy trigger
 
-For v1 we support one policy:
+Supported SLO-aware policies are:
 
 - `push-back-half-slack`
+- `push-back-80p-slack`
 
 The policy is globally active only when:
 
@@ -109,9 +110,10 @@ That agent may enter `ralexation` only if all of the following are true:
 - its stored throughput is greater than the configured SLO target
 - its computed slack is positive
 
-Duration rule:
+Duration rules:
 
-- `ralexation_duration_s = slo_slack_s / 2`
+- `push-back-half-slack`: `ralexation_duration_s = slo_slack_s * 0.5`
+- `push-back-80p-slack`: `ralexation_duration_s = slo_slack_s * 0.8`
 
 If the duration is `<= 0`, do not place the agent into `ralexation`.
 
@@ -168,7 +170,7 @@ assumptions:
   SLO-aware is invalid without ctx-aware
 - we keep the current meaning of throughput from the existing gateway code:
   completed output tokens divided by accumulated LLM request duration
-- v1 keeps the only supported SLO policy as `push-back-half-slack`
+- supported SLO policies are `push-back-half-slack` and `push-back-80p-slack`
 - v1 does not attempt predictive throughput modeling from request payloads
 
 ## 4. External API Changes
@@ -186,7 +188,7 @@ Add runtime control endpoints on the main HTTP app:
 ```json
 {
   "target_tokens_per_s": 25.0,
-  "policy_mode": "push-back-half-slack"
+  "policy_mode": "push-back-80p-slack"
 }
 ```
 
@@ -195,7 +197,7 @@ Validation rules:
 - `target_tokens_per_s` is required
 - it must be a positive number
 - `policy_mode` is required
-- for v1, `policy_mode` must equal `push-back-half-slack`
+- `policy_mode` must equal `push-back-half-slack` or `push-back-80p-slack`
 - ctx-aware mode must already be enabled
 - no job may be active
 
@@ -226,7 +228,7 @@ Return a status/control view similar to `GET /ctx-aware`:
   "enabled": true,
   "requires_ctx_aware": true,
   "target_tokens_per_s": 25.0,
-  "policy_mode": "push-back-half-slack",
+  "policy_mode": "push-back-80p-slack",
   "ralexation_agent_count": 3,
   "agents": [
     {
@@ -282,7 +284,7 @@ Add gateway-global runtime state:
 
 - `slo_aware_enabled: bool = False`
 - `slo_target_tokens_per_s: float | None = None`
-- `slo_policy_mode: Literal["push-back-half-slack"] | None = None`
+- `slo_policy_mode: Literal["push-back-half-slack", "push-back-80p-slack"] | None = None`
 - `slo_ralexation_agent_count: int = 0`
 - `slo_ralexation_effective_context_tokens: int = 0`
 
@@ -488,7 +490,7 @@ Add tests for:
 - SLO-aware config persists across jobs while ctx-aware remains enabled
 - disabling ctx-aware also clears SLO-aware config
 - agents with no stored throughput are excluded from min/avg checks
-- `push-back-half-slack` triggers only when global minimum throughput is below
+- an SLO push-back policy triggers only when global minimum throughput is below
   target
 - a run enters `ralexation` only when above both average throughput and target
 - non-positive slack does not create `ralexation`
@@ -524,7 +526,7 @@ Document:
 3. Add helpers for stored-throughput min/avg and slack calculation.
 4. Add `/slo-aware` control/status endpoints.
 5. Extend rebalance to track `ralexation` state and ready-to-leave logic.
-6. Hook request-completion into `push-back-half-slack`.
+6. Hook request-completion into the supported SLO push-back policies.
 7. Extend request waiting to treat `ralexation` like a blocked state.
 8. Add observability/status fields.
 9. Add tests for trigger, wake-up, and priority edge cases.
@@ -534,7 +536,7 @@ Document:
 
 To keep v1 focused, do not include:
 
-- multiple SLO policies beyond `push-back-half-slack`
+- additional SLO policies beyond `push-back-half-slack` and `push-back-80p-slack`
 - predictive throughput models
 - per-model or per-agent SLO targets
 - persistent SLO-aware configuration in `config.toml`

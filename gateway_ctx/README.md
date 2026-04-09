@@ -84,7 +84,7 @@ Enable payload:
 ```json
 {
   "target_tokens_per_s": 25.0,
-  "policy_mode": "push-back-half-slack"
+  "policy_mode": "push-back-80p-slack"
 }
 ```
 
@@ -98,9 +98,11 @@ Behavior:
 - in `gateway_ctx`, `total_llm_request_duration_s` accumulates full end-to-end request
   time, including any gateway-side `pending` or `ralexation` wait before
   forwarding
-- v1 supports one policy: `push-back-half-slack`
+- supported policies are `push-back-half-slack` and `push-back-80p-slack`
 - the policy is only active while the minimum stored throughput across active agents is below the configured SLO target
-- when an ongoing agent finishes a request and its stored throughput is above both the active-agent average and the SLO target, it can enter `ralexation` for half of its computed SLO slack
+- when an ongoing agent finishes a request and its stored throughput is above both the active-agent average and the SLO target, it can enter `ralexation`
+- `push-back-half-slack` relaxes the agent for `50%` of its computed SLO slack
+- `push-back-80p-slack` relaxes the agent for `80%` of its computed SLO slack
 - `ralexation` blocks new requests from that agent just like `pending`, but it wakes up under SLO-aware rules instead of normal ctx-aware promotion
 - if a `ralexation` agent wakes while any normal `pending` agent already exists, it becomes normal `pending`
 - otherwise, a waking `ralexation` agent is re-admitted as if it were a new incoming agent under ctx-aware admission

@@ -857,6 +857,53 @@ def test_slo_aware_control_endpoints_require_ctx_aware_and_persist_across_jobs(
     assert disabled.json()["policy_mode"] is None
 
 
+def test_slo_aware_control_endpoints_accept_push_back_80p_slack_policy_mode(
+    tmp_path: Path,
+) -> None:
+    client = build_client()
+
+    assert client.post(
+        "/ctx-aware/start",
+        json={
+            "usage_threshold_tokens": 12000,
+            "scheduling_threshold_tokens": 9000,
+        },
+    ).status_code == 200
+
+    enabled = client.post(
+        "/slo-aware/start",
+        json={
+            "target_tokens_per_s": 25.0,
+            "policy_mode": "push-back-80p-slack",
+        },
+    )
+    assert enabled.status_code == 200
+    assert enabled.json()["enabled"] is True
+    assert enabled.json()["policy_mode"] == "push-back-80p-slack"
+
+    context_payload = client.get("/ipc/context").json()
+    assert context_payload["slo_aware_enabled"] is True
+    assert context_payload["slo_target_tokens_per_s"] == 25.0
+    assert context_payload["slo_policy_mode"] == "push-back-80p-slack"
+
+    assert client.post(
+        "/job/start",
+        json={"output_location": str(tmp_path / "slo-80p-policy")},
+    ).status_code == 200
+    assert client.post("/job/end", json={"status": "completed"}).status_code == 200
+
+    persisted = client.get("/slo-aware")
+    assert persisted.status_code == 200
+    assert persisted.json()["enabled"] is True
+    assert persisted.json()["policy_mode"] == "push-back-80p-slack"
+
+    assert client.post("/ctx-aware/end").status_code == 200
+    disabled = client.get("/slo-aware")
+    assert disabled.status_code == 200
+    assert disabled.json()["enabled"] is False
+    assert disabled.json()["policy_mode"] is None
+
+
 def test_ctx_aware_new_agent_admission_and_oldest_pending_promotion(
     tmp_path: Path,
 ) -> None:
@@ -2109,6 +2156,91 @@ def test_slo_aware_push_back_half_slack_enters_ralexation(tmp_path: Path) -> Non
         status = service.get_slo_aware_summary()
         assert status["enabled"] is True
         assert status["ralexation_agent_count"] == 1
+
+    asyncio.run(run_case())
+
+
+def test_slo_aware_push_back_80p_slack_uses_eighty_percent_of_slack(
+    tmp_path: Path,
+) -> None:
+    async def run_case() -> None:
+        async def fake_forward(
+            method: str,
+            path: str,
+            headers: dict[str, str],
+            body: bytes,
+        ) -> ForwardResult:
+            await asyncio.sleep(0.02)
+            response_json = {
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "model": "Qwen3-Coder-30B-A3B-Instruct",
+                "usage": {"prompt_tokens": 100, "completion_tokens": 40},
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
+            }
+            return ForwardResult(
+                status_code=200,
+                content=json.dumps(response_json).encode("utf-8"),
+                content_type="application/json",
+                response_json=response_json,
+            )
+
+        service = GatewayService(
+            config=GatewayConfig(
+                vllm_base_url="http://vllm:11451",
+                jaeger_api_base_url="http://jaeger:16686/api/traces",
+                otlp_traces_endpoint="grpc://jaeger:4317",
+            ),
+            tracer=trace.get_tracer("gateway-test"),
+            forwarder=fake_forward,
+        )
+
+        service.start_ctx_aware(
+            usage_threshold_tokens=12000,
+            scheduling_threshold_tokens=9000,
+        )
+        service.start_slo_aware(
+            target_tokens_per_s=25.0,
+            policy_mode="push-back-80p-slack",
+        )
+        start_payload = service.start_job(str(tmp_path / "slo-ralexation-enter-80p"))
+        decision_log_path = Path(start_payload["slo_aware_decision_log_path"])
+        service.start_agent("agent-a")
+        service.start_agent("agent-b")
+
+        with service._lock:
+            service.active_runs["agent-b"].total_completion_tokens = 100
+            service.active_runs["agent-b"].total_llm_request_duration_s = 10.0
+            service.active_runs["agent-b"].total_ctx_aware_request_duration_s = 10.0
+            service.active_runs["agent-b"].current_output_tokens_per_s = 10.0
+
+        result = await service.proxy_request(
+            api_token="agent-a",
+            method="POST",
+            path="v1/chat/completions",
+            headers={"content-type": "application/json"},
+            body=json.dumps(
+                {
+                    "model": "Qwen3-Coder-30B-A3B-Instruct",
+                    "messages": [{"role": "user", "content": "make agent-a fast"}],
+                }
+            ).encode("utf-8"),
+        )
+        assert result.status_code == 200
+
+        with service._lock:
+            run = service.active_runs["agent-a"]
+            slack_s = service._slo_slack_s_locked(run)
+            assert slack_s is not None
+            assert run.schedule_state == "ralexation"
+
+        records = load_jsonl(decision_log_path)
+        assert records[0]["event_type"] == "agent_entered_ralexation"
+        assert records[0]["policy_mode"] == "push-back-80p-slack"
+        assert records[0]["ralexation_duration_s"] == pytest.approx(
+            round(slack_s * 0.8, 6),
+            abs=1e-6,
+        )
 
     asyncio.run(run_case())
 
