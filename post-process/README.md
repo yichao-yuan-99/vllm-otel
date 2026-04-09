@@ -17,6 +17,7 @@ outputs.
 - `power-sampling`: sample interpolated power at prefill-concurrency ticks
 - `freq-control`: summarize freq-controller query/decision logs and recover the control timeline
 - `gateway/llm-requests`: flatten and summarize gateway LLM request traces
+- `gateway/slo-aware-log`: summarize event-driven gateway SLO-aware `ralexation` decisions
 - `prefill-concurrency`: 10ms prefill-phase concurrency series from LLM request spans
 - `gateway/stack`: recover stacked per-second gateway token throughput from request ranges
 - `gateway/stack-context`: recover stacked per-second agent context usage from request history
@@ -42,6 +43,7 @@ outputs.
 - `post-process/power-sampling/README.md`
 - `post-process/freq-control/README.md`
 - `post-process/gateway/llm-requests/README.md`
+- `post-process/gateway/slo-aware-log/README.md`
 - `post-process/prefill-concurrency/README.md`
 - `post-process/gateway/stack/README.md`
 - `post-process/gateway/stack-context/README.md`
@@ -51,6 +53,7 @@ outputs.
 - `post-process/visualization/gateway-stack/README.md`
 - `post-process/visualization/gateway-stack-context/README.md`
 - `post-process/visualization/gateway-stack-kv/README.md`
+- `post-process/visualization/gateway-slo-aware/README.md`
 - `post-process/visualization/vllm-metrics/README.md`
 - `post-process/visualization/power/README.md`
 - `post-process/visualization/prefill-concurrency/README.md`
@@ -88,26 +91,28 @@ Pipeline order:
 10. `gateway/stack-context/extract_run.py`
 11. `gateway/stack-kv/extract_run.py`
 12. `gateway/usage/extract_run.py`
-13. `split/duration/extract_run.py`
-14. `vllm-metrics/extract_run.py`
-15. `vllm-metrics/summarize_timeseries.py`
-16. `power/extract_run.py`
-17. `power-sampling/extract_run.py`
-18. `freq-control/extract_run.py`
-19. `slo-decision/extract_run.py`
-20. `key-stats/extract_run.py`
-21. `visualization/job-throughput/generate_all_figures.py`
-22. `visualization/agent-output-throughput/generate_all_figures.py`
-23. `visualization/job-concurrency/generate_all_figures.py`
-24. `visualization/prefill-concurrency/generate_all_figures.py`
-25. `visualization/gateway-stack/generate_all_figures.py`
-26. `visualization/gateway-stack-context/generate_all_figures.py`
-27. `visualization/gateway-stack-kv/generate_all_figures.py`
-28. `visualization/vllm-metrics/generate_all_figures.py`
-29. `visualization/power/generate_all_figures.py`
-30. `visualization/freq-control/generate_all_figures.py`
-31. `visualization/slo-decision/generate_all_figures.py`
-32. `global/aggregate_runs_csv.py` (root-dir mode only, skipped in dry-run)
+13. `gateway/slo-aware-log/extract_run.py`
+14. `split/duration/extract_run.py`
+15. `vllm-metrics/extract_run.py`
+16. `vllm-metrics/summarize_timeseries.py`
+17. `power/extract_run.py`
+18. `power-sampling/extract_run.py`
+19. `freq-control/extract_run.py`
+20. `slo-decision/extract_run.py`
+21. `key-stats/extract_run.py`
+22. `visualization/job-throughput/generate_all_figures.py`
+23. `visualization/agent-output-throughput/generate_all_figures.py`
+24. `visualization/job-concurrency/generate_all_figures.py`
+25. `visualization/prefill-concurrency/generate_all_figures.py`
+26. `visualization/gateway-stack/generate_all_figures.py`
+27. `visualization/gateway-stack-context/generate_all_figures.py`
+28. `visualization/gateway-slo-aware/generate_all_figures.py`
+29. `visualization/gateway-stack-kv/generate_all_figures.py`
+30. `visualization/vllm-metrics/generate_all_figures.py`
+31. `visualization/power/generate_all_figures.py`
+32. `visualization/freq-control/generate_all_figures.py`
+33. `visualization/slo-decision/generate_all_figures.py`
+34. `global/aggregate_runs_csv.py` (root-dir mode only, skipped in dry-run)
 
 ### `global-progress`
 
@@ -185,6 +190,33 @@ Pipeline order:
 - `--dpi`
 - default output:
 - `<run-dir>/post-processed/visualization/agent-output-throughput/`
+
+### `gateway/slo-aware-log`
+
+- `post-process/gateway/slo-aware-log/extract_run.py`
+- purpose: extract event-driven gateway SLO-aware `ralexation` decisions from
+  `gateway-output/job/slo_aware_decisions_*.jsonl`
+- supports:
+- single run: `--run-dir <run-dir>`
+- batch discovery: `--root-dir <root-dir>`
+- parallel workers: `--max-procs`
+- dry-run: `--dry-run`
+- default output:
+- `<run-dir>/post-processed/gateway/slo-aware-log/slo-aware-events.json`
+
+- `post-process/visualization/gateway-slo-aware/generate_all_figures.py`
+- purpose: render a gateway SLO-aware event timeline showing throughput, slack,
+  and `ralexation` duration around entry and wake decisions
+- supports:
+- single run: `--run-dir <run-dir>`
+- batch discovery: `--root-dir <root-dir>`
+- parallel workers: `--max-procs`
+- dry-run: `--dry-run`
+- rendering controls:
+- `--format`
+- `--dpi`
+- default output:
+- `<run-dir>/post-processed/visualization/gateway-slo-aware/`
 
 ### `slo-decision`
 

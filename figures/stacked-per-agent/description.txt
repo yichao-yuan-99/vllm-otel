@@ -1,0 +1,3 @@
+Per-Agent Context Usage Over Time in Fixed Windows
+
+This figure turns per-agent context-usage activity into stacked bars over fixed time windows, showing how total active context load is distributed across agents over time. It provides a more structured view of the original stacked timeline by making each window directly comparable while preserving the contribution of each agent.

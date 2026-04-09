@@ -512,28 +512,29 @@ def test_ipc_context_reports_active_agent_context_usage(tmp_path: Path) -> None:
     assert payload["pending_agent_count"] == 0
     assert payload["ongoing_effective_context_tokens"] == 1700
     assert payload["pending_effective_context_tokens"] == 0
-    assert payload["agents"] == [
-        {
-            "api_token_hash": sha256_hex(token_a),
-            "trace_id": active_runs[token_a].trace_id,
-            "run_start_time": active_runs[token_a].run_start_time,
-            "schedule_state": "ongoing",
-            "context_tokens": 1200,
-            "effective_context_tokens": 1200,
-            "has_usable_context_usage": True,
-            "pending_since": None,
-        },
-        {
-            "api_token_hash": sha256_hex(token_b),
-            "trace_id": active_runs[token_b].trace_id,
-            "run_start_time": active_runs[token_b].run_start_time,
-            "schedule_state": "ongoing",
-            "context_tokens": 500,
-            "effective_context_tokens": 500,
-            "has_usable_context_usage": True,
-            "pending_since": None,
-        },
-    ]
+    assert payload["agents"][0]["api_token_hash"] == sha256_hex(token_a)
+    assert payload["agents"][0]["trace_id"] == active_runs[token_a].trace_id
+    assert payload["agents"][0]["run_start_time"] == active_runs[token_a].run_start_time
+    assert payload["agents"][0]["schedule_state"] == "ongoing"
+    assert payload["agents"][0]["context_tokens"] == 1200
+    assert payload["agents"][0]["effective_context_tokens"] == 1200
+    assert payload["agents"][0]["has_usable_context_usage"] is True
+    assert payload["agents"][0]["pending_since"] is None
+    assert payload["agents"][0]["ralexation_until"] is None
+    assert payload["agents"][0]["output_tokens_per_s"] is not None
+    assert payload["agents"][0]["slo_slack_s"] is None
+
+    assert payload["agents"][1]["api_token_hash"] == sha256_hex(token_b)
+    assert payload["agents"][1]["trace_id"] == active_runs[token_b].trace_id
+    assert payload["agents"][1]["run_start_time"] == active_runs[token_b].run_start_time
+    assert payload["agents"][1]["schedule_state"] == "ongoing"
+    assert payload["agents"][1]["context_tokens"] == 500
+    assert payload["agents"][1]["effective_context_tokens"] == 500
+    assert payload["agents"][1]["has_usable_context_usage"] is True
+    assert payload["agents"][1]["pending_since"] is None
+    assert payload["agents"][1]["ralexation_until"] is None
+    assert payload["agents"][1]["output_tokens_per_s"] is not None
+    assert payload["agents"][1]["slo_slack_s"] is None
 
     assert client.post(
         "/v1/chat/completions",
@@ -559,18 +560,17 @@ def test_ipc_context_reports_active_agent_context_usage(tmp_path: Path) -> None:
     assert payload["agent_count"] == 1
     assert payload["total_context_tokens"] == 1600
     assert payload["effective_total_context_tokens"] == 1600
-    assert payload["agents"] == [
-        {
-            "api_token_hash": sha256_hex(token_a),
-            "trace_id": active_runs[token_a].trace_id,
-            "run_start_time": active_runs[token_a].run_start_time,
-            "schedule_state": "ongoing",
-            "context_tokens": 1600,
-            "effective_context_tokens": 1600,
-            "has_usable_context_usage": True,
-            "pending_since": None,
-        }
-    ]
+    assert payload["agents"][0]["api_token_hash"] == sha256_hex(token_a)
+    assert payload["agents"][0]["trace_id"] == active_runs[token_a].trace_id
+    assert payload["agents"][0]["run_start_time"] == active_runs[token_a].run_start_time
+    assert payload["agents"][0]["schedule_state"] == "ongoing"
+    assert payload["agents"][0]["context_tokens"] == 1600
+    assert payload["agents"][0]["effective_context_tokens"] == 1600
+    assert payload["agents"][0]["has_usable_context_usage"] is True
+    assert payload["agents"][0]["pending_since"] is None
+    assert payload["agents"][0]["ralexation_until"] is None
+    assert payload["agents"][0]["output_tokens_per_s"] is not None
+    assert payload["agents"][0]["slo_slack_s"] is None
 
 
 def test_ipc_context_keeps_last_known_value_when_usage_is_missing(tmp_path: Path) -> None:
@@ -760,6 +760,101 @@ def test_ctx_aware_control_endpoints_accept_throughput_policy_mode(
     assert disabled.status_code == 200
     assert disabled.json()["enabled"] is False
     assert disabled.json()["policy_mode"] == "age"
+
+
+def test_slo_aware_control_endpoints_require_ctx_aware_and_persist_across_jobs(
+    tmp_path: Path,
+) -> None:
+    client = build_client()
+
+    status = client.get("/slo-aware")
+    assert status.status_code == 200
+    assert status.json()["enabled"] is False
+    assert status.json()["target_tokens_per_s"] is None
+    assert status.json()["policy_mode"] is None
+
+    requires_ctx = client.post(
+        "/slo-aware/start",
+        json={
+            "target_tokens_per_s": 25.0,
+            "policy_mode": "push-back-half-slack",
+        },
+    )
+    assert requires_ctx.status_code == 409
+    assert "ctx-aware" in requires_ctx.json()["detail"]
+
+    assert client.post(
+        "/ctx-aware/start",
+        json={
+            "usage_threshold_tokens": 12000,
+            "scheduling_threshold_tokens": 9000,
+        },
+    ).status_code == 200
+
+    invalid_policy = client.post(
+        "/slo-aware/start",
+        json={
+            "target_tokens_per_s": 25.0,
+            "policy_mode": "fastest",
+        },
+    )
+    assert invalid_policy.status_code == 400
+    assert "policy_mode" in invalid_policy.json()["detail"]
+
+    enabled = client.post(
+        "/slo-aware/start",
+        json={
+            "target_tokens_per_s": 25.0,
+            "policy_mode": "push-back-half-slack",
+        },
+    )
+    assert enabled.status_code == 200
+    assert enabled.json()["enabled"] is True
+    assert enabled.json()["target_tokens_per_s"] == 25.0
+    assert enabled.json()["policy_mode"] == "push-back-half-slack"
+
+    context_payload = client.get("/ipc/context").json()
+    assert context_payload["slo_aware_enabled"] is True
+    assert context_payload["slo_target_tokens_per_s"] == 25.0
+    assert context_payload["slo_policy_mode"] == "push-back-half-slack"
+
+    assert client.post(
+        "/job/start",
+        json={"output_location": str(tmp_path / "slo-job-a")},
+    ).status_code == 200
+
+    start_while_active = client.post(
+        "/slo-aware/start",
+        json={
+            "target_tokens_per_s": 30.0,
+            "policy_mode": "push-back-half-slack",
+        },
+    )
+    assert start_while_active.status_code == 409
+
+    end_while_active = client.post("/slo-aware/end")
+    assert end_while_active.status_code == 409
+
+    assert client.post("/job/end", json={"status": "completed"}).status_code == 200
+
+    persisted = client.get("/slo-aware")
+    assert persisted.status_code == 200
+    assert persisted.json()["enabled"] is True
+    assert persisted.json()["target_tokens_per_s"] == 25.0
+
+    assert client.post(
+        "/job/start",
+        json={"output_location": str(tmp_path / "slo-job-b")},
+    ).status_code == 200
+    assert client.get("/slo-aware").json()["enabled"] is True
+    assert client.post("/job/end", json={"status": "completed"}).status_code == 200
+
+    assert client.post("/ctx-aware/end").status_code == 200
+    disabled = client.get("/slo-aware")
+    assert disabled.status_code == 200
+    assert disabled.json()["enabled"] is False
+    assert disabled.json()["target_tokens_per_s"] is None
+    assert disabled.json()["policy_mode"] is None
 
 
 def test_ctx_aware_new_agent_admission_and_oldest_pending_promotion(
@@ -1004,7 +1099,9 @@ def test_ctx_aware_job_log_writes_periodic_samples_and_transition_counts(
         response = client.post("/job/start", json={"output_location": str(output_dir)})
         assert response.status_code == 200
         job_log_path = Path(response.json()["ctx_aware_job_log_path"])
+        slo_decision_log_path = Path(response.json()["slo_aware_decision_log_path"])
         assert job_log_path.exists()
+        assert slo_decision_log_path.exists()
 
         for token in ["agent-a", "agent-b", "agent-c", "agent-d"]:
             assert client.post("/agent/start", json={"api_token": token}).status_code == 200
@@ -1041,22 +1138,26 @@ def test_ctx_aware_job_log_writes_periodic_samples_and_transition_counts(
         assert len(records) >= 4
         assert records[0]["ongoing_agent_count"] == 0
         assert records[0]["pending_agent_count"] == 0
+        assert records[0]["ralexation_agent_count"] == 0
         assert records[0]["ongoing_effective_context_tokens"] == 0
         assert records[0]["pending_effective_context_tokens"] == 0
+        assert records[0]["ralexation_effective_context_tokens"] == 0
 
         expected_keys = {
             "timestamp",
             "ongoing_agent_count",
             "pending_agent_count",
+            "ralexation_agent_count",
             "ongoing_effective_context_tokens",
             "pending_effective_context_tokens",
+            "ralexation_effective_context_tokens",
             "agents_turned_pending_due_to_context_threshold",
             "agents_turned_ongoing",
             "new_agents_added_as_pending",
             "new_agents_added_as_ongoing",
         }
         for record in records:
-            assert expected_keys == set(record)
+            assert expected_keys.issubset(set(record))
 
         assert any(
             record["new_agents_added_as_ongoing"] == 3
@@ -1931,6 +2032,440 @@ def test_runtime_settings_load_from_toml(tmp_path: Path) -> None:
     assert settings.ipc_socket_permissions == 0o666
     assert settings.ipc_socket_uid == 1234
     assert settings.ipc_socket_gid == 5678
+
+
+def test_slo_aware_push_back_half_slack_enters_ralexation(tmp_path: Path) -> None:
+    async def run_case() -> None:
+        async def fake_forward(
+            method: str,
+            path: str,
+            headers: dict[str, str],
+            body: bytes,
+        ) -> ForwardResult:
+            await asyncio.sleep(0.02)
+            response_json = {
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "model": "Qwen3-Coder-30B-A3B-Instruct",
+                "usage": {"prompt_tokens": 100, "completion_tokens": 40},
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
+            }
+            return ForwardResult(
+                status_code=200,
+                content=json.dumps(response_json).encode("utf-8"),
+                content_type="application/json",
+                response_json=response_json,
+            )
+
+        service = GatewayService(
+            config=GatewayConfig(
+                vllm_base_url="http://vllm:11451",
+                jaeger_api_base_url="http://jaeger:16686/api/traces",
+                otlp_traces_endpoint="grpc://jaeger:4317",
+            ),
+            tracer=trace.get_tracer("gateway-test"),
+            forwarder=fake_forward,
+        )
+
+        service.start_ctx_aware(
+            usage_threshold_tokens=12000,
+            scheduling_threshold_tokens=9000,
+        )
+        service.start_slo_aware(
+            target_tokens_per_s=25.0,
+            policy_mode="push-back-half-slack",
+        )
+        service.start_job(str(tmp_path / "slo-ralexation-enter"))
+        service.start_agent("agent-a")
+        service.start_agent("agent-b")
+
+        with service._lock:
+            service.active_runs["agent-b"].total_completion_tokens = 100
+            service.active_runs["agent-b"].total_llm_request_duration_s = 10.0
+            service.active_runs["agent-b"].total_ctx_aware_request_duration_s = 10.0
+            service.active_runs["agent-b"].current_output_tokens_per_s = 10.0
+
+        result = await service.proxy_request(
+            api_token="agent-a",
+            method="POST",
+            path="v1/chat/completions",
+            headers={"content-type": "application/json"},
+            body=json.dumps(
+                {
+                    "model": "Qwen3-Coder-30B-A3B-Instruct",
+                    "messages": [{"role": "user", "content": "make agent-a fast"}],
+                }
+            ).encode("utf-8"),
+        )
+        assert result.status_code == 200
+
+        run = service.active_runs["agent-a"]
+        assert run.schedule_state == "ralexation"
+        assert run.ready_event is not None
+        assert run.ready_event.is_set() is False
+        assert run.ralexation_until_iso is not None
+        assert run.ralexation_until_monotonic is not None
+
+        status = service.get_slo_aware_summary()
+        assert status["enabled"] is True
+        assert status["ralexation_agent_count"] == 1
+
+    asyncio.run(run_case())
+
+
+def test_slo_aware_ready_ralexation_becomes_pending_when_pending_exists(
+    tmp_path: Path,
+) -> None:
+    async def run_case() -> None:
+        async def fake_forward(
+            method: str,
+            path: str,
+            headers: dict[str, str],
+            body: bytes,
+        ) -> ForwardResult:
+            await asyncio.sleep(0.02)
+            response_json = {
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "model": "Qwen3-Coder-30B-A3B-Instruct",
+                "usage": {"prompt_tokens": 100, "completion_tokens": 40},
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
+            }
+            return ForwardResult(
+                status_code=200,
+                content=json.dumps(response_json).encode("utf-8"),
+                content_type="application/json",
+                response_json=response_json,
+            )
+
+        service = GatewayService(
+            config=GatewayConfig(
+                vllm_base_url="http://vllm:11451",
+                jaeger_api_base_url="http://jaeger:16686/api/traces",
+                otlp_traces_endpoint="grpc://jaeger:4317",
+            ),
+            tracer=trace.get_tracer("gateway-test"),
+            forwarder=fake_forward,
+        )
+
+        service.start_ctx_aware(
+            usage_threshold_tokens=9000,
+            scheduling_threshold_tokens=6000,
+        )
+        service.start_slo_aware(
+            target_tokens_per_s=25.0,
+            policy_mode="push-back-half-slack",
+        )
+        service.start_job(str(tmp_path / "slo-ralexation-to-pending"))
+        for token in ["agent-a", "agent-b", "agent-c", "agent-d"]:
+            service.start_agent(token)
+
+        assert service.active_runs["agent-c"].schedule_state == "pending"
+        assert service.active_runs["agent-d"].schedule_state == "pending"
+
+        with service._lock:
+            service.active_runs["agent-b"].total_completion_tokens = 100
+            service.active_runs["agent-b"].total_llm_request_duration_s = 10.0
+            service.active_runs["agent-b"].total_ctx_aware_request_duration_s = 10.0
+            service.active_runs["agent-b"].current_output_tokens_per_s = 10.0
+
+        result = await service.proxy_request(
+            api_token="agent-a",
+            method="POST",
+            path="v1/chat/completions",
+            headers={"content-type": "application/json"},
+            body=json.dumps(
+                {
+                    "model": "Qwen3-Coder-30B-A3B-Instruct",
+                    "messages": [{"role": "user", "content": "make agent-a fast"}],
+                }
+            ).encode("utf-8"),
+        )
+        assert result.status_code == 200
+        assert service.active_runs["agent-a"].schedule_state == "ralexation"
+
+        with service._lock:
+            service.active_runs["agent-a"].ralexation_until_monotonic = time.monotonic() - 0.1
+            service._rebalance_ctx_aware_locked()
+
+        assert service.active_runs["agent-a"].schedule_state == "pending"
+        assert service.active_runs["agent-a"].pending_since_iso is not None
+        assert service.active_runs["agent-a"].ralexation_until_iso is None
+
+    asyncio.run(run_case())
+
+
+def test_slo_aware_ready_ralexation_reenters_ongoing_without_pending(
+    tmp_path: Path,
+) -> None:
+    async def run_case() -> None:
+        async def fake_forward(
+            method: str,
+            path: str,
+            headers: dict[str, str],
+            body: bytes,
+        ) -> ForwardResult:
+            await asyncio.sleep(0.02)
+            response_json = {
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "model": "Qwen3-Coder-30B-A3B-Instruct",
+                "usage": {"prompt_tokens": 100, "completion_tokens": 40},
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
+            }
+            return ForwardResult(
+                status_code=200,
+                content=json.dumps(response_json).encode("utf-8"),
+                content_type="application/json",
+                response_json=response_json,
+            )
+
+        service = GatewayService(
+            config=GatewayConfig(
+                vllm_base_url="http://vllm:11451",
+                jaeger_api_base_url="http://jaeger:16686/api/traces",
+                otlp_traces_endpoint="grpc://jaeger:4317",
+            ),
+            tracer=trace.get_tracer("gateway-test"),
+            forwarder=fake_forward,
+        )
+
+        service.start_ctx_aware(
+            usage_threshold_tokens=12000,
+            scheduling_threshold_tokens=9000,
+        )
+        service.start_slo_aware(
+            target_tokens_per_s=25.0,
+            policy_mode="push-back-half-slack",
+        )
+        service.start_job(str(tmp_path / "slo-ralexation-to-ongoing"))
+        service.start_agent("agent-a")
+        service.start_agent("agent-b")
+
+        with service._lock:
+            service.active_runs["agent-b"].total_completion_tokens = 100
+            service.active_runs["agent-b"].total_llm_request_duration_s = 10.0
+            service.active_runs["agent-b"].total_ctx_aware_request_duration_s = 10.0
+            service.active_runs["agent-b"].current_output_tokens_per_s = 10.0
+
+        result = await service.proxy_request(
+            api_token="agent-a",
+            method="POST",
+            path="v1/chat/completions",
+            headers={"content-type": "application/json"},
+            body=json.dumps(
+                {
+                    "model": "Qwen3-Coder-30B-A3B-Instruct",
+                    "messages": [{"role": "user", "content": "make agent-a fast"}],
+                }
+            ).encode("utf-8"),
+        )
+        assert result.status_code == 200
+        assert service.active_runs["agent-a"].schedule_state == "ralexation"
+
+        with service._lock:
+            service.active_runs["agent-a"].ralexation_until_monotonic = time.monotonic() - 0.1
+            service._rebalance_ctx_aware_locked()
+
+        assert service.active_runs["agent-a"].schedule_state == "ongoing"
+        assert service.active_runs["agent-a"].ready_event is not None
+        assert service.active_runs["agent-a"].ready_event.is_set() is True
+
+    asyncio.run(run_case())
+
+
+def test_slo_aware_ralexation_request_waits_and_logs_pending_duration(
+    tmp_path: Path,
+) -> None:
+    async def run_case() -> None:
+        forward_calls: list[float] = []
+
+        async def fake_forward(
+            method: str,
+            path: str,
+            headers: dict[str, str],
+            body: bytes,
+        ) -> ForwardResult:
+            forward_calls.append(asyncio.get_running_loop().time())
+            await asyncio.sleep(0.02)
+            response_json = {
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "model": "Qwen3-Coder-30B-A3B-Instruct",
+                "usage": {"prompt_tokens": 100, "completion_tokens": 12},
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
+            }
+            return ForwardResult(
+                status_code=200,
+                content=json.dumps(response_json).encode("utf-8"),
+                content_type="application/json",
+                response_json=response_json,
+            )
+
+        service = GatewayService(
+            config=GatewayConfig(
+                vllm_base_url="http://vllm:11451",
+                jaeger_api_base_url="http://jaeger:16686/api/traces",
+                otlp_traces_endpoint="grpc://jaeger:4317",
+            ),
+            tracer=trace.get_tracer("gateway-test"),
+            forwarder=fake_forward,
+        )
+
+        service.start_ctx_aware(
+            usage_threshold_tokens=12000,
+            scheduling_threshold_tokens=9000,
+        )
+        service.start_slo_aware(
+            target_tokens_per_s=25.0,
+            policy_mode="push-back-half-slack",
+        )
+        service.start_job(str(tmp_path / "slo-ralexation-wait"))
+        service.start_agent("agent-a")
+
+        with service._lock:
+            service._mark_run_ralexation_locked(service.active_runs["agent-a"], duration_s=1.0)
+
+        proxy_task = asyncio.create_task(
+            service.proxy_request(
+                api_token="agent-a",
+                method="POST",
+                path="v1/chat/completions",
+                headers={"content-type": "application/json"},
+                body=json.dumps(
+                    {
+                        "model": "Qwen3-Coder-30B-A3B-Instruct",
+                        "messages": [{"role": "user", "content": "wait in ralexation"}],
+                    }
+                ).encode("utf-8"),
+            )
+        )
+
+        await asyncio.sleep(0.05)
+        assert forward_calls == []
+
+        with service._lock:
+            service._mark_run_ongoing_locked(service.active_runs["agent-a"])
+
+        result = await proxy_task
+        assert result.status_code == 200
+        assert len(forward_calls) == 1
+
+        record = service.active_runs["agent-a"].request_records[0]
+        assert record["forward_start_time"] is not None
+        assert record["pending_duration_ms"] > 0
+        assert record["span_duration_ms"] is not None
+        run = service.active_runs["agent-a"]
+        request_duration_s = record["request_duration_ms"] / 1000.0
+        span_duration_s = record["span_duration_ms"] / 1000.0
+        assert run.total_llm_request_duration_s == pytest.approx(
+            request_duration_s,
+            abs=1e-6,
+        )
+        assert run.current_output_tokens_per_s == pytest.approx(
+            12.0 / run.total_llm_request_duration_s,
+            rel=1e-6,
+        )
+        assert run.current_output_tokens_per_s < (12.0 / span_duration_s)
+
+    asyncio.run(run_case())
+
+
+def test_slo_aware_decision_log_records_enter_and_wake_events(
+    tmp_path: Path,
+) -> None:
+    async def run_case() -> None:
+        async def fake_forward(
+            method: str,
+            path: str,
+            headers: dict[str, str],
+            body: bytes,
+        ) -> ForwardResult:
+            await asyncio.sleep(0.02)
+            response_json = {
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "model": "Qwen3-Coder-30B-A3B-Instruct",
+                "usage": {"prompt_tokens": 100, "completion_tokens": 40},
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
+            }
+            return ForwardResult(
+                status_code=200,
+                content=json.dumps(response_json).encode("utf-8"),
+                content_type="application/json",
+                response_json=response_json,
+            )
+
+        service = GatewayService(
+            config=GatewayConfig(
+                vllm_base_url="http://vllm:11451",
+                jaeger_api_base_url="http://jaeger:16686/api/traces",
+                otlp_traces_endpoint="grpc://jaeger:4317",
+            ),
+            tracer=trace.get_tracer("gateway-test"),
+            forwarder=fake_forward,
+        )
+
+        service.start_ctx_aware(
+            usage_threshold_tokens=12000,
+            scheduling_threshold_tokens=9000,
+        )
+        service.start_slo_aware(
+            target_tokens_per_s=25.0,
+            policy_mode="push-back-half-slack",
+        )
+        start_payload = service.start_job(str(tmp_path / "slo-decision-log"))
+        decision_log_path = Path(start_payload["slo_aware_decision_log_path"])
+        assert decision_log_path.exists()
+
+        service.start_agent("agent-a")
+        service.start_agent("agent-b")
+
+        with service._lock:
+            service.active_runs["agent-b"].total_completion_tokens = 100
+            service.active_runs["agent-b"].total_llm_request_duration_s = 10.0
+            service.active_runs["agent-b"].total_ctx_aware_request_duration_s = 10.0
+            service.active_runs["agent-b"].current_output_tokens_per_s = 10.0
+
+        result = await service.proxy_request(
+            api_token="agent-a",
+            method="POST",
+            path="v1/chat/completions",
+            headers={"content-type": "application/json"},
+            body=json.dumps(
+                {
+                    "model": "Qwen3-Coder-30B-A3B-Instruct",
+                    "messages": [{"role": "user", "content": "make agent-a fast"}],
+                }
+            ).encode("utf-8"),
+        )
+        assert result.status_code == 200
+        assert service.active_runs["agent-a"].schedule_state == "ralexation"
+
+        with service._lock:
+            service.active_runs["agent-a"].ralexation_until_monotonic = time.monotonic() - 0.1
+            service._rebalance_ctx_aware_locked()
+
+        records = load_jsonl(decision_log_path)
+        assert [record["event_type"] for record in records] == [
+            "agent_entered_ralexation",
+            "agent_left_ralexation",
+        ]
+
+        entered = records[0]
+        assert entered["from_schedule_state"] == "ongoing"
+        assert entered["to_schedule_state"] == "ralexation"
+        assert entered["policy_mode"] == "push-back-half-slack"
+        assert entered["ralexation_duration_s"] > 0
+        assert entered["ralexation_until"] is not None
+
+        left = records[1]
+        assert left["from_schedule_state"] == "ralexation"
+        assert left["to_schedule_state"] == "ongoing"
+        assert left["wake_reason"] == "timer_expired"
+        assert left["resume_disposition"] == "ctx_aware_admitted"
+
+    asyncio.run(run_case())
 
 
 def test_runtime_settings_default_ipc_is_enabled(tmp_path: Path) -> None:

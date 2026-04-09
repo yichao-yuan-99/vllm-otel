@@ -1,0 +1,3 @@
+GPU Core Frequency vs Throughput and Request-Attributed Energy per Completed Agent
+
+This figure plots GPU core frequency against average completed-agent request energy using a request-attributed power integral, alongside average throughput. It is intended for cases where `avg_power * duration / finished_count` is too coarse and a per-request energy view gives a more faithful picture of the energy-performance tradeoff.

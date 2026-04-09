@@ -82,6 +82,15 @@ freq-controller-linespace-slo \
   --gpu-index 0
 ```
 
+By default, the controller now auto-detects the active per-profile gateway
+socket. It probes both:
+
+- `/tmp/vllm-gateway-profile-<port_profile_id>.sock`
+- `/tmp/vllm-gateway-ctx-profile-<port_profile_id>.sock`
+
+and uses the active `gateway_ctx` socket automatically when that is the server
+running for the selected port profile.
+
 Example TOML:
 
 ```toml
@@ -99,6 +108,18 @@ freq-controller-linespace-slo \
   --config freq-controller-linespace-slo/config.toml \
   --log-dir ./logs \
   --port-profile-id 0 \
+  --gpu-index 0
+```
+
+Optional explicit gateway IPC override:
+
+```bash
+freq-controller-linespace-slo \
+  --log-dir ./logs \
+  --threshold 395784 \
+  --throughput-target 12 \
+  --port-profile-id 0 \
+  --gateway-ipc-socket-path /tmp/vllm-gateway-ctx-profile-0.sock \
   --gpu-index 0
 ```
 

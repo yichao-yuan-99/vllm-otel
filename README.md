@@ -45,6 +45,12 @@ con-driver --config con-driver/tests/config.gateway.toml
 - gateway artifacts for that run: `tests/output/con-driver/job-<timestamp>/gateway-output/`
 - run manifest: `tests/output/con-driver/job-<timestamp>/meta/run_manifest.json`
 
+## Figures
+
+- Figure-specific conventions live in `figures/README.md`.
+- Every figure subdirectory under `figures/` should include both a detailed `README.md` and a concise `description.txt`.
+- Each `description.txt` should include a paper-ready figure title followed by a single 2-3 sentence paragraph describing what the figure shows.
+
 ## Notes
 
 - This README intentionally uses only `./.venv`.

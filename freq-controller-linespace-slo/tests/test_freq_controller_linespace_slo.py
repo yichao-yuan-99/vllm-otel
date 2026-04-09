@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import socket
 import sys
 from typing import TypeVar
 
@@ -11,6 +12,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MODULE_ROOT = PROJECT_ROOT / "freq-controller-linespace-slo"
 if str(MODULE_ROOT) not in sys.path:
     sys.path.insert(0, str(MODULE_ROOT))
+
+import freq_controller_linespace_slo as controller_module
 
 from freq_controller_linespace_slo import (
     FrequencyController,
@@ -217,6 +220,30 @@ def test_load_controller_config_uses_shared_context_threshold_default() -> None:
     assert config.frequency_mhz_levels == DEFAULT_SHARED_FREQUENCY_MHZ_LEVELS
     assert config.target_context_usage_threshold == 395784.0
     assert config.target_output_throughput_tokens_per_s == 11.0
+
+
+def test_gateway_ipc_config_prefers_active_gateway_ctx_socket(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        controller_module,
+        "DEFAULT_GATEWAY_IPC_SOCKET_DIR",
+        tmp_path,
+    )
+    gateway_ctx_socket_path = tmp_path / "vllm-gateway-ctx-profile-2.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(gateway_ctx_socket_path))
+    listener.listen(1)
+    try:
+        assert (
+            GatewayIPCConfig().resolved_socket_path(2)
+            == gateway_ctx_socket_path.resolve()
+        )
+    finally:
+        listener.close()
+        if gateway_ctx_socket_path.exists():
+            gateway_ctx_socket_path.unlink()
 
 
 def test_load_controller_config_requires_output_throughput_target() -> None:

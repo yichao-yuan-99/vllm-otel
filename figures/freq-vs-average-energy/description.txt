@@ -1,0 +1,3 @@
+GPU Core Frequency vs Throughput and Average Energy per Finished Replay
+
+This figure shows how GPU core frequency changes the tradeoff between throughput and average energy cost per finished replay over a selected analysis window. It materializes windowed metrics from the frequency sweep and renders a dual-axis comparison so performance and efficiency can be read together for each clock setting.

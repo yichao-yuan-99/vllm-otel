@@ -1,0 +1,3 @@
+KV-Cache Usage Over Time Across Selected GPU Core Frequencies
+
+This figure overlays smoothed KV-cache usage curves over time for three selected frequency runs from the same sweep. It highlights how cache pressure evolves across configurations on a shared time axis, making differences in saturation level and temporal behavior easy to see.

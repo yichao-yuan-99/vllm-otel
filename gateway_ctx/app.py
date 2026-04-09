@@ -12,7 +12,7 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any, Awaitable, Callable, Literal, TextIO
@@ -45,8 +45,11 @@ CTX_AWARE_SCHEDULER_INTERVAL_HZ = int(1 / CTX_AWARE_SCHEDULER_INTERVAL_S)
 CTX_AWARE_JOB_LOG_DIRNAME = "job"
 CTX_AWARE_POLICY_MODE_AGE = "age"
 CTX_AWARE_POLICY_MODE_THROUGHPUT = "throughput"
+SLO_AWARE_POLICY_MODE_PUSH_BACK_HALF_SLACK = "push-back-half-slack"
 
 CtxAwarePolicyMode = Literal["age", "throughput"]
+SloAwarePolicyMode = Literal["push-back-half-slack"]
+ScheduleState = Literal["ongoing", "pending", "ralexation"]
 
 
 def now_iso8601_utc() -> str:
@@ -283,10 +286,13 @@ class RunState:
     total_llm_request_duration_s: float = 0.0
     total_ctx_aware_request_duration_s: float = 0.0
     current_output_tokens_per_s: float | None = None
-    schedule_state: Literal["ongoing", "pending"] = "ongoing"
+    schedule_state: ScheduleState = "ongoing"
     has_usable_context_usage: bool = False
     pending_since_iso: str | None = None
     pending_since_monotonic: float | None = None
+    ralexation_since_iso: str | None = None
+    ralexation_until_iso: str | None = None
+    ralexation_until_monotonic: float | None = None
     queued_request_started_monotonic: float | None = None
     ready_event: asyncio.Event | None = None
     requests_drained_event: asyncio.Event | None = None
@@ -301,12 +307,18 @@ class CtxAwareJobLogCounters:
     agents_turned_ongoing: int = 0
     new_agents_added_as_pending: int = 0
     new_agents_added_as_ongoing: int = 0
+    agents_turned_ralexation: int = 0
+    agents_left_ralexation_to_pending: int = 0
+    agents_left_ralexation_to_ongoing: int = 0
 
     def reset(self) -> None:
         self.agents_turned_pending_due_to_context_threshold = 0
         self.agents_turned_ongoing = 0
         self.new_agents_added_as_pending = 0
         self.new_agents_added_as_ongoing = 0
+        self.agents_turned_ralexation = 0
+        self.agents_left_ralexation_to_pending = 0
+        self.agents_left_ralexation_to_ongoing = 0
 
 
 class GatewayService:
@@ -334,13 +346,20 @@ class GatewayService:
         self.ctx_aware_policy_mode: CtxAwarePolicyMode = CTX_AWARE_POLICY_MODE_AGE
         self.ctx_aware_ongoing_agent_count = 0
         self.ctx_aware_pending_agent_count = 0
+        self.ctx_aware_ralexation_agent_count = 0
         self.ctx_aware_ongoing_effective_context_tokens = 0
         self.ctx_aware_pending_effective_context_tokens = 0
+        self.ctx_aware_ralexation_effective_context_tokens = 0
+        self.slo_aware_enabled = False
+        self.slo_target_tokens_per_s: float | None = None
+        self.slo_policy_mode: SloAwarePolicyMode | None = None
         self.ctx_aware_scheduler_task: asyncio.Task[None] | None = None
         self.ctx_aware_scheduler_wakeup: asyncio.Event | None = None
         self.ctx_aware_job_log_task: asyncio.Task[None] | None = None
         self.ctx_aware_job_log_path: Path | None = None
         self.ctx_aware_job_log_handle: TextIO | None = None
+        self.slo_aware_decision_log_path: Path | None = None
+        self.slo_aware_decision_log_handle: TextIO | None = None
         self.ctx_aware_job_log_counters = CtxAwareJobLogCounters()
 
     @staticmethod
@@ -517,6 +536,66 @@ class GatewayService:
             "policy_mode must be one of: age, throughput"
         )
 
+    @staticmethod
+    def _normalize_slo_aware_policy_mode(policy_mode: str | None) -> SloAwarePolicyMode:
+        if policy_mode is None:
+            raise ValueError("policy_mode is required")
+        normalized = policy_mode.strip().lower()
+        if normalized == SLO_AWARE_POLICY_MODE_PUSH_BACK_HALF_SLACK:
+            return SLO_AWARE_POLICY_MODE_PUSH_BACK_HALF_SLACK
+        raise ValueError("policy_mode must be one of: push-back-half-slack")
+
+    def _stored_throughput_runs_locked(self) -> list[RunState]:
+        return [
+            run
+            for run in self.active_runs.values()
+            if run.current_output_tokens_per_s is not None
+        ]
+
+    def _min_stored_output_tokens_per_s_locked(self) -> float | None:
+        values = [
+            run.current_output_tokens_per_s
+            for run in self._stored_throughput_runs_locked()
+            if run.current_output_tokens_per_s is not None
+        ]
+        if not values:
+            return None
+        return min(values)
+
+    def _avg_stored_output_tokens_per_s_locked(self) -> float | None:
+        values = [
+            run.current_output_tokens_per_s
+            for run in self._stored_throughput_runs_locked()
+            if run.current_output_tokens_per_s is not None
+        ]
+        if not values:
+            return None
+        return sum(values) / len(values)
+
+    def _slo_policy_is_active_locked(self) -> bool:
+        if (
+            not self.slo_aware_enabled
+            or self.slo_target_tokens_per_s is None
+            or self.slo_policy_mode != SLO_AWARE_POLICY_MODE_PUSH_BACK_HALF_SLACK
+        ):
+            return False
+        min_throughput = self._min_stored_output_tokens_per_s_locked()
+        if min_throughput is None:
+            return False
+        return min_throughput < self.slo_target_tokens_per_s
+
+    def _slo_slack_s_locked(self, run: RunState) -> float | None:
+        if not self.slo_aware_enabled or self.slo_target_tokens_per_s is None:
+            return None
+        if run.current_output_tokens_per_s is None:
+            return None
+        if run.total_llm_request_duration_s <= 0.0:
+            return None
+        return (
+            run.total_completion_tokens / self.slo_target_tokens_per_s
+            - run.total_llm_request_duration_s
+        )
+
     def _build_agent_context_entry(self, run: RunState) -> dict[str, Any]:
         return {
             "api_token_hash": run.api_token_hash,
@@ -527,6 +606,9 @@ class GatewayService:
             "effective_context_tokens": self._effective_context_tokens(run),
             "has_usable_context_usage": run.has_usable_context_usage,
             "pending_since": run.pending_since_iso,
+            "ralexation_until": run.ralexation_until_iso,
+            "output_tokens_per_s": self._round_metric(run.current_output_tokens_per_s),
+            "slo_slack_s": self._round_metric(self._slo_slack_s_locked(run)),
         }
 
     def _ctx_aware_queue_duration_s_locked(
@@ -565,13 +647,20 @@ class GatewayService:
         pending_runs = [
             run for run in self.active_runs.values() if run.schedule_state == "pending"
         ]
+        ralexation_runs = [
+            run for run in self.active_runs.values() if run.schedule_state == "ralexation"
+        ]
         self.ctx_aware_ongoing_agent_count = len(ongoing_runs)
         self.ctx_aware_pending_agent_count = len(pending_runs)
+        self.ctx_aware_ralexation_agent_count = len(ralexation_runs)
         self.ctx_aware_ongoing_effective_context_tokens = sum(
             self._effective_context_tokens(run) for run in ongoing_runs
         )
         self.ctx_aware_pending_effective_context_tokens = sum(
             self._effective_context_tokens(run) for run in pending_runs
+        )
+        self.ctx_aware_ralexation_effective_context_tokens = sum(
+            self._effective_context_tokens(run) for run in ralexation_runs
         )
 
     def _mark_run_pending_locked(self, run: RunState) -> None:
@@ -579,6 +668,9 @@ class GatewayService:
             run.schedule_state = "pending"
             run.pending_since_iso = now_iso8601_utc()
             run.pending_since_monotonic = time.monotonic()
+        run.ralexation_since_iso = None
+        run.ralexation_until_iso = None
+        run.ralexation_until_monotonic = None
         if run.ready_event is not None:
             run.ready_event.clear()
 
@@ -586,8 +678,24 @@ class GatewayService:
         run.schedule_state = "ongoing"
         run.pending_since_iso = None
         run.pending_since_monotonic = None
+        run.ralexation_since_iso = None
+        run.ralexation_until_iso = None
+        run.ralexation_until_monotonic = None
         if run.ready_event is not None:
             run.ready_event.set()
+
+    def _mark_run_ralexation_locked(self, run: RunState, *, duration_s: float) -> None:
+        duration_s = max(duration_s, 0.0)
+        run.schedule_state = "ralexation"
+        run.pending_since_iso = None
+        run.pending_since_monotonic = None
+        run.ralexation_since_iso = now_iso8601_utc()
+        run.ralexation_until_monotonic = time.monotonic() + duration_s
+        run.ralexation_until_iso = datetime_to_iso8601_utc(
+            datetime.now(timezone.utc) + timedelta(seconds=duration_s)
+        )
+        if run.ready_event is not None:
+            run.ready_event.clear()
 
     @staticmethod
     def _increment_queued_request_locked(run: RunState) -> None:
@@ -683,6 +791,71 @@ class GatewayService:
             return self._lowest_throughput_pending_run_locked()
         return self._oldest_pending_run_locked()
 
+    def _ctx_aware_admits_run_locked(self, run: RunState) -> bool:
+        if (
+            not self.ctx_aware_enabled
+            or self.ctx_aware_scheduling_threshold_tokens is None
+        ):
+            return True
+        candidate_tokens = self._effective_context_tokens(run)
+        return (
+            self.ctx_aware_ongoing_effective_context_tokens + candidate_tokens
+            <= self.ctx_aware_scheduling_threshold_tokens
+        )
+
+    def _ready_ralexation_runs_locked(self) -> list[tuple[RunState, str]]:
+        now_monotonic = time.monotonic()
+        release_all = False
+        if self.slo_aware_enabled and self.slo_target_tokens_per_s is not None:
+            min_throughput = self._min_stored_output_tokens_per_s_locked()
+            release_all = (
+                min_throughput is not None
+                and min_throughput >= self.slo_target_tokens_per_s
+            )
+        ready_runs = []
+        for run in self.active_runs.values():
+            if run.schedule_state != "ralexation":
+                continue
+            if release_all:
+                ready_runs.append((run, "slo_recovered"))
+                continue
+            if (
+                run.ralexation_until_monotonic is not None
+                and run.ralexation_until_monotonic <= now_monotonic
+            ):
+                ready_runs.append((run, "timer_expired"))
+        return sorted(
+            ready_runs,
+            key=lambda item: (
+                float("inf")
+                if item[0].ralexation_until_monotonic is None
+                else item[0].ralexation_until_monotonic,
+                item[0].run_start_time,
+                item[0].api_token_hash,
+                item[0].trace_id,
+            ),
+        )
+
+    def _should_enter_ralexation_locked(self, run: RunState) -> bool:
+        if run.schedule_state != "ongoing":
+            return False
+        if not self._slo_policy_is_active_locked():
+            return False
+        run_throughput = run.current_output_tokens_per_s
+        if run_throughput is None:
+            return False
+        avg_throughput = self._avg_stored_output_tokens_per_s_locked()
+        if avg_throughput is None or self.slo_target_tokens_per_s is None:
+            return False
+        if run_throughput <= avg_throughput:
+            return False
+        if run_throughput <= self.slo_target_tokens_per_s:
+            return False
+        slack_s = self._slo_slack_s_locked(run)
+        if slack_s is None or slack_s <= 0.0:
+            return False
+        return True
+
     def _rebalance_ctx_aware_locked(self) -> None:
         if (
             not self.ctx_aware_enabled
@@ -704,6 +877,54 @@ class GatewayService:
                 break
             self._mark_run_pending_locked(demoted_run)
             self.ctx_aware_job_log_counters.agents_turned_pending_due_to_context_threshold += 1
+            self._refresh_ctx_aware_totals_locked()
+
+        for ready_run, wake_reason in self._ready_ralexation_runs_locked():
+            had_pending = self.ctx_aware_pending_agent_count > 0
+            if had_pending:
+                self._mark_run_pending_locked(ready_run)
+                self.ctx_aware_job_log_counters.agents_left_ralexation_to_pending += 1
+                self._write_slo_aware_decision_log_locked(
+                    event_type="agent_left_ralexation",
+                    run=ready_run,
+                    details={
+                        "wake_reason": wake_reason,
+                        "from_schedule_state": "ralexation",
+                        "to_schedule_state": "pending",
+                        "resume_disposition": "existing_pending_agent",
+                        "ralexation_until": None,
+                    },
+                )
+                self._refresh_ctx_aware_totals_locked()
+                continue
+            if self._ctx_aware_admits_run_locked(ready_run):
+                self._mark_run_ongoing_locked(ready_run)
+                self.ctx_aware_job_log_counters.agents_left_ralexation_to_ongoing += 1
+                self._write_slo_aware_decision_log_locked(
+                    event_type="agent_left_ralexation",
+                    run=ready_run,
+                    details={
+                        "wake_reason": wake_reason,
+                        "from_schedule_state": "ralexation",
+                        "to_schedule_state": "ongoing",
+                        "resume_disposition": "ctx_aware_admitted",
+                        "ralexation_until": None,
+                    },
+                )
+            else:
+                self._mark_run_pending_locked(ready_run)
+                self.ctx_aware_job_log_counters.agents_left_ralexation_to_pending += 1
+                self._write_slo_aware_decision_log_locked(
+                    event_type="agent_left_ralexation",
+                    run=ready_run,
+                    details={
+                        "wake_reason": wake_reason,
+                        "from_schedule_state": "ralexation",
+                        "to_schedule_state": "pending",
+                        "resume_disposition": "ctx_aware_rejected",
+                        "ralexation_until": None,
+                    },
+                )
             self._refresh_ctx_aware_totals_locked()
 
         while True:
@@ -735,12 +956,42 @@ class GatewayService:
             "usage_threshold_tokens": self.ctx_aware_usage_threshold_tokens,
             "scheduling_threshold_tokens": self.ctx_aware_scheduling_threshold_tokens,
             "policy_mode": self.ctx_aware_policy_mode,
+            "slo_aware_enabled": self.slo_aware_enabled,
+            "slo_target_tokens_per_s": self._round_metric(self.slo_target_tokens_per_s),
+            "slo_policy_mode": self.slo_policy_mode,
             "new_agent_pseudo_tokens": CTX_AWARE_NEW_AGENT_PSEUDO_TOKENS,
             "scheduler_interval_hz": CTX_AWARE_SCHEDULER_INTERVAL_HZ,
             "ongoing_agent_count": self.ctx_aware_ongoing_agent_count,
             "pending_agent_count": self.ctx_aware_pending_agent_count,
+            "ralexation_agent_count": self.ctx_aware_ralexation_agent_count,
             "ongoing_effective_context_tokens": self.ctx_aware_ongoing_effective_context_tokens,
             "pending_effective_context_tokens": self.ctx_aware_pending_effective_context_tokens,
+            "ralexation_effective_context_tokens": (
+                self.ctx_aware_ralexation_effective_context_tokens
+            ),
+            "agents": agents,
+        }
+
+    def _slo_aware_status_locked(self) -> dict[str, Any]:
+        active_runs = self._sorted_active_runs()
+        agents = [self._build_agent_context_entry(run) for run in active_runs]
+        return {
+            "status": "ok",
+            "enabled": self.slo_aware_enabled,
+            "requires_ctx_aware": True,
+            "ctx_aware_enabled": self.ctx_aware_enabled,
+            "target_tokens_per_s": self._round_metric(self.slo_target_tokens_per_s),
+            "policy_mode": self.slo_policy_mode,
+            "ralexation_agent_count": self.ctx_aware_ralexation_agent_count,
+            "ralexation_effective_context_tokens": (
+                self.ctx_aware_ralexation_effective_context_tokens
+            ),
+            "min_output_tokens_per_s": self._round_metric(
+                self._min_stored_output_tokens_per_s_locked()
+            ),
+            "avg_output_tokens_per_s": self._round_metric(
+                self._avg_stored_output_tokens_per_s_locked()
+            ),
             "agents": agents,
         }
 
@@ -754,15 +1005,67 @@ class GatewayService:
         file_name = f"ctx_aware_{iso8601_to_compact(job_started_at)}.jsonl"
         return job_dir / file_name
 
+    @staticmethod
+    def _job_slo_aware_decision_log_path_for_output(
+        output_path: Path,
+        *,
+        job_started_at: str,
+    ) -> Path:
+        job_dir = output_path / CTX_AWARE_JOB_LOG_DIRNAME
+        file_name = f"slo_aware_decisions_{iso8601_to_compact(job_started_at)}.jsonl"
+        return job_dir / file_name
+
     def _close_ctx_aware_job_log_locked(self) -> None:
         handle = self.ctx_aware_job_log_handle
         self.ctx_aware_job_log_handle = None
         self.ctx_aware_job_log_path = None
+        decision_handle = self.slo_aware_decision_log_handle
+        self.slo_aware_decision_log_handle = None
+        self.slo_aware_decision_log_path = None
         self.ctx_aware_job_log_counters.reset()
         if handle is None:
+            pass
+        else:
+            with suppress(Exception):
+                handle.close()
+        if decision_handle is not None:
+            with suppress(Exception):
+                decision_handle.close()
+
+    def _write_slo_aware_decision_log_locked(
+        self,
+        *,
+        event_type: str,
+        run: RunState,
+        details: dict[str, Any] | None = None,
+        sample_time: str | None = None,
+    ) -> None:
+        handle = self.slo_aware_decision_log_handle
+        if handle is None or not self.job_active:
             return
-        with suppress(Exception):
-            handle.close()
+        payload = {
+            "timestamp": sample_time or now_iso8601_utc(),
+            "event_type": event_type,
+            "api_token_hash": run.api_token_hash,
+            "trace_id": run.trace_id,
+            "schedule_state": run.schedule_state,
+            "context_tokens": run.current_context_tokens,
+            "effective_context_tokens": self._effective_context_tokens(run),
+            "output_tokens_per_s": self._round_metric(run.current_output_tokens_per_s),
+            "slo_slack_s": self._round_metric(self._slo_slack_s_locked(run)),
+            "slo_target_tokens_per_s": self._round_metric(self.slo_target_tokens_per_s),
+            "min_output_tokens_per_s": self._round_metric(
+                self._min_stored_output_tokens_per_s_locked()
+            ),
+            "avg_output_tokens_per_s": self._round_metric(
+                self._avg_stored_output_tokens_per_s_locked()
+            ),
+        }
+        if details:
+            payload.update(details)
+        handle.write(json.dumps(payload, ensure_ascii=True))
+        handle.write("\n")
+        handle.flush()
 
     def _write_ctx_aware_job_log_sample_locked(
         self,
@@ -777,12 +1080,26 @@ class GatewayService:
             "timestamp": sample_time or now_iso8601_utc(),
             "ongoing_agent_count": self.ctx_aware_ongoing_agent_count,
             "pending_agent_count": self.ctx_aware_pending_agent_count,
+            "ralexation_agent_count": self.ctx_aware_ralexation_agent_count,
             "ongoing_effective_context_tokens": self.ctx_aware_ongoing_effective_context_tokens,
             "pending_effective_context_tokens": self.ctx_aware_pending_effective_context_tokens,
+            "ralexation_effective_context_tokens": (
+                self.ctx_aware_ralexation_effective_context_tokens
+            ),
+            "slo_aware_enabled": self.slo_aware_enabled,
+            "slo_target_tokens_per_s": self._round_metric(self.slo_target_tokens_per_s),
+            "slo_policy_mode": self.slo_policy_mode,
             "agents_turned_pending_due_to_context_threshold": (
                 self.ctx_aware_job_log_counters.agents_turned_pending_due_to_context_threshold
             ),
             "agents_turned_ongoing": self.ctx_aware_job_log_counters.agents_turned_ongoing,
+            "agents_turned_ralexation": self.ctx_aware_job_log_counters.agents_turned_ralexation,
+            "agents_left_ralexation_to_pending": (
+                self.ctx_aware_job_log_counters.agents_left_ralexation_to_pending
+            ),
+            "agents_left_ralexation_to_ongoing": (
+                self.ctx_aware_job_log_counters.agents_left_ralexation_to_ongoing
+            ),
             "new_agents_added_as_pending": (
                 self.ctx_aware_job_log_counters.new_agents_added_as_pending
             ),
@@ -912,9 +1229,18 @@ class GatewayService:
                 output_path,
                 job_started_at=self.job_started_at,
             )
+            slo_decision_log_path = self._job_slo_aware_decision_log_path_for_output(
+                output_path,
+                job_started_at=self.job_started_at,
+            )
             job_log_path.parent.mkdir(parents=True, exist_ok=True)
             self.ctx_aware_job_log_path = job_log_path
             self.ctx_aware_job_log_handle = job_log_path.open("w", encoding="utf-8")
+            self.slo_aware_decision_log_path = slo_decision_log_path
+            self.slo_aware_decision_log_handle = slo_decision_log_path.open(
+                "w",
+                encoding="utf-8",
+            )
             self._write_ctx_aware_job_log_sample_locked(sample_time=self.job_started_at)
 
         return {
@@ -922,6 +1248,7 @@ class GatewayService:
             "job_started_at": self.job_started_at,
             "output_location": str(output_path),
             "ctx_aware_job_log_path": str(job_log_path),
+            "slo_aware_decision_log_path": str(slo_decision_log_path),
         }
 
     @staticmethod
@@ -1008,13 +1335,7 @@ class GatewayService:
                     "metadata": {},
                 }
             )
-            if (
-                self.ctx_aware_enabled
-                and self.ctx_aware_scheduling_threshold_tokens is not None
-                and self.ctx_aware_ongoing_effective_context_tokens
-                + CTX_AWARE_NEW_AGENT_PSEUDO_TOKENS
-                > self.ctx_aware_scheduling_threshold_tokens
-            ):
+            if not self._ctx_aware_admits_run_locked(run_state):
                 self._mark_run_pending_locked(run_state)
                 self.ctx_aware_job_log_counters.new_agents_added_as_pending += 1
             else:
@@ -1070,22 +1391,34 @@ class GatewayService:
                 "total_context_tokens": total_context_tokens,
                 "ctx_aware_enabled": self.ctx_aware_enabled,
                 "ctx_aware_policy_mode": self.ctx_aware_policy_mode,
+                "slo_aware_enabled": self.slo_aware_enabled,
+                "slo_target_tokens_per_s": self._round_metric(self.slo_target_tokens_per_s),
+                "slo_policy_mode": self.slo_policy_mode,
                 "usage_threshold_tokens": self.ctx_aware_usage_threshold_tokens,
                 "scheduling_threshold_tokens": self.ctx_aware_scheduling_threshold_tokens,
                 "effective_total_context_tokens": (
                     self.ctx_aware_ongoing_effective_context_tokens
                     + self.ctx_aware_pending_effective_context_tokens
+                    + self.ctx_aware_ralexation_effective_context_tokens
                 ),
                 "ongoing_agent_count": self.ctx_aware_ongoing_agent_count,
                 "pending_agent_count": self.ctx_aware_pending_agent_count,
+                "ralexation_agent_count": self.ctx_aware_ralexation_agent_count,
                 "ongoing_effective_context_tokens": self.ctx_aware_ongoing_effective_context_tokens,
                 "pending_effective_context_tokens": self.ctx_aware_pending_effective_context_tokens,
+                "ralexation_effective_context_tokens": (
+                    self.ctx_aware_ralexation_effective_context_tokens
+                ),
                 "agents": agents,
             }
 
     def get_ctx_aware_summary(self) -> dict[str, Any]:
         with self._lock:
             return self._ctx_aware_status_locked()
+
+    def get_slo_aware_summary(self) -> dict[str, Any]:
+        with self._lock:
+            return self._slo_aware_status_locked()
 
     def start_ctx_aware(
         self,
@@ -1126,12 +1459,52 @@ class GatewayService:
         with self._lock:
             if self.job_active:
                 raise RuntimeError("ctx-aware mode cannot be changed while a job is active")
+            self.slo_aware_enabled = False
+            self.slo_target_tokens_per_s = None
+            self.slo_policy_mode = None
             self.ctx_aware_enabled = False
             self.ctx_aware_usage_threshold_tokens = None
             self.ctx_aware_scheduling_threshold_tokens = None
             self.ctx_aware_policy_mode = CTX_AWARE_POLICY_MODE_AGE
             self._rebalance_ctx_aware_locked()
             payload = self._ctx_aware_status_locked()
+
+        self._wake_ctx_aware_scheduler()
+        return payload
+
+    def start_slo_aware(
+        self,
+        *,
+        target_tokens_per_s: float,
+        policy_mode: str,
+    ) -> dict[str, Any]:
+        if target_tokens_per_s <= 0.0:
+            raise ValueError("target_tokens_per_s must be > 0")
+        normalized_policy_mode = self._normalize_slo_aware_policy_mode(policy_mode)
+
+        with self._lock:
+            if self.job_active:
+                raise RuntimeError("slo-aware mode cannot be changed while a job is active")
+            if not self.ctx_aware_enabled:
+                raise RuntimeError("slo-aware mode requires ctx-aware mode to be enabled")
+            self.slo_aware_enabled = True
+            self.slo_target_tokens_per_s = target_tokens_per_s
+            self.slo_policy_mode = normalized_policy_mode
+            self._rebalance_ctx_aware_locked()
+            payload = self._slo_aware_status_locked()
+
+        self._wake_ctx_aware_scheduler()
+        return payload
+
+    def end_slo_aware(self) -> dict[str, Any]:
+        with self._lock:
+            if self.job_active:
+                raise RuntimeError("slo-aware mode cannot be changed while a job is active")
+            self.slo_aware_enabled = False
+            self.slo_target_tokens_per_s = None
+            self.slo_policy_mode = None
+            self._rebalance_ctx_aware_locked()
+            payload = self._slo_aware_status_locked()
 
         self._wake_ctx_aware_scheduler()
         return payload
@@ -1235,7 +1608,7 @@ class GatewayService:
                     cancel_pending = run.cancel_pending_requests
                     should_wait = (
                         self.ctx_aware_enabled
-                        and run.schedule_state == "pending"
+                        and run.schedule_state in {"pending", "ralexation"}
                         and not cancel_pending
                     )
                     if should_wait:
@@ -1300,7 +1673,7 @@ class GatewayService:
                 if not should_wait:
                     break
                 if ready_event is None:
-                    raise RuntimeError("pending agent missing ready event")
+                    raise RuntimeError("blocked agent missing ready event")
                 try:
                     became_ready = await self._wait_for_agent_ready(
                         ready_event=ready_event,
@@ -1505,7 +1878,7 @@ class GatewayService:
                         active.has_usable_context_usage = True
                     if completion_tokens is not None:
                         active.total_completion_tokens += completion_tokens
-                        active.total_llm_request_duration_s += span_duration_s
+                        active.total_llm_request_duration_s += request_duration_s
                         active.total_ctx_aware_request_duration_s += request_duration_s
                         active.current_output_tokens_per_s = self._output_throughput_from_totals(
                             active.total_completion_tokens,
@@ -1514,6 +1887,29 @@ class GatewayService:
                     self._decrement_active_request_locked(active)
                     self._start_agent_action_span_locked(active)
                     self._rebalance_ctx_aware_locked()
+                    if self._should_enter_ralexation_locked(active):
+                        slack_s = self._slo_slack_s_locked(active)
+                        if slack_s is not None and slack_s > 0.0:
+                            ralexation_duration_s = slack_s / 2.0
+                            self._mark_run_ralexation_locked(
+                                active,
+                                duration_s=ralexation_duration_s,
+                            )
+                            self.ctx_aware_job_log_counters.agents_turned_ralexation += 1
+                            self._write_slo_aware_decision_log_locked(
+                                event_type="agent_entered_ralexation",
+                                run=active,
+                                details={
+                                    "from_schedule_state": "ongoing",
+                                    "to_schedule_state": "ralexation",
+                                    "policy_mode": self.slo_policy_mode,
+                                    "ralexation_duration_s": self._round_metric(
+                                        ralexation_duration_s
+                                    ),
+                                    "ralexation_until": active.ralexation_until_iso,
+                                },
+                            )
+                            self._refresh_ctx_aware_totals_locked()
             active_request_registered = False
             self._wake_ctx_aware_scheduler()
             return client_result
@@ -1541,6 +1937,11 @@ class GatewayService:
             job_log_path = (
                 str(self.ctx_aware_job_log_path)
                 if self.ctx_aware_job_log_path is not None
+                else None
+            )
+            slo_decision_log_path = (
+                str(self.slo_aware_decision_log_path)
+                if self.slo_aware_decision_log_path is not None
                 else None
             )
 
@@ -1579,6 +1980,7 @@ class GatewayService:
                 "artifact_count": len(artifacts),
                 "artifacts": artifacts,
                 "ctx_aware_job_log_path": job_log_path,
+                "slo_aware_decision_log_path": slo_decision_log_path,
             }
 
     def _write_artifact(
@@ -1697,6 +2099,11 @@ class CtxAwareStartRequest(BaseModel):
     policy_mode: str | None = None
 
 
+class SloAwareStartRequest(BaseModel):
+    target_tokens_per_s: float = Field(gt=0)
+    policy_mode: str
+
+
 def create_gateway_service(
     config: GatewayConfig | None = None,
     forwarder: Forwarder | None = None,
@@ -1804,6 +2211,32 @@ def create_app(
         gateway_service = get_gateway_service()
         try:
             return gateway_service.end_ctx_aware()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/slo-aware")
+    async def slo_aware_status() -> dict[str, Any]:
+        gateway_service = get_gateway_service()
+        return gateway_service.get_slo_aware_summary()
+
+    @app.post("/slo-aware/start")
+    async def slo_aware_start(payload: SloAwareStartRequest) -> dict[str, Any]:
+        gateway_service = get_gateway_service()
+        try:
+            return gateway_service.start_slo_aware(
+                target_tokens_per_s=payload.target_tokens_per_s,
+                policy_mode=payload.policy_mode,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/slo-aware/end")
+    async def slo_aware_end() -> dict[str, Any]:
+        gateway_service = get_gateway_service()
+        try:
+            return gateway_service.end_slo_aware()
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 

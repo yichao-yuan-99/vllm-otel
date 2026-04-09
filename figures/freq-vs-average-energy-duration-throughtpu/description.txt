@@ -1,0 +1,3 @@
+GPU Core Frequency vs Throughput, Average Energy, and Average Time in LLM
+
+This figure compares GPU core frequency against three windowed outcomes at once: average energy cost per finished replay, average throughput, and average time spent in LLM requests. The two-subplot layout is meant to show how frequency shifts the balance between efficiency, delivered work, and model-side latency within the same experiment window.

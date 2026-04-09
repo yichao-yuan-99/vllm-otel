@@ -1,0 +1,3 @@
+Isolation and LMCache Effects on Throughput, Per-Agent LLM Time, and Completion Tokens
+
+This figure compares three `mini-swe-agent` deployment cases at `qps0_5`: `trail`, `trail-usage75`, and `trail-usage75-lmcache100`. Its three bar-chart panels summarize average throughput, average completed-agent total LLM time, and average completion tokens so the capacity impact of isolation and caching choices is easy to compare side by side.
