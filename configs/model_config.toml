@@ -1,6 +1,13 @@
 schema_version = 1
 description = "Shared model definitions used by server launch flows."
-default_model = "qwen3_coder_30b"
+default_model = "qwen3_14b"
+
+[models.qwen3_14b]
+vllm_model_name = "Qwen/Qwen3-14B-FP8"
+served_model_name = "Qwen3-14B-FP8"
+weight_vram_gb = 15
+context_window = 131072
+extra_args = []
 
 # NOTE: weight_vram_gb values should be set to observed model memory usage.
 [models.qwen3_coder_30b]

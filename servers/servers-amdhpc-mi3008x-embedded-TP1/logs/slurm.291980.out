@@ -1,0 +1,59 @@
+MI3008X embedded TP1 service stack starting on k002-003.hpcfund at Fri Apr 10 01:04:02 PM CDT 2026
+Run ID: 291980
+Resolved model key 'qwen3_coder_30b_fp8' -> 'Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8' (served as 'Qwen3-Coder-30B-A3B-Instruct-FP8')
+Launching AMD SMI power daemon socket=/tmp/amdsmi-power-reader.291980.sock
+Launching shared Jaeger on ui=16686 otlp=4317
+Launching vLLM profile=0 port=11451 gpu=0
+Launching vLLM profile=1 port=24123 gpu=1
+Launching vLLM profile=2 port=31987 gpu=2
+Launching vLLM profile=3 port=40823 gpu=3
+Launching vLLM profile=4 port=52341 gpu=4
+Launching vLLM profile=5 port=59231 gpu=5
+Launching vLLM profile=6 port=60231 gpu=6
+Launching vLLM profile=7 port=61231 gpu=7
+Launching gateway-ctx profile=0 raw=11457 parsed=18171
+Launching gateway-ctx profile=1 raw=24157 parsed=28171
+Launching gateway-ctx profile=2 raw=31955 parsed=38171
+Launching gateway-ctx profile=3 raw=40857 parsed=48171
+Launching gateway-ctx profile=4 raw=52357 parsed=58171
+Launching gateway-ctx profile=5 raw=59257 parsed=59171
+Launching gateway-ctx profile=6 raw=60257 parsed=60171
+Launching gateway-ctx profile=7 raw=61257 parsed=61171
+Services are ready.
+  amd-smi-power-socket: /tmp/amdsmi-power-reader.291980.sock
+  jaeger: http://127.0.0.1:16686
+  profile 0: gpu=0 vLLM=http://127.0.0.1:11451 gateway-ctx=http://127.0.0.1:11457 gateway-ctx-parse=http://127.0.0.1:18171
+  profile 1: gpu=1 vLLM=http://127.0.0.1:24123 gateway-ctx=http://127.0.0.1:24157 gateway-ctx-parse=http://127.0.0.1:28171
+  profile 2: gpu=2 vLLM=http://127.0.0.1:31987 gateway-ctx=http://127.0.0.1:31955 gateway-ctx-parse=http://127.0.0.1:38171
+  profile 3: gpu=3 vLLM=http://127.0.0.1:40823 gateway-ctx=http://127.0.0.1:40857 gateway-ctx-parse=http://127.0.0.1:48171
+  profile 4: gpu=4 vLLM=http://127.0.0.1:52341 gateway-ctx=http://127.0.0.1:52357 gateway-ctx-parse=http://127.0.0.1:58171
+  profile 5: gpu=5 vLLM=http://127.0.0.1:59231 gateway-ctx=http://127.0.0.1:59257 gateway-ctx-parse=http://127.0.0.1:59171
+  profile 6: gpu=6 vLLM=http://127.0.0.1:60231 gateway-ctx=http://127.0.0.1:60257 gateway-ctx-parse=http://127.0.0.1:60171
+  profile 7: gpu=7 vLLM=http://127.0.0.1:61231 gateway-ctx=http://127.0.0.1:61257 gateway-ctx-parse=http://127.0.0.1:61171
+Logs:
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/amd-smi-power-daemon.291980.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/jaeger.291980.shared.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/vllm.291980.p0.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/gateway-ctx.291980.p0.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/vllm.291980.p1.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/gateway-ctx.291980.p1.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/vllm.291980.p2.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/gateway-ctx.291980.p2.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/vllm.291980.p3.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/gateway-ctx.291980.p3.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/vllm.291980.p4.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/gateway-ctx.291980.p4.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/vllm.291980.p5.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/gateway-ctx.291980.p5.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/vllm.291980.p6.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/gateway-ctx.291980.p6.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/vllm.291980.p7.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/gateway-ctx.291980.p7.log
+Launching experiment profile=0 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1/sweep-qps-docker-power-clean-amd/generated/20260410T143801Z/run_replay.sh
+Launching experiment profile=1 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1/sweep-qps-docker-power-clean-amd/generated/20260410T143801Z/run_replay.sh
+Launching experiment profile=2 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1/sweep-qps-docker-power-clean-amd/generated/20260410T143801Z/run_replay.sh
+Launching experiment profile=3 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1/sweep-qps-docker-power-clean-amd/generated/20260410T143801Z/run_replay.sh
+Launching experiment profile=4 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1/sweep-qps-docker-power-clean-amd/generated/20260410T143801Z/run_replay.sh
+Launching experiment profile=5 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1/sweep-qps-docker-power-clean-amd/generated/20260410T143801Z/run_replay.sh
+Launching experiment profile=6 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1/sweep-qps-docker-power-clean-amd/generated/20260410T143801Z/run_replay.sh
+Launching experiment profile=7 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1/sweep-qps-docker-power-clean-amd/generated/20260410T143801Z/run_replay.sh

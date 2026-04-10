@@ -29,6 +29,7 @@ gpus_per_node = 4
 gpu_memory_gb = 64
 total_vram_gb = 256
 max_time = "24:00:00"
+sif_img = "vllm-vllm-openai-rocm:v0.17.1-otel-lp-rocm-lmcache-gfx942.sif"
 
 [partition.mi2508x]
 gpus_per_node = 8

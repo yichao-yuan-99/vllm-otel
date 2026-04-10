@@ -1,0 +1,10 @@
+{
+  "pid": 2304939,
+  "run_id": "interactive-bg-20260410T174709Z",
+  "started_at": "2026-04-10T17:47:09Z",
+  "pid_file": "/work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-interactive-mi2104x-embedded-TP1/logs/background-service.pid.json",
+  "launcher_log": "/work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-interactive-mi2104x-embedded-TP1/logs/launcher.interactive-bg-20260410T174709Z.log",
+  "launcher_log_offset": 163,
+  "start_script": "/work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-interactive-mi2104x-embedded-TP1/start-services.sh",
+  "repo_root": "/work1/talati/yichaoy/vllm-otel"
+}
