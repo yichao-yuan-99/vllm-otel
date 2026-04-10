@@ -79,6 +79,9 @@ Useful runtime env overrides:
 - `FREQ_CONTROLLER_BIN`
 - `RESET_GPU_CORE_FREQ_BIN`
 
+If you do not override those env vars, the generated script resolves the three
+tool binaries from `<repo>/.venv/bin/`.
+
 ## Submit Through MI3008X Embedded TP1
 
 ```bash
