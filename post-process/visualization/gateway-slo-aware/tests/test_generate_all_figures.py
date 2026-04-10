@@ -117,6 +117,23 @@ def test_generate_figure_for_run_dir_writes_manifest(
         fake_render_gateway_slo_aware_figure,
     )
 
+    def fake_render_gateway_stored_throughput_figure(
+        *,
+        slo_aware_payload: dict[str, object],
+        output_path: Path,
+        image_format: str,
+        dpi: int,
+    ) -> bool:
+        del slo_aware_payload, image_format, dpi
+        output_path.write_text("fake-stored-throughput-image", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(
+        generate_all_figures,
+        "_render_gateway_stored_throughput_figure",
+        fake_render_gateway_stored_throughput_figure,
+    )
+
     manifest_path = generate_all_figures.generate_figure_for_run_dir(
         run_dir,
         image_format="png",
@@ -133,7 +150,7 @@ def test_generate_figure_for_run_dir_writes_manifest(
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["source_slo_aware_summary_path"] == str(summary_path.resolve())
-    assert manifest["figure_count"] == 1
+    assert manifest["figure_count"] == 2
     assert manifest["figure_generated"] is True
     assert manifest["figure_file_name"] == "slo-aware-events-timeline.png"
     assert manifest["image_format"] == "png"
@@ -143,6 +160,38 @@ def test_generate_figure_for_run_dir_writes_manifest(
     assert manifest["target_output_throughput_tokens_per_s"] == 25.0
     assert manifest["wake_reason_counts"] == {"slo_recovered": 1}
     assert Path(manifest["figure_path"]).is_file()
+    assert manifest["figures"] == [
+        {
+            "figure_kind": "timeline",
+            "figure_generated": True,
+            "figure_file_name": "slo-aware-events-timeline.png",
+            "figure_path": str(
+                (
+                    run_dir
+                    / "post-processed"
+                    / "visualization"
+                    / "gateway-slo-aware"
+                    / "slo-aware-events-timeline.png"
+                ).resolve()
+            ),
+            "skip_reason": None,
+        },
+        {
+            "figure_kind": "stored_throughput",
+            "figure_generated": True,
+            "figure_file_name": "slo-aware-stored-throughput.png",
+            "figure_path": str(
+                (
+                    run_dir
+                    / "post-processed"
+                    / "visualization"
+                    / "gateway-slo-aware"
+                    / "slo-aware-stored-throughput.png"
+                ).resolve()
+            ),
+            "skip_reason": None,
+        },
+    ]
 
 
 def test_generate_figure_for_run_dir_rejects_missing_summary_file(tmp_path: Path) -> None:

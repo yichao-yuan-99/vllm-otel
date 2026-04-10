@@ -1,14 +1,17 @@
 # Gateway SLO-Aware Visualization
 
-This directory renders one event-timeline figure per run from
+This directory renders gateway SLO-aware figures per run from
 `post-processed/gateway/slo-aware-log/slo-aware-events.json`.
 
-The figure shows:
+The main timeline figure shows:
 
 - gateway min and average stored throughput around SLO-aware decisions
 - the configured throughput target
 - per-event throughput for agents entering or leaving `ralexation`
 - per-event slack and `ralexation` duration
+
+It also writes a second figure with only the stored min/avg throughput lines for
+less cluttered inspection.
 
 ## Script
 
@@ -36,6 +39,7 @@ Default output directory:
 Outputs:
 
 - `slo-aware-events-timeline.<png|pdf|svg>`
+- `slo-aware-stored-throughput.<png|pdf|svg>`
 - `figures-manifest.json`
 
 Optional arguments:

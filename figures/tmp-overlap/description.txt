@@ -1,0 +1,2 @@
+Overlaid Agent Output Throughput Histogram
+This figure compares the per-agent output-throughput distributions for two replay sweeps at the same benchmark, agent, and QPS point. By rebuilding both histograms onto one shared bin grid and plotting them with transparent fills, it makes distribution shifts and overlapping mass directly visible without changing either axis between runs.

@@ -14,6 +14,7 @@ DEFAULT_INPUT_REL_PATH = Path("post-processed/gateway/slo-aware-log")
 DEFAULT_OUTPUT_REL_PATH = Path("post-processed/visualization/gateway-slo-aware")
 DEFAULT_MANIFEST_NAME = "figures-manifest.json"
 DEFAULT_FIGURE_STEM = "slo-aware-events-timeline"
+DEFAULT_STORED_THROUGHPUT_FIGURE_STEM = "slo-aware-stored-throughput"
 DEFAULT_FORMAT = "png"
 SUPPORTED_FORMATS = ("png", "pdf", "svg")
 ENTER_EVENT_TYPE = "agent_entered_ralexation"
@@ -216,6 +217,28 @@ def _build_stats_annotation(payload: dict[str, Any]) -> str:
     )
 
 
+def _format_value_range(values: list[float], suffix: str = "") -> str:
+    if not values:
+        return "n/a"
+    return f"{min(values):.6g}{suffix} to {max(values):.6g}{suffix}"
+
+
+def _build_stored_throughput_annotation(
+    *,
+    payload: dict[str, Any],
+    min_y: list[float],
+    avg_y: list[float],
+) -> str:
+    return "\n".join(
+        [
+            f"events: {_format_stat_value(_int_or_none(payload.get('slo_aware_event_count')))}",
+            f"target: {_format_stat_value(_float_or_none(payload.get('target_output_throughput_tokens_per_s')), ' tok/s')}",
+            f"stored min range: {_format_value_range(min_y, ' tok/s')}",
+            f"stored avg range: {_format_value_range(avg_y, ' tok/s')}",
+        ]
+    )
+
+
 def _import_matplotlib_pyplot() -> Any:
     try:
         import matplotlib
@@ -250,6 +273,121 @@ def _scatter_if_any(axis: Any, x_values: list[float], y_values: list[float], **k
         axis.scatter(x_values, y_values, **kwargs)
 
 
+def _extract_plot_series(events: list[dict[str, Any]]) -> dict[str, list[float]]:
+    series: dict[str, list[float]] = {
+        "all_x_values": [],
+        "min_x": [],
+        "min_y": [],
+        "avg_x": [],
+        "avg_y": [],
+        "enter_x": [],
+        "enter_throughput_y": [],
+        "enter_slack_x": [],
+        "enter_slack_y": [],
+        "enter_duration_x": [],
+        "enter_duration_y": [],
+        "leave_ongoing_x": [],
+        "leave_ongoing_throughput_y": [],
+        "leave_ongoing_slack_x": [],
+        "leave_ongoing_slack_y": [],
+        "leave_pending_x": [],
+        "leave_pending_throughput_y": [],
+        "leave_pending_slack_x": [],
+        "leave_pending_slack_y": [],
+        "leave_other_x": [],
+        "leave_other_throughput_y": [],
+        "leave_other_slack_x": [],
+        "leave_other_slack_y": [],
+    }
+
+    for event in events:
+        time_offset_s = _float_or_none(event.get("time_offset_s"))
+        if time_offset_s is None:
+            continue
+        series["all_x_values"].append(time_offset_s)
+
+        min_output = _float_or_none(event.get("min_output_tokens_per_s"))
+        if min_output is not None:
+            series["min_x"].append(time_offset_s)
+            series["min_y"].append(min_output)
+
+        avg_output = _float_or_none(event.get("avg_output_tokens_per_s"))
+        if avg_output is not None:
+            series["avg_x"].append(time_offset_s)
+            series["avg_y"].append(avg_output)
+
+        event_type = _non_empty_str_or_none(event.get("event_type"))
+        throughput = _float_or_none(event.get("output_tokens_per_s"))
+        slack_s = _float_or_none(event.get("slo_slack_s"))
+        duration_s = _float_or_none(event.get("ralexation_duration_s"))
+
+        if event_type == ENTER_EVENT_TYPE:
+            if throughput is not None:
+                series["enter_x"].append(time_offset_s)
+                series["enter_throughput_y"].append(throughput)
+            if slack_s is not None:
+                series["enter_slack_x"].append(time_offset_s)
+                series["enter_slack_y"].append(slack_s)
+            if duration_s is not None:
+                series["enter_duration_x"].append(time_offset_s)
+                series["enter_duration_y"].append(duration_s)
+            continue
+
+        if event_type == LEAVE_EVENT_TYPE:
+            destination = _non_empty_str_or_none(event.get("to_schedule_state"))
+            if destination == "ongoing":
+                if throughput is not None:
+                    series["leave_ongoing_x"].append(time_offset_s)
+                    series["leave_ongoing_throughput_y"].append(throughput)
+                if slack_s is not None:
+                    series["leave_ongoing_slack_x"].append(time_offset_s)
+                    series["leave_ongoing_slack_y"].append(slack_s)
+                continue
+            if destination == "pending":
+                if throughput is not None:
+                    series["leave_pending_x"].append(time_offset_s)
+                    series["leave_pending_throughput_y"].append(throughput)
+                if slack_s is not None:
+                    series["leave_pending_slack_x"].append(time_offset_s)
+                    series["leave_pending_slack_y"].append(slack_s)
+                continue
+            if throughput is not None:
+                series["leave_other_x"].append(time_offset_s)
+                series["leave_other_throughput_y"].append(throughput)
+            if slack_s is not None:
+                series["leave_other_slack_x"].append(time_offset_s)
+                series["leave_other_slack_y"].append(slack_s)
+    return series
+
+
+def _set_x_limits(axis: Any, all_x_values: list[float]) -> None:
+    if not all_x_values:
+        return
+    x_min = min(all_x_values)
+    x_max = max(all_x_values)
+    if x_min == x_max:
+        padding = 1.0
+        axis.set_xlim(x_min - padding, x_max + padding)
+    else:
+        axis.set_xlim(x_min, x_max)
+
+
+def _build_subtitle_text(payload: dict[str, Any]) -> str | None:
+    subtitle_parts: list[str] = []
+    source_type = payload.get("source_type")
+    if isinstance(source_type, str) and source_type:
+        subtitle_parts.append(f"source: {source_type}")
+    analysis_start = payload.get("analysis_window_start_utc")
+    if isinstance(analysis_start, str) and analysis_start:
+        subtitle_parts.append(f"start: {analysis_start}")
+    log_paths = payload.get("source_slo_aware_log_paths")
+    if isinstance(log_paths, list):
+        subtitle_parts.append(f"logs: {len(log_paths)}")
+    if not subtitle_parts:
+        return None
+    return " | ".join(subtitle_parts)
+
+
 def _render_gateway_slo_aware_figure(
     *,
     slo_aware_payload: dict[str, Any],
@@ -261,91 +399,8 @@ def _render_gateway_slo_aware_figure(
     if not events:
         return False
 
-    min_x: list[float] = []
-    min_y: list[float] = []
-    avg_x: list[float] = []
-    avg_y: list[float] = []
-    enter_x: list[float] = []
-    enter_throughput_y: list[float] = []
-    enter_slack_x: list[float] = []
-    enter_slack_y: list[float] = []
-    enter_duration_x: list[float] = []
-    enter_duration_y: list[float] = []
-    leave_ongoing_x: list[float] = []
-    leave_ongoing_throughput_y: list[float] = []
-    leave_ongoing_slack_x: list[float] = []
-    leave_ongoing_slack_y: list[float] = []
-    leave_pending_x: list[float] = []
-    leave_pending_throughput_y: list[float] = []
-    leave_pending_slack_x: list[float] = []
-    leave_pending_slack_y: list[float] = []
-    leave_other_x: list[float] = []
-    leave_other_throughput_y: list[float] = []
-    leave_other_slack_x: list[float] = []
-    leave_other_slack_y: list[float] = []
-
-    for event in events:
-        time_offset_s = _float_or_none(event.get("time_offset_s"))
-        if time_offset_s is None:
-            continue
-
-        min_output = _float_or_none(event.get("min_output_tokens_per_s"))
-        if min_output is not None:
-            min_x.append(time_offset_s)
-            min_y.append(min_output)
-
-        avg_output = _float_or_none(event.get("avg_output_tokens_per_s"))
-        if avg_output is not None:
-            avg_x.append(time_offset_s)
-            avg_y.append(avg_output)
-
-        event_type = _non_empty_str_or_none(event.get("event_type"))
-        throughput = _float_or_none(event.get("output_tokens_per_s"))
-        slack_s = _float_or_none(event.get("slo_slack_s"))
-        duration_s = _float_or_none(event.get("ralexation_duration_s"))
-
-        if event_type == ENTER_EVENT_TYPE:
-            if throughput is not None:
-                enter_x.append(time_offset_s)
-                enter_throughput_y.append(throughput)
-            if slack_s is not None:
-                enter_slack_x.append(time_offset_s)
-                enter_slack_y.append(slack_s)
-            if duration_s is not None:
-                enter_duration_x.append(time_offset_s)
-                enter_duration_y.append(duration_s)
-            continue
-
-        if event_type == LEAVE_EVENT_TYPE:
-            destination = _non_empty_str_or_none(event.get("to_schedule_state"))
-            if destination == "ongoing":
-                if throughput is not None:
-                    leave_ongoing_x.append(time_offset_s)
-                    leave_ongoing_throughput_y.append(throughput)
-                if slack_s is not None:
-                    leave_ongoing_slack_x.append(time_offset_s)
-                    leave_ongoing_slack_y.append(slack_s)
-                continue
-            if destination == "pending":
-                if throughput is not None:
-                    leave_pending_x.append(time_offset_s)
-                    leave_pending_throughput_y.append(throughput)
-                if slack_s is not None:
-                    leave_pending_slack_x.append(time_offset_s)
-                    leave_pending_slack_y.append(slack_s)
-                continue
-            if throughput is not None:
-                leave_other_x.append(time_offset_s)
-                leave_other_throughput_y.append(throughput)
-            if slack_s is not None:
-                leave_other_slack_x.append(time_offset_s)
-                leave_other_slack_y.append(slack_s)
-
-    all_x_values = [
-        _float_or_none(event.get("time_offset_s"))
-        for event in events
-        if _float_or_none(event.get("time_offset_s")) is not None
-    ]
+    plot_series = _extract_plot_series(events)
+    all_x_values = plot_series["all_x_values"]
     if not all_x_values:
         return False
 
@@ -364,9 +419,6 @@ def _render_gateway_slo_aware_figure(
         gridspec_kw={"height_ratios": [2.4, 1.9], "hspace": 0.14},
     )
 
-    x_min = min(all_x_values)
-    x_max = max(all_x_values)
-
     if target_output_throughput_tokens_per_s is not None:
         throughput_axis.axhline(
             target_output_throughput_tokens_per_s,
@@ -376,20 +428,20 @@ def _render_gateway_slo_aware_figure(
             alpha=0.95,
             label="throughput target",
         )
-    if min_x:
+    if plot_series["min_x"]:
         throughput_axis.plot(
-            min_x,
-            min_y,
+            plot_series["min_x"],
+            plot_series["min_y"],
             color="#334155",
             linestyle=(0, (3, 2)),
             linewidth=1.5,
             alpha=0.92,
             label="stored min throughput",
         )
-    if avg_x:
+    if plot_series["avg_x"]:
         throughput_axis.plot(
-            avg_x,
-            avg_y,
+            plot_series["avg_x"],
+            plot_series["avg_y"],
             color="#2563EB",
             linewidth=1.8,
             alpha=0.9,
@@ -397,8 +449,8 @@ def _render_gateway_slo_aware_figure(
         )
     _scatter_if_any(
         throughput_axis,
-        enter_x,
-        enter_throughput_y,
+        plot_series["enter_x"],
+        plot_series["enter_throughput_y"],
         color="#B91C1C",
         s=28,
         zorder=3,
@@ -406,8 +458,8 @@ def _render_gateway_slo_aware_figure(
     )
     _scatter_if_any(
         throughput_axis,
-        leave_ongoing_x,
-        leave_ongoing_throughput_y,
+        plot_series["leave_ongoing_x"],
+        plot_series["leave_ongoing_throughput_y"],
         color="#059669",
         marker="^",
         s=32,
@@ -416,8 +468,8 @@ def _render_gateway_slo_aware_figure(
     )
     _scatter_if_any(
         throughput_axis,
-        leave_pending_x,
-        leave_pending_throughput_y,
+        plot_series["leave_pending_x"],
+        plot_series["leave_pending_throughput_y"],
         color="#B45309",
         marker="s",
         s=28,
@@ -426,8 +478,8 @@ def _render_gateway_slo_aware_figure(
     )
     _scatter_if_any(
         throughput_axis,
-        leave_other_x,
-        leave_other_throughput_y,
+        plot_series["leave_other_x"],
+        plot_series["leave_other_throughput_y"],
         facecolors="none",
         edgecolors="#475569",
         marker="D",
@@ -448,21 +500,12 @@ def _render_gateway_slo_aware_figure(
     throughput_axis.set_ylabel("Throughput (tok/s)")
     throughput_axis.legend(loc="upper left", frameon=False, ncols=2)
 
-    subtitle_parts: list[str] = []
-    source_type = slo_aware_payload.get("source_type")
-    if isinstance(source_type, str) and source_type:
-        subtitle_parts.append(f"source: {source_type}")
-    analysis_start = slo_aware_payload.get("analysis_window_start_utc")
-    if isinstance(analysis_start, str) and analysis_start:
-        subtitle_parts.append(f"start: {analysis_start}")
-    log_paths = slo_aware_payload.get("source_slo_aware_log_paths")
-    if isinstance(log_paths, list):
-        subtitle_parts.append(f"logs: {len(log_paths)}")
-    if subtitle_parts:
+    subtitle_text = _build_subtitle_text(slo_aware_payload)
+    if subtitle_text is not None:
         throughput_axis.text(
             0.0,
             1.02,
-            " | ".join(subtitle_parts),
+            subtitle_text,
             transform=throughput_axis.transAxes,
             ha="left",
             va="bottom",
@@ -488,8 +531,8 @@ def _render_gateway_slo_aware_figure(
 
     _scatter_if_any(
         slack_axis,
-        enter_slack_x,
-        enter_slack_y,
+        plot_series["enter_slack_x"],
+        plot_series["enter_slack_y"],
         color="#B91C1C",
         s=28,
         zorder=3,
@@ -497,8 +540,8 @@ def _render_gateway_slo_aware_figure(
     )
     _scatter_if_any(
         slack_axis,
-        leave_ongoing_slack_x,
-        leave_ongoing_slack_y,
+        plot_series["leave_ongoing_slack_x"],
+        plot_series["leave_ongoing_slack_y"],
         color="#059669",
         marker="^",
         s=32,
@@ -507,8 +550,8 @@ def _render_gateway_slo_aware_figure(
     )
     _scatter_if_any(
         slack_axis,
-        leave_pending_slack_x,
-        leave_pending_slack_y,
+        plot_series["leave_pending_slack_x"],
+        plot_series["leave_pending_slack_y"],
         color="#B45309",
         marker="s",
         s=28,
@@ -517,8 +560,8 @@ def _render_gateway_slo_aware_figure(
     )
     _scatter_if_any(
         slack_axis,
-        leave_other_slack_x,
-        leave_other_slack_y,
+        plot_series["leave_other_slack_x"],
+        plot_series["leave_other_slack_y"],
         facecolors="none",
         edgecolors="#475569",
         marker="D",
@@ -529,8 +572,8 @@ def _render_gateway_slo_aware_figure(
     )
     _scatter_if_any(
         slack_axis,
-        enter_duration_x,
-        enter_duration_y,
+        plot_series["enter_duration_x"],
+        plot_series["enter_duration_y"],
         facecolors="none",
         edgecolors="#1D4ED8",
         marker="o",
@@ -547,14 +590,123 @@ def _render_gateway_slo_aware_figure(
     slack_axis.set_ylabel("Slack / Duration (s)")
     slack_axis.legend(loc="upper left", frameon=False, ncols=2)
 
-    if x_min == x_max:
-        padding = 1.0
-        throughput_axis.set_xlim(x_min - padding, x_max + padding)
-    else:
-        throughput_axis.set_xlim(x_min, x_max)
+    _set_x_limits(throughput_axis, all_x_values)
     figure.savefig(output_path, format=image_format, dpi=dpi)
     plt.close(figure)
     return True
+
+
+def _render_gateway_stored_throughput_figure(
+    *,
+    slo_aware_payload: dict[str, Any],
+    output_path: Path,
+    image_format: str,
+    dpi: int,
+) -> bool:
+    events = _extract_events(slo_aware_payload)
+    if not events:
+        return False
+
+    plot_series = _extract_plot_series(events)
+    all_x_values = plot_series["all_x_values"]
+    if not all_x_values:
+        return False
+    if not plot_series["min_x"] and not plot_series["avg_x"]:
+        return False
+
+    plt = _import_matplotlib_pyplot()
+    _apply_plot_style(plt)
+
+    figure, axis = plt.subplots(figsize=(11.2, 5.2))
+
+    if plot_series["min_x"]:
+        axis.plot(
+            plot_series["min_x"],
+            plot_series["min_y"],
+            color="#334155",
+            linestyle=(0, (3, 2)),
+            linewidth=1.6,
+            alpha=0.94,
+            label="stored min throughput",
+        )
+    if plot_series["avg_x"]:
+        axis.plot(
+            plot_series["avg_x"],
+            plot_series["avg_y"],
+            color="#2563EB",
+            linewidth=1.9,
+            alpha=0.92,
+            label="stored avg throughput",
+        )
+
+    axis.axvline(0.0, color="#334155", linestyle=":", linewidth=1.0, alpha=0.75)
+    axis.grid(True, which="major", linestyle="--", linewidth=0.7, alpha=0.55)
+    axis.grid(True, which="minor", linestyle=":", linewidth=0.5, alpha=0.35)
+    axis.minorticks_on()
+    axis.set_title(
+        "Gateway Stored Throughput",
+        loc="left",
+        fontweight="semibold",
+    )
+    axis.set_xlabel("Time From Replay Start (s)")
+    axis.set_ylabel("Throughput (tok/s)")
+    axis.legend(loc="upper left", frameon=False)
+
+    subtitle_text = _build_subtitle_text(slo_aware_payload)
+    if subtitle_text is not None:
+        axis.text(
+            0.0,
+            1.02,
+            subtitle_text,
+            transform=axis.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=9,
+            color="#2A3B47",
+        )
+
+    axis.text(
+        0.99,
+        0.98,
+        _build_stored_throughput_annotation(
+            payload=slo_aware_payload,
+            min_y=plot_series["min_y"],
+            avg_y=plot_series["avg_y"],
+        ),
+        transform=axis.transAxes,
+        ha="right",
+        va="top",
+        fontsize=10,
+        bbox={
+            "boxstyle": "round,pad=0.32",
+            "facecolor": "#F7F9FC",
+            "edgecolor": "#7A8B99",
+            "alpha": 0.96,
+        },
+    )
+
+    _set_x_limits(axis, all_x_values)
+    figure.tight_layout()
+    figure.savefig(output_path, format=image_format, dpi=dpi)
+    plt.close(figure)
+    return True
+
+
+def _build_manifest_figure_entry(
+    *,
+    figure_kind: str,
+    figure_file_name: str,
+    figure_path: Path,
+    rendered: bool,
+    skip_reason: str,
+) -> dict[str, Any]:
+    return {
+        "figure_kind": figure_kind,
+        "figure_generated": rendered,
+        "figure_file_name": figure_file_name if rendered else None,
+        "figure_path": str(figure_path.resolve()) if rendered else None,
+        "skip_reason": None if rendered else skip_reason,
+    }
 
 
 def generate_figure_for_run_dir(
@@ -588,14 +740,42 @@ def generate_figure_for_run_dir(
         )
 
     resolved_output_dir.mkdir(parents=True, exist_ok=True)
-    figure_file_name = f"{DEFAULT_FIGURE_STEM}.{image_format}"
-    figure_path = resolved_output_dir / figure_file_name
-    rendered = _render_gateway_slo_aware_figure(
-        slo_aware_payload=slo_aware_payload,
-        output_path=figure_path,
-        image_format=image_format,
-        dpi=dpi,
-    )
+    figure_specs = [
+        {
+            "figure_kind": "timeline",
+            "figure_file_name": f"{DEFAULT_FIGURE_STEM}.{image_format}",
+            "renderer": _render_gateway_slo_aware_figure,
+            "skip_reason": "No valid SLO-aware events",
+        },
+        {
+            "figure_kind": "stored_throughput",
+            "figure_file_name": f"{DEFAULT_STORED_THROUGHPUT_FIGURE_STEM}.{image_format}",
+            "renderer": _render_gateway_stored_throughput_figure,
+            "skip_reason": "No stored throughput points",
+        },
+    ]
+
+    figure_entries: list[dict[str, Any]] = []
+    for figure_spec in figure_specs:
+        figure_path = resolved_output_dir / figure_spec["figure_file_name"]
+        rendered = figure_spec["renderer"](
+            slo_aware_payload=slo_aware_payload,
+            output_path=figure_path,
+            image_format=image_format,
+            dpi=dpi,
+        )
+        figure_entries.append(
+            _build_manifest_figure_entry(
+                figure_kind=str(figure_spec["figure_kind"]),
+                figure_file_name=str(figure_spec["figure_file_name"]),
+                figure_path=figure_path,
+                rendered=rendered,
+                skip_reason=str(figure_spec["skip_reason"]),
+            )
+        )
+
+    primary_entry = figure_entries[0] if figure_entries else {}
+    rendered_figure_count = sum(1 for entry in figure_entries if entry["figure_generated"])
 
     manifest = {
         "source_run_dir": str(resolved_run_dir),
@@ -603,10 +783,10 @@ def generate_figure_for_run_dir(
         "output_dir": str(resolved_output_dir),
         "image_format": image_format,
         "dpi": dpi,
-        "figure_count": 1 if rendered else 0,
-        "figure_generated": rendered,
-        "figure_file_name": figure_file_name if rendered else None,
-        "figure_path": str(figure_path.resolve()) if rendered else None,
+        "figure_count": rendered_figure_count,
+        "figure_generated": bool(primary_entry.get("figure_generated", False)),
+        "figure_file_name": primary_entry.get("figure_file_name"),
+        "figure_path": primary_entry.get("figure_path"),
         "slo_aware_log_found": bool(slo_aware_payload.get("slo_aware_log_found", False)),
         "slo_aware_event_count": _int_or_none(slo_aware_payload.get("slo_aware_event_count")),
         "unique_agent_count": _int_or_none(slo_aware_payload.get("unique_agent_count")),
@@ -637,7 +817,8 @@ def generate_figure_for_run_dir(
         "service_failure_cutoff_time_utc": slo_aware_payload.get(
             "service_failure_cutoff_time_utc"
         ),
-        "skip_reason": None if rendered else "No valid SLO-aware events",
+        "skip_reason": primary_entry.get("skip_reason"),
+        "figures": figure_entries,
     }
     manifest_path = resolved_output_dir / DEFAULT_MANIFEST_NAME
     manifest_path.write_text(
