@@ -1,0 +1,83 @@
+MI2508X embedded TP2 service stack starting on k004-007.hpcfund at Thu Apr  9 06:21:57 PM CDT 2026
+Run ID: 291763
+Resolved model key 'qwen3_coder_30b' -> 'Qwen/Qwen3-Coder-30B-A3B-Instruct' (served as 'Qwen3-Coder-30B-A3B-Instruct')
+Launching AMD SMI power daemon socket=/tmp/amdsmi-power-reader.291763.sock
+Launching shared Jaeger on ui=16686 otlp=4317
+Launching vLLM profile=0 port=11451 gpus=0,1
+Launching vLLM profile=1 port=24123 gpus=2,3
+Launching vLLM profile=2 port=31987 gpus=4,5
+Launching vLLM profile=3 port=40823 gpus=6,7
+Launching gateway-ctx profile=0 raw=11457 parsed=18171
+Launching gateway-ctx profile=1 raw=24157 parsed=28171
+Launching gateway-ctx profile=2 raw=31955 parsed=38171
+Launching gateway-ctx profile=3 raw=40857 parsed=48171
+Services are ready.
+  amd-smi-power-socket: /tmp/amdsmi-power-reader.291763.sock
+  jaeger: http://127.0.0.1:16686
+  profile 0: gpus=0,1 vLLM=http://127.0.0.1:11451 gateway-ctx=http://127.0.0.1:11457 gateway-ctx-parse=http://127.0.0.1:18171
+  profile 1: gpus=2,3 vLLM=http://127.0.0.1:24123 gateway-ctx=http://127.0.0.1:24157 gateway-ctx-parse=http://127.0.0.1:28171
+  profile 2: gpus=4,5 vLLM=http://127.0.0.1:31987 gateway-ctx=http://127.0.0.1:31955 gateway-ctx-parse=http://127.0.0.1:38171
+  profile 3: gpus=6,7 vLLM=http://127.0.0.1:40823 gateway-ctx=http://127.0.0.1:40857 gateway-ctx-parse=http://127.0.0.1:48171
+Logs:
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2508x-embedded-TP2/logs/amd-smi-power-daemon.291763.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2508x-embedded-TP2/logs/jaeger.291763.shared.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2508x-embedded-TP2/logs/vllm.291763.p0.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2508x-embedded-TP2/logs/gateway-ctx.291763.p0.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2508x-embedded-TP2/logs/vllm.291763.p1.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2508x-embedded-TP2/logs/gateway-ctx.291763.p1.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2508x-embedded-TP2/logs/vllm.291763.p2.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2508x-embedded-TP2/logs/gateway-ctx.291763.p2.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2508x-embedded-TP2/logs/vllm.291763.p3.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2508x-embedded-TP2/logs/gateway-ctx.291763.p3.log
+Launching experiment profile=0 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi2508x-embedded-TP2/mi2508x/sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/generated/20260409T232134Z/run_replay.sh
+Launching experiment profile=1 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi2508x-embedded-TP2/mi2508x/sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/generated/20260409T232134Z/run_replay.sh
+Launching experiment profile=2 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi2508x-embedded-TP2/mi2508x/sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/generated/20260409T232134Z/run_replay.sh
+Launching experiment profile=3 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi2508x-embedded-TP2/mi2508x/sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/generated/20260409T232134Z/run_replay.sh
+Experiment phase finished with exit code 0 at Thu Apr  9 06:25:26 PM CDT 2026
+Stopping gateway-ctx profile=0 (pid=2914460)
+Stopping gateway-ctx profile=1 (pid=2914461)
+Stopping gateway-ctx profile=2 (pid=2914462)
+Stopping gateway-ctx profile=3 (pid=2914463)
+Stopping vllm profile=0 (pid=2905904)
+Stopping vllm profile=1 (pid=2905906)
+Stopping vllm profile=2 (pid=2905908)
+Stopping vllm profile=3 (pid=2905910)
+Stopping amd-smi-power-daemon (pid=2905827)
+Stopping jaeger (pid=2905831)
+
+----------------------------------------------------------------------
+Omnistat Report Card for Job Id: 291763
+----------------------------------------------------------------------
+
+Job Overview (Num Nodes = 1, Machine = HPC Fund)
+ --> Start time = 2026-04-09 18:22:04
+ --> End   time = 2026-04-09 18:29:04
+ --> Duration   = 420 secs
+
+GPU Statistics:
+
+           | Utilization (%)  |  Memory Use (%)  | Temperature (C)  |    Power (W)     | Energy (kWh) |
+     GPU # |    Max     Mean  |    Max     Mean  |    Max     Mean  |    Max     Mean  |    Total     |
+    ---------------------------------------------------------------------------------------------------
+         0 |    4.00    0.27  |   93.03   24.89  |   41.00   39.87  |  155.00  101.53  |   1.19e-02   |
+         1 |    6.00    0.40  |   93.06   24.90  |   40.00   38.40  |    0.00    0.00  |   0.00e+00   |
+         2 |   26.00    2.13  |   93.06   24.88  |   38.00   35.67  |  157.00  103.33  |   1.21e-02   |
+         3 |   99.00    6.87  |   93.03   24.87  |   45.00   42.47  |    0.00    0.00  |   0.00e+00   |
+         4 |  100.00    6.67  |   93.03   22.18  |   42.00   40.20  |  149.00  105.40  |   1.23e-02   |
+         5 |   27.00    1.80  |   93.06   22.18  |   44.00   43.00  |    0.00    0.00  |   0.00e+00   |
+         6 |    3.00    0.20  |   93.06   22.10  |   44.00   42.60  |  154.00  103.47  |   1.21e-02   |
+         7 |    0.00    0.00  |   93.04   22.10  |   41.00   40.00  |    0.00    0.00  |   0.00e+00   |
+
+Approximate Total GPU Energy Consumed = 4.85e-02 kWh
+
+Host Statistics:
+
+    # CPUs | CPU Utilization (%)  |    Memory Use (%)    |
+           |    Max       Mean    |    Max       Mean    |
+    ------------------------------------------------------
+       128 |   14.51      6.91    |   11.78      5.13    |
+
+--
+Query interval = 30.000 secs
+Query execution time = 0.3 secs
+Version = 1.10.0

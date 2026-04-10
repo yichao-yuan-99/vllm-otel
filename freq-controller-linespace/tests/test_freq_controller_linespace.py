@@ -20,9 +20,11 @@ from freq_controller_linespace import (
     GatewayContextSnapshot,
     GatewayIPCConfig,
     ZeusdConfig,
+    ZeusdGPUFrequencyController,
     choose_next_frequency_index,
     choose_target_frequency_index,
     load_controller_config,
+    parse_gpu_index_tokens,
 )
 
 
@@ -41,9 +43,6 @@ class FakeGatewayClient:
             raise value
         return value
 
-    def read_total_context_usage(self) -> float:
-        return self.read_context_snapshot().total_context_tokens
-
 
 class FakeGPUController:
     def __init__(self) -> None:
@@ -60,6 +59,24 @@ class FakeGPUController:
 
     def reset_frequency(self) -> None:
         self.reset_calls += 1
+
+
+class FakeZeusBackend:
+    def __init__(self) -> None:
+        self.set_calls: list[tuple[int, int, int]] = []
+        self.reset_calls: list[int] = []
+
+    def set_gpu_locked_clocks(
+        self,
+        *,
+        gpu_index: int,
+        min_clock_mhz: int,
+        max_clock_mhz: int,
+    ) -> None:
+        self.set_calls.append((gpu_index, min_clock_mhz, max_clock_mhz))
+
+    def reset_gpu_locked_clocks(self, *, gpu_index: int) -> None:
+        self.reset_calls.append(gpu_index)
 
 
 class FakeClock:
@@ -97,6 +114,16 @@ def read_jsonl(path: Path) -> list[dict[str, object]]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def test_parse_gpu_index_tokens_accepts_single_and_comma_separated_values() -> None:
+    assert parse_gpu_index_tokens(["3"]) == (3,)
+    assert parse_gpu_index_tokens(["2,3"]) == (2, 3)
+
+
+def test_parse_gpu_index_tokens_rejects_duplicates() -> None:
+    with pytest.raises(ValueError, match="duplicate value: 3"):
+        parse_gpu_index_tokens(["2,3,3"])
 
 
 def test_load_controller_config_applies_linespace_fields_and_defaults(
@@ -188,6 +215,26 @@ def test_load_controller_config_rejects_non_positive_threshold(
         load_controller_config(config_path)
 
 
+def test_load_controller_config_rejects_gpu_targeting_in_toml(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "controller.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "frequency_mhz_levels = [600, 900, 1200]",
+                "[zeusd]",
+                "gpu_indices = [2, 3]",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="use --gpu-index instead"):
+        load_controller_config(config_path)
+
+
 def test_choose_target_frequency_index_uses_linear_segments() -> None:
     assert choose_target_frequency_index(
         moving_average_context_usage=-5.0,
@@ -247,6 +294,24 @@ def test_choose_next_frequency_index_moves_directly_to_target_segment() -> None:
     ) == (1, "hold")
 
 
+def test_zeusd_gpu_frequency_controller_applies_and_resets_each_gpu() -> None:
+    controller = ZeusdGPUFrequencyController(
+        socket_path="/tmp/zeusd.sock",
+        gpu_index=(2, 3),
+    )
+    fake_backend = FakeZeusBackend()
+    controller._gpus = fake_backend
+
+    controller.set_frequency(1200)
+    controller.reset_frequency()
+
+    assert fake_backend.set_calls == [
+        (2, 1200, 1200),
+        (3, 1200, 1200),
+    ]
+    assert fake_backend.reset_calls == [2, 3]
+
+
 def test_frequency_controller_uses_linespace_policy_and_resets_on_exit(
     tmp_path: Path,
 ) -> None:
@@ -273,7 +338,7 @@ def test_frequency_controller_uses_linespace_policy_and_resets_on_exit(
         config,
         tmp_path,
         port_profile_id=7,
-        gpu_index=3,
+        gpu_index=(2, 3),
         gateway_client=fake_gateway,
         gpu_controller=fake_gpu,
         monotonic=fake_clock.monotonic,
@@ -298,6 +363,7 @@ def test_frequency_controller_uses_linespace_policy_and_resets_on_exit(
     control_error_records = read_jsonl(log_paths.control_error_path)
 
     assert query_records[0]["phase"] == "pending"
+    assert query_records[0]["gpu_indices"] == [2, 3]
     assert [record["context_usage"] for record in query_records[1:]] == [
         1.0,
         1.0,
@@ -313,6 +379,7 @@ def test_frequency_controller_uses_linespace_policy_and_resets_on_exit(
     assert decision_records[0]["segment_count"] == 3
     assert decision_records[0]["segment_width_context_usage"] == 10.0
     assert decision_records[0]["target_frequency_index"] == 0
+    assert decision_records[0]["gpu_indices"] == [2, 3]
     assert control_error_records == []
 
 
@@ -345,7 +412,7 @@ def test_frequency_controller_logs_control_failures_and_retries(
         config,
         tmp_path,
         port_profile_id=7,
-        gpu_index=3,
+        gpu_index=(2, 3),
         gateway_client=fake_gateway,
         gpu_controller=fake_gpu,
         monotonic=fake_clock.monotonic,
@@ -373,3 +440,4 @@ def test_frequency_controller_logs_control_failures_and_retries(
     assert control_error_records[0]["attempted_frequency_mhz"] == 600
     assert control_error_records[0]["current_frequency_index"] == 2
     assert control_error_records[0]["current_frequency_mhz"] == 1200
+    assert control_error_records[0]["gpu_indices"] == [2, 3]

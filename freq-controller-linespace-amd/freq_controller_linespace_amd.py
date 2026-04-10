@@ -33,6 +33,7 @@ DEFAULT_SHARED_CONFIG_FILE_NAME = "script-shared.toml"
 DEFAULT_GATEWAY_PORT_PROFILE_ID = 0
 DEFAULT_GATEWAY_IPC_SOCKET_DIR = Path("/tmp")
 DEFAULT_GPU_INDEX = 0
+DEFAULT_GPU_INDICES = (DEFAULT_GPU_INDEX,)
 DEFAULT_GATEWAY_TIMEOUT_S = 5.0
 DEFAULT_AMD_SET_GPU_CORE_FREQ_COMMAND = "amd-set-gpu-core-freq"
 DEFAULT_LOG_FILE_PREFIX = "freq-controller-ls-amd"
@@ -106,6 +107,74 @@ def _parse_frequency_levels(value: object, key: str) -> tuple[int, ...]:
     if len(unique_sorted) != len(parsed):
         raise ValueError(f"{key} must not contain duplicate values")
     return tuple(unique_sorted)
+
+
+def normalize_gpu_indices(gpu_indices: Sequence[int]) -> tuple[int, ...]:
+    if isinstance(gpu_indices, (str, bytes)):
+        raise ValueError("gpu_indices must be a sequence of integers")
+    parsed: list[int] = []
+    seen: set[int] = set()
+    for index, value in enumerate(gpu_indices):
+        item_key = f"gpu_indices[{index}]"
+        item_value = _parse_int(value, item_key)
+        if item_value < 0:
+            raise ValueError(f"{item_key} must be >= 0")
+        if item_value in seen:
+            raise ValueError(f"{item_key} duplicates GPU index {item_value}")
+        seen.add(item_value)
+        parsed.append(item_value)
+    if not parsed:
+        raise ValueError("gpu_indices must be non-empty")
+    return tuple(parsed)
+
+
+def parse_gpu_index_tokens(raw_values: Sequence[str]) -> tuple[int, ...]:
+    if not raw_values:
+        raise ValueError(
+            "--gpu-index must be a non-empty integer or comma-separated GPU list"
+        )
+    flattened: list[int] = []
+    seen: set[int] = set()
+    for raw_value in raw_values:
+        for token in str(raw_value).split(","):
+            stripped = token.strip()
+            if not stripped:
+                raise ValueError(
+                    "--gpu-index must be a non-empty integer or comma-separated GPU list"
+                )
+            try:
+                parsed = int(stripped)
+            except ValueError as exc:
+                raise ValueError(
+                    f"--gpu-index contains non-integer value: {stripped!r}"
+                ) from exc
+            if parsed < 0:
+                raise ValueError("--gpu-index values must be >= 0")
+            if parsed in seen:
+                raise ValueError(f"--gpu-index contains duplicate value: {parsed}")
+            seen.add(parsed)
+            flattened.append(parsed)
+    return tuple(flattened)
+
+
+def normalize_gpu_index_selection(
+    gpu_index: int | Sequence[int] | str | None,
+) -> tuple[int, ...]:
+    if gpu_index is None:
+        return DEFAULT_GPU_INDICES
+    if isinstance(gpu_index, int):
+        return normalize_gpu_indices((gpu_index,))
+    if isinstance(gpu_index, str):
+        return parse_gpu_index_tokens((gpu_index,))
+    return normalize_gpu_indices(gpu_index)
+
+
+def gpu_target_log_payload(gpu_indices: Sequence[int]) -> dict[str, Any]:
+    normalized = normalize_gpu_indices(gpu_indices)
+    payload: dict[str, Any] = {"gpu_indices": list(normalized)}
+    if len(normalized) == 1:
+        payload["gpu_index"] = normalized[0]
+    return payload
 
 
 def _default_gateway_ipc_socket_paths(port_profile_id: int | str | None) -> tuple[Path, ...]:
@@ -275,13 +344,13 @@ class AmdClockConfig:
     def to_log_payload(
         self,
         *,
-        gpu_index: int,
+        gpu_indices: Sequence[int],
         frequency_mhz_levels: Sequence[int],
     ) -> dict[str, Any]:
         return {
             "command_path": self.command_path,
             "script_path": self.script_path,
-            "gpu_index": gpu_index,
+            **gpu_target_log_payload(gpu_indices),
             "clock": "sclk",
             "limit": "max",
             "reset_max_frequency_mhz": self.resolved_reset_max_frequency_mhz(
@@ -335,7 +404,7 @@ class FrequencyControllerConfig:
         self,
         *,
         port_profile_id: int,
-        gpu_index: int,
+        gpu_indices: Sequence[int],
     ) -> dict[str, Any]:
         return {
             "frequency_mhz_levels": list(self.frequency_mhz_levels),
@@ -348,7 +417,7 @@ class FrequencyControllerConfig:
                 port_profile_id=port_profile_id,
             ),
             "amd": self.amd.to_log_payload(
-                gpu_index=gpu_index,
+                gpu_indices=gpu_indices,
                 frequency_mhz_levels=self.frequency_mhz_levels,
             ),
         }
@@ -358,7 +427,7 @@ def load_controller_config(
     config_path: Path | None,
     *,
     target_context_usage_threshold: float | None = None,
-    gpu_index: int = DEFAULT_GPU_INDEX,
+    gpu_index: int | Sequence[int] | str = DEFAULT_GPU_INDEX,
 ) -> FrequencyControllerConfig:
     default_shared_config_table = _load_shared_controller_table(
         _default_shared_config_path(),
@@ -417,9 +486,9 @@ def load_controller_config(
         amd_table = {}
     elif not isinstance(amd_table, dict):
         raise ValueError("amd must be a TOML table")
-    if "gpu_index" in amd_table:
+    if "gpu_index" in amd_table or "gpu_indices" in amd_table:
         raise ValueError(
-            "amd.gpu_index is no longer configured in TOML; use --gpu-index instead"
+            "amd GPU targeting is no longer configured in TOML; use --gpu-index instead"
         )
 
     frequency_levels_value = _lookup_with_fallback(
@@ -428,12 +497,11 @@ def load_controller_config(
         ("frequency_mhz_levels", "frequencies_mhz", "frequency_mhz"),
     )
     if frequency_levels_value is None:
-        frequency_levels = discover_supported_frequency_mhz_levels(gpu_index=gpu_index)
-    else:
-        frequency_levels = _parse_frequency_levels(
-            frequency_levels_value,
-            "frequency_mhz_levels",
-        )
+        raise ValueError("frequency_mhz_levels is required")
+    frequency_levels = _parse_frequency_levels(
+        frequency_levels_value,
+        "frequency_mhz_levels",
+    )
 
     threshold_value = (
         target_context_usage_threshold
@@ -584,20 +652,20 @@ class AmdMaxGPUFrequencyController:
         self,
         *,
         command_path: str,
-        gpu_index: int,
+        gpu_index: int | Sequence[int] | str,
         script_path: str | None,
         reset_max_frequency_mhz: int,
     ) -> None:
         self.command_path = command_path
-        self.gpu_index = gpu_index
+        self.gpu_indices = normalize_gpu_index_selection(gpu_index)
         self.script_path = script_path
         self.reset_max_frequency_mhz = reset_max_frequency_mhz
 
-    def _run_command(self, *, value: int) -> None:
+    def _run_command(self, *, gpu_index: int, value: int) -> None:
         command = [
             self.command_path,
             "--gpu-index",
-            str(self.gpu_index),
+            str(gpu_index),
             "--max-mhz",
             str(value),
         ]
@@ -621,10 +689,32 @@ class AmdMaxGPUFrequencyController:
         raise RuntimeError(error_message)
 
     def set_frequency(self, frequency_mhz: int) -> None:
-        self._run_command(value=frequency_mhz)
+        errors: list[str] = []
+        for gpu_index in self.gpu_indices:
+            try:
+                self._run_command(gpu_index=gpu_index, value=frequency_mhz)
+            except Exception as exc:
+                errors.append(f"gpu {gpu_index}: {exc}")
+        if errors:
+            raise RuntimeError(
+                f"failed to set one or more GPUs to {frequency_mhz} MHz: "
+                + "; ".join(errors)
+            )
 
     def reset_frequency(self) -> None:
-        self._run_command(value=self.reset_max_frequency_mhz)
+        errors: list[str] = []
+        for gpu_index in self.gpu_indices:
+            try:
+                self._run_command(
+                    gpu_index=gpu_index,
+                    value=self.reset_max_frequency_mhz,
+                )
+            except Exception as exc:
+                errors.append(f"gpu {gpu_index}: {exc}")
+        if errors:
+            raise RuntimeError(
+                "failed to reset one or more GPUs: " + "; ".join(errors)
+            )
 
 
 class JsonlLogFile:
@@ -740,7 +830,7 @@ class FrequencyController:
         log_dir: Path,
         *,
         port_profile_id: int = DEFAULT_GATEWAY_PORT_PROFILE_ID,
-        gpu_index: int = DEFAULT_GPU_INDEX,
+        gpu_index: int | Sequence[int] | str = DEFAULT_GPU_INDEX,
         gateway_client: GatewayContextClient | None = None,
         gpu_controller: AmdMaxGPUFrequencyController | None = None,
         monotonic: Callable[[], float] | None = None,
@@ -748,11 +838,10 @@ class FrequencyController:
     ) -> None:
         if port_profile_id < 0:
             raise ValueError("port_profile_id must be >= 0")
-        if gpu_index < 0:
-            raise ValueError("gpu_index must be >= 0")
+        resolved_gpu_indices = normalize_gpu_index_selection(gpu_index)
         self.config = config
         self.port_profile_id = port_profile_id
-        self.gpu_index = gpu_index
+        self.gpu_indices = resolved_gpu_indices
         self.gateway_client = gateway_client or GatewayContextClient(
             config.gateway.resolved_socket_path(port_profile_id),
             timeout_s=config.gateway.timeout_s,
@@ -760,7 +849,7 @@ class FrequencyController:
         self.gpu_controller = gpu_controller or AmdMaxGPUFrequencyController(
             command_path=config.amd.command_path,
             script_path=config.amd.script_path,
-            gpu_index=gpu_index,
+            gpu_index=resolved_gpu_indices,
             reset_max_frequency_mhz=config.amd.resolved_reset_max_frequency_mhz(
                 config.frequency_mhz_levels
             ),
@@ -775,6 +864,9 @@ class FrequencyController:
     @property
     def current_frequency_mhz(self) -> int:
         return self.config.frequency_mhz_levels[self.current_frequency_index]
+
+    def _gpu_log_payload(self) -> dict[str, Any]:
+        return gpu_target_log_payload(self.gpu_indices)
 
     def _apply_frequency_index(
         self,
@@ -801,6 +893,7 @@ class FrequencyController:
                 current_frequency_mhz=previous_frequency_mhz,
                 moving_average_context_usage=moving_average_context_usage,
                 sample_count=sample_count,
+                **self._gpu_log_payload(),
             )
             return False
         self.current_frequency_index = index
@@ -828,6 +921,7 @@ class FrequencyController:
             "job_active": snapshot.job_active,
             "agent_count": snapshot.agent_count,
             "sample_count_window": self.window.sample_count,
+            **self._gpu_log_payload(),
         }
         if read_error is not None:
             query_fields["error"] = read_error
@@ -848,6 +942,7 @@ class FrequencyController:
                 self.logs.query.write(
                     phase="pending",
                     error=str(exc),
+                    **self._gpu_log_payload(),
                 )
             else:
                 query_fields: dict[str, Any] = {
@@ -855,6 +950,7 @@ class FrequencyController:
                     "context_usage": snapshot.total_context_tokens,
                     "job_active": snapshot.job_active,
                     "agent_count": snapshot.agent_count,
+                    **self._gpu_log_payload(),
                 }
                 if read_error is not None:
                     query_fields["error"] = read_error
@@ -895,6 +991,7 @@ class FrequencyController:
             segment_count=self.config.segment_count,
             segment_width_context_usage=self.config.segment_width_context_usage,
             target_frequency_index=target_index,
+            **self._gpu_log_payload(),
         )
         if not changed:
             return
@@ -945,6 +1042,7 @@ class FrequencyController:
                         self.logs.query.write(
                             phase="active",
                             error=str(exc),
+                            **self._gpu_log_payload(),
                         )
                     next_sample_s += self.config.query_interval_s
                     while next_sample_s <= now_s:
@@ -965,6 +1063,7 @@ class FrequencyController:
                             current_frequency_mhz=self.current_frequency_mhz,
                             moving_average_context_usage=self.window.average(now_s),
                             sample_count=self.window.sample_count,
+                            **self._gpu_log_payload(),
                         )
                     decision_count += 1
                     next_control_s += self.config.control_interval_s
@@ -991,7 +1090,7 @@ def run_controller(
     *,
     target_context_usage_threshold: float | None = None,
     port_profile_id: int = DEFAULT_GATEWAY_PORT_PROFILE_ID,
-    gpu_index: int = DEFAULT_GPU_INDEX,
+    gpu_index: int | Sequence[int] | str = DEFAULT_GPU_INDEX,
 ) -> FrequencyControllerLogPaths:
     config = load_controller_config(
         config_path,
@@ -1066,26 +1165,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--gpu-index",
-        type=int,
-        default=DEFAULT_GPU_INDEX,
+        default=str(DEFAULT_GPU_INDEX),
         help=(
             "GPU index to control through the AMD max-only core clock command. "
+            "Pass a single integer for one GPU or a comma-separated list to "
+            "apply the same max-frequency cap to multiple GPUs. "
             f"Default: {DEFAULT_GPU_INDEX}."
         ),
     )
     args = parser.parse_args(argv)
 
     try:
+        gpu_indices = parse_gpu_index_tokens((str(args.gpu_index),))
         log_paths = run_controller(
             args.config,
             args.log_dir,
             target_context_usage_threshold=args.target_context_usage_threshold,
             port_profile_id=args.port_profile_id,
-            gpu_index=args.gpu_index,
+            gpu_index=gpu_indices,
         )
+        gpu_index_text = ",".join(str(gpu_index) for gpu_index in gpu_indices)
         print(
             (
                 "freq-controller-linespace-amd logs: "
+                f"gpu_index={gpu_index_text} "
                 f"query={log_paths.query_path} "
                 f"decision={log_paths.decision_path} "
                 f"control_error={log_paths.control_error_path}"

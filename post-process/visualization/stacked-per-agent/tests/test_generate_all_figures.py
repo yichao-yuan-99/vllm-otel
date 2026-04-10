@@ -13,6 +13,20 @@ if str(MODULE_ROOT) not in sys.path:
 import generate_all_figures
 
 
+def test_repo_root_and_figure_scripts_resolve_inside_checkout() -> None:
+    expected_repo_root = THIS_DIR.parents[3]
+
+    assert generate_all_figures.REPO_ROOT == expected_repo_root
+    assert generate_all_figures.MATERIALIZE_SCRIPT == (
+        expected_repo_root / "figures" / "stacked-per-agent" / "materialize_stacked_per_agent.py"
+    )
+    assert generate_all_figures.PLOT_SCRIPT == (
+        expected_repo_root / "figures" / "stacked-per-agent" / "plot_stacked_per_agent.py"
+    )
+    assert generate_all_figures.MATERIALIZE_SCRIPT.is_file()
+    assert generate_all_figures.PLOT_SCRIPT.is_file()
+
+
 def _write_ranges_input(run_dir: Path) -> Path:
     stack_context_dir = run_dir / "post-processed" / "gateway" / "stack-context"
     stack_context_dir.mkdir(parents=True)

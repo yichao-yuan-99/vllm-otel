@@ -23,6 +23,7 @@ from freq_controller_linespace_amd import (
     choose_target_frequency_index,
     discover_supported_frequency_mhz_levels,
     load_controller_config,
+    parse_gpu_index_tokens,
 )
 
 
@@ -122,6 +123,16 @@ def read_jsonl(path: Path) -> list[dict[str, object]]:
     ]
 
 
+def test_parse_gpu_index_tokens_accepts_single_and_comma_separated_values() -> None:
+    assert parse_gpu_index_tokens(["3"]) == (3,)
+    assert parse_gpu_index_tokens(["2,3"]) == (2, 3)
+
+
+def test_parse_gpu_index_tokens_rejects_duplicates() -> None:
+    with pytest.raises(ValueError, match="duplicate value: 3"):
+        parse_gpu_index_tokens(["2,3,3"])
+
+
 def test_discover_supported_frequency_mhz_levels() -> None:
     backend = FakeAmdSmi()
 
@@ -162,7 +173,7 @@ def test_load_controller_config_applies_linespace_fields_and_defaults(
     assert config.amd.resolved_reset_max_frequency_mhz(config.frequency_mhz_levels) == 1200
 
 
-def test_load_controller_config_discovers_frequency_levels_without_config(
+def test_load_controller_config_requires_frequency_levels_when_missing(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
@@ -170,35 +181,23 @@ def test_load_controller_config_discovers_frequency_levels_without_config(
         lambda path: {
             "control_interval_s": 5.0,
             "context_query_hz": 5.0,
+            "target_context_usage_threshold": 12000,
         },
     )
-    monkeypatch.setattr(
-        "freq_controller_linespace_amd.discover_supported_frequency_mhz_levels",
-        lambda *, gpu_index: (500, 800, 1700),
-    )
 
-    config = load_controller_config(
-        None,
-        target_context_usage_threshold=12000,
-        gpu_index=2,
-    )
-
-    assert config.frequency_mhz_levels == (500, 800, 1700)
-    assert config.target_context_usage_threshold == 12000.0
+    with pytest.raises(ValueError, match="frequency_mhz_levels is required"):
+        load_controller_config(None, gpu_index=2)
 
 
 def test_load_controller_config_uses_shared_threshold_default(monkeypatch) -> None:
     monkeypatch.setattr(
         "freq_controller_linespace_amd._load_shared_controller_table",
         lambda path: {
+            "frequency_mhz_levels": [500, 800, 1700],
             "threshold": 395784,
             "control_interval_s": 5.0,
             "context_query_hz": 5.0,
         },
-    )
-    monkeypatch.setattr(
-        "freq_controller_linespace_amd.discover_supported_frequency_mhz_levels",
-        lambda *, gpu_index: (500, 800, 1700),
     )
 
     config = load_controller_config(None, gpu_index=1)
@@ -266,6 +265,27 @@ def test_load_controller_config_rejects_non_positive_threshold(
         ValueError,
         match="target_context_usage_threshold must be > 0",
     ):
+        load_controller_config(config_path, gpu_index=0)
+
+
+def test_load_controller_config_rejects_gpu_targeting_in_toml(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "controller.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "frequency_mhz_levels = [600, 900, 1200]",
+                "threshold = 1000",
+                "[amd]",
+                "gpu_indices = [2, 3]",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="use --gpu-index instead"):
         load_controller_config(config_path, gpu_index=0)
 
 
@@ -348,7 +368,7 @@ def test_amd_max_gpu_frequency_controller_updates_only_max(monkeypatch) -> None:
 
     controller = AmdMaxGPUFrequencyController(
         command_path="amd-set-gpu-core-freq",
-        gpu_index=1,
+        gpu_index=(1, 3),
         script_path="/usr/local/bin/set_gpu_clockfreq.sh",
         reset_max_frequency_mhz=1700,
     )
@@ -368,7 +388,25 @@ def test_amd_max_gpu_frequency_controller_updates_only_max(monkeypatch) -> None:
         [
             "amd-set-gpu-core-freq",
             "--gpu-index",
+            "3",
+            "--max-mhz",
+            "1200",
+            "--script-path",
+            "/usr/local/bin/set_gpu_clockfreq.sh",
+        ],
+        [
+            "amd-set-gpu-core-freq",
+            "--gpu-index",
             "1",
+            "--max-mhz",
+            "1700",
+            "--script-path",
+            "/usr/local/bin/set_gpu_clockfreq.sh",
+        ],
+        [
+            "amd-set-gpu-core-freq",
+            "--gpu-index",
+            "3",
             "--max-mhz",
             "1700",
             "--script-path",
@@ -406,7 +444,7 @@ def test_frequency_controller_uses_linespace_policy_and_resets_on_exit(
         config,
         tmp_path,
         port_profile_id=7,
-        gpu_index=3,
+        gpu_index=(2, 3),
         gateway_client=fake_gateway,
         gpu_controller=fake_gpu,
         monotonic=fake_clock.monotonic,
@@ -431,6 +469,7 @@ def test_frequency_controller_uses_linespace_policy_and_resets_on_exit(
     control_error_records = read_jsonl(log_paths.control_error_path)
 
     assert query_records[0]["phase"] == "pending"
+    assert query_records[0]["gpu_indices"] == [2, 3]
     assert [record["context_usage"] for record in query_records[1:]] == [
         1.0,
         1.0,
@@ -446,6 +485,7 @@ def test_frequency_controller_uses_linespace_policy_and_resets_on_exit(
     assert decision_records[0]["segment_count"] == 3
     assert decision_records[0]["segment_width_context_usage"] == 10.0
     assert decision_records[0]["target_frequency_index"] == 0
+    assert decision_records[0]["gpu_indices"] == [2, 3]
     assert control_error_records == []
 
 
@@ -481,7 +521,7 @@ def test_frequency_controller_logs_control_failures_and_retries(
         config,
         tmp_path,
         port_profile_id=7,
-        gpu_index=3,
+        gpu_index=(2, 3),
         gateway_client=fake_gateway,
         gpu_controller=fake_gpu,
         monotonic=fake_clock.monotonic,
@@ -509,3 +549,4 @@ def test_frequency_controller_logs_control_failures_and_retries(
     assert control_error_records[0]["attempted_frequency_mhz"] == 600
     assert control_error_records[0]["current_frequency_index"] == 2
     assert control_error_records[0]["current_frequency_mhz"] == 1200
+    assert control_error_records[0]["gpu_indices"] == [2, 3]

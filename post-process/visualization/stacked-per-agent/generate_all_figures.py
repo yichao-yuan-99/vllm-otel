@@ -12,7 +12,7 @@ from typing import Any
 
 
 THIS_DIR = Path(__file__).resolve().parent
-REPO_ROOT = THIS_DIR.parents[3]
+REPO_ROOT = THIS_DIR.parents[2]
 MATERIALIZE_SCRIPT = (
     REPO_ROOT / "figures" / "stacked-per-agent" / "materialize_stacked_per_agent.py"
 )

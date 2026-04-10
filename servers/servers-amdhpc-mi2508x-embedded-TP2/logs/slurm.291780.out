@@ -1,0 +1,35 @@
+MI2508X embedded TP2 service stack starting on k004-010.hpcfund at Thu Apr  9 07:11:11 PM CDT 2026
+Run ID: 291780
+Resolved model key 'qwen3_coder_30b' -> 'Qwen/Qwen3-Coder-30B-A3B-Instruct' (served as 'Qwen3-Coder-30B-A3B-Instruct')
+Launching AMD SMI power daemon socket=/tmp/amdsmi-power-reader.291780.sock
+Launching shared Jaeger on ui=16686 otlp=4317
+Launching vLLM profile=0 port=11451 gpus=0,1
+Launching vLLM profile=1 port=24123 gpus=2,3
+Launching vLLM profile=2 port=31987 gpus=4,5
+Launching vLLM profile=3 port=40823 gpus=6,7
+Launching gateway-ctx profile=0 raw=11457 parsed=18171
+Launching gateway-ctx profile=1 raw=24157 parsed=28171
+Launching gateway-ctx profile=2 raw=31955 parsed=38171
+Launching gateway-ctx profile=3 raw=40857 parsed=48171
+Services are ready.
+  amd-smi-power-socket: /tmp/amdsmi-power-reader.291780.sock
+  jaeger: http://127.0.0.1:16686
+  profile 0: gpus=0,1 vLLM=http://127.0.0.1:11451 gateway-ctx=http://127.0.0.1:11457 gateway-ctx-parse=http://127.0.0.1:18171
+  profile 1: gpus=2,3 vLLM=http://127.0.0.1:24123 gateway-ctx=http://127.0.0.1:24157 gateway-ctx-parse=http://127.0.0.1:28171
+  profile 2: gpus=4,5 vLLM=http://127.0.0.1:31987 gateway-ctx=http://127.0.0.1:31955 gateway-ctx-parse=http://127.0.0.1:38171
+  profile 3: gpus=6,7 vLLM=http://127.0.0.1:40823 gateway-ctx=http://127.0.0.1:40857 gateway-ctx-parse=http://127.0.0.1:48171
+Logs:
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2508x-embedded-TP2/logs/amd-smi-power-daemon.291780.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2508x-embedded-TP2/logs/jaeger.291780.shared.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2508x-embedded-TP2/logs/vllm.291780.p0.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2508x-embedded-TP2/logs/gateway-ctx.291780.p0.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2508x-embedded-TP2/logs/vllm.291780.p1.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2508x-embedded-TP2/logs/gateway-ctx.291780.p1.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2508x-embedded-TP2/logs/vllm.291780.p2.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2508x-embedded-TP2/logs/gateway-ctx.291780.p2.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2508x-embedded-TP2/logs/vllm.291780.p3.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2508x-embedded-TP2/logs/gateway-ctx.291780.p3.log
+Launching experiment profile=0 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi2508x-embedded-TP2/mi2508x/sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/generated/20260410T001051Z/run_replay.sh
+Launching experiment profile=1 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi2508x-embedded-TP2/mi2508x/sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/generated/20260410T001051Z/run_replay.sh
+Launching experiment profile=2 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi2508x-embedded-TP2/mi2508x/sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/generated/20260410T001051Z/run_replay.sh
+Launching experiment profile=3 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi2508x-embedded-TP2/mi2508x/sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/generated/20260410T001051Z/run_replay.sh

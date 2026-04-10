@@ -1,8 +1,6 @@
 schema_version = 1
 
-# If frequency_mhz_levels is omitted, the controller discovers supported sclk
-# frequencies for the selected GPU via AMD SMI and uses those values as the
-# available max-frequency caps.
+# Required max-frequency caps in MHz for the linespace policy.
 frequency_mhz_levels = [
     1700, 1680, 1665,
     1650, 1635, 1620, 1605, 1590, 1575, 1560, 1545, 1530,

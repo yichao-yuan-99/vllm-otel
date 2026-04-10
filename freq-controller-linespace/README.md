@@ -17,6 +17,8 @@ remaining frequency levels.
   the segment just below the threshold
 - on each control decision, the controller snaps directly to that segment's
   target frequency
+- `--gpu-index` accepts either one GPU id or a comma-separated GPU list, and
+  the selected frequency is applied to every GPU in that target set
 
 Example: if the threshold is `395784` and there are `11` frequency levels,
 then the controller creates `10` equal-width context-usage segments below the
@@ -45,6 +47,14 @@ Optional aliases accepted in TOML:
 - `target_context_threshold`
 - `threshold`
 
+Like the baseline controller, GPU targeting stays on the CLI:
+
+- `--port-profile-id`
+- `--gpu-index`
+
+`zeusd.gpu_index` and `zeusd.gpu_indices` are intentionally rejected in TOML so
+the target GPU set is always explicit at launch time.
+
 ## Usage
 
 Install locally:
@@ -61,6 +71,17 @@ freq-controller-linespace \
   --threshold 395784 \
   --port-profile-id 0 \
   --gpu-index 0
+```
+
+To apply the same linespace decision to multiple GPUs, pass a comma-separated
+list:
+
+```bash
+freq-controller-linespace \
+  --log-dir ./logs \
+  --threshold 395784 \
+  --port-profile-id 2 \
+  --gpu-index 2,3
 ```
 
 Example TOML:
@@ -103,6 +124,7 @@ The decision log includes the baseline fields plus:
 - `segment_count`
 - `segment_width_context_usage`
 - `target_frequency_index`
+- `gpu_indices`
 
 The control-error log records zeusd write failures on the control path and lets
 the controller continue running. It includes:
@@ -116,6 +138,7 @@ the controller continue running. It includes:
 - `current_frequency_mhz`
 - `moving_average_context_usage`
 - `sample_count`
+- `gpu_indices`
 
 ## Tests
 
