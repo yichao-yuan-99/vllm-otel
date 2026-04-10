@@ -11,7 +11,9 @@ from datetime import datetime, timezone
 import http.client
 import json
 import math
+import os
 from pathlib import Path
+import shutil
 import signal
 import socket
 import subprocess
@@ -50,6 +52,24 @@ def now_iso8601_utc() -> str:
 def iso8601_to_compact(iso_value: str) -> str:
     dt = datetime.fromisoformat(iso_value.replace("Z", "+00:00"))
     return dt.strftime("%Y%m%dT%H%M%SZ")
+
+
+def _resolve_runtime_command_path(command_path: str) -> str:
+    stripped = command_path.strip()
+    if not stripped:
+        return stripped
+    if Path(stripped).name != stripped:
+        return stripped
+    if shutil.which(stripped) is not None:
+        return stripped
+
+    for runtime_path in (sys.argv[0], sys.executable):
+        if not runtime_path:
+            continue
+        candidate = Path(runtime_path).expanduser().resolve().parent / stripped
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return stripped
 
 
 def _parse_float(value: object, key: str, *, default: float | None = None) -> float:
@@ -328,6 +348,11 @@ class AmdClockConfig:
     def __post_init__(self) -> None:
         if not self.command_path.strip():
             raise ValueError("amd.command_path must not be empty")
+        object.__setattr__(
+            self,
+            "command_path",
+            _resolve_runtime_command_path(self.command_path),
+        )
         if self.script_path is not None and not self.script_path.strip():
             raise ValueError("amd.script_path must not be empty")
         if self.reset_max_frequency_mhz is not None and self.reset_max_frequency_mhz <= 0:
@@ -656,7 +681,7 @@ class AmdMaxGPUFrequencyController:
         script_path: str | None,
         reset_max_frequency_mhz: int,
     ) -> None:
-        self.command_path = command_path
+        self.command_path = _resolve_runtime_command_path(command_path)
         self.gpu_indices = normalize_gpu_index_selection(gpu_index)
         self.script_path = script_path
         self.reset_max_frequency_mhz = reset_max_frequency_mhz

@@ -206,6 +206,27 @@ def test_load_controller_config_uses_shared_threshold_default(monkeypatch) -> No
     assert config.target_context_usage_threshold == 395784.0
 
 
+def test_amd_clock_config_resolves_sibling_command_when_not_on_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bin_dir = tmp_path / "venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    helper_path = bin_dir / "amd-set-gpu-core-freq"
+    helper_path.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    helper_path.chmod(0o755)
+
+    launcher_path = bin_dir / "freq-controller-linespace-amd"
+    launcher_path.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+
+    monkeypatch.setattr("freq_controller_linespace_amd.shutil.which", lambda _: None)
+    monkeypatch.setattr(sys, "argv", [str(launcher_path)])
+
+    config = AmdClockConfig(command_path="amd-set-gpu-core-freq")
+
+    assert config.command_path == str(helper_path)
+
+
 def test_gateway_ipc_config_prefers_gateway_ctx_socket(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "freq_controller_linespace_amd.DEFAULT_GATEWAY_IPC_SOCKET_DIR",

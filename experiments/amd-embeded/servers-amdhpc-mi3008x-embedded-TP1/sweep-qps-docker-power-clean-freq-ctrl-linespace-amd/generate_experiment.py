@@ -208,6 +208,14 @@ def write_run_script(
     ctx_aware_scheduling_threshold_tokens: int,
     freq_controller_threshold: float,
 ) -> None:
+    default_amd_power_reader_bin = (REPO_ROOT / ".venv" / "bin" / "amd-power-reader").resolve()
+    default_freq_controller_bin = (
+        REPO_ROOT / ".venv" / "bin" / "freq-controller-linespace-amd"
+    ).resolve()
+    default_reset_gpu_core_freq_bin = (
+        REPO_ROOT / ".venv" / "bin" / "amd-reset-gpu-core-freq"
+    ).resolve()
+
     lines = [
         "#!/usr/bin/env bash",
         "set -euo pipefail",
@@ -219,9 +227,18 @@ def write_run_script(
         "GPU_INDEX_VALUE=\"${GPU_INDEX:-}\"",
         "PYTHON_BIN=\"${PYTHON_BIN:-python3}\"",
         "CURL_BIN=\"${CURL_BIN:-curl}\"",
-        "AMD_POWER_READER_BIN=\"${AMD_POWER_READER_BIN:-amd-power-reader}\"",
-        "FREQ_CONTROLLER_BIN=\"${FREQ_CONTROLLER_BIN:-freq-controller-linespace-amd}\"",
-        "RESET_GPU_CORE_FREQ_BIN=\"${RESET_GPU_CORE_FREQ_BIN:-amd-reset-gpu-core-freq}\"",
+        (
+            "AMD_POWER_READER_BIN="
+            f"\"${{AMD_POWER_READER_BIN:-{_shell_quote(str(default_amd_power_reader_bin))}}}\""
+        ),
+        (
+            "FREQ_CONTROLLER_BIN="
+            f"\"${{FREQ_CONTROLLER_BIN:-{_shell_quote(str(default_freq_controller_bin))}}}\""
+        ),
+        (
+            "RESET_GPU_CORE_FREQ_BIN="
+            f"\"${{RESET_GPU_CORE_FREQ_BIN:-{_shell_quote(str(default_reset_gpu_core_freq_bin))}}}\""
+        ),
         "AMD_SMI_POWER_SOCKET_PATH_VALUE=\"${AMD_SMI_POWER_SOCKET_PATH:-/tmp/amdsmi-power-reader.sock}\"",
         "GATEWAY_BASE_URL_VALUE=\"${GATEWAY_BASE_URL:-}\"",
         "FREQ_CONTROLLER_CONFIG_VALUE=\"${FREQ_CONTROLLER_CONFIG:-}\"",

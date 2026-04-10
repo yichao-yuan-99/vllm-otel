@@ -215,9 +215,21 @@ def test_main_generates_mi3008x_amd_freq_ctrl_bundle(tmp_path: Path) -> None:
     assert 'PORT_PROFILE_ID_VALUE="${1:-${PORT_PROFILE_ID:-${DEFAULT_PORT_PROFILE_ID}}}"' in run_script_text
     assert 'GPU_INDEX_VALUE="${GPU_INDEX:-}"' in run_script_text
     assert "ASSIGNED_QPS_POINTS=2" in run_script_text
-    assert 'AMD_POWER_READER_BIN="${AMD_POWER_READER_BIN:-amd-power-reader}"' in run_script_text
-    assert 'FREQ_CONTROLLER_BIN="${FREQ_CONTROLLER_BIN:-freq-controller-linespace-amd}"' in run_script_text
-    assert 'RESET_GPU_CORE_FREQ_BIN="${RESET_GPU_CORE_FREQ_BIN:-amd-reset-gpu-core-freq}"' in run_script_text
+    assert (
+        'AMD_POWER_READER_BIN="${AMD_POWER_READER_BIN:-'
+        f"{(module.REPO_ROOT / '.venv' / 'bin' / 'amd-power-reader').resolve()}"
+        '}"'
+    ) in run_script_text
+    assert (
+        'FREQ_CONTROLLER_BIN="${FREQ_CONTROLLER_BIN:-'
+        f"{(module.REPO_ROOT / '.venv' / 'bin' / 'freq-controller-linespace-amd').resolve()}"
+        '}"'
+    ) in run_script_text
+    assert (
+        'RESET_GPU_CORE_FREQ_BIN="${RESET_GPU_CORE_FREQ_BIN:-'
+        f"{(module.REPO_ROOT / '.venv' / 'bin' / 'amd-reset-gpu-core-freq').resolve()}"
+        '}"'
+    ) in run_script_text
     assert "select_qps_job() {" in run_script_text
     assert "no qps assigned for port_profile=${PORT_PROFILE_ID_VALUE}" in run_script_text
     assert "start_ctx_aware_mode" in run_script_text
