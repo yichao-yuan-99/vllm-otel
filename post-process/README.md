@@ -229,7 +229,8 @@ Pipeline order:
 
 - `post-process/slo-decision/extract_run.py`
 - purpose: extract SLO-triggered controller decisions from
-  `freq-controller-ls.slo-decision.*.jsonl`
+  `freq-controller-ls.slo-decision.*.jsonl` and
+  `freq-controller-ls-amd.slo-decision.*.jsonl`
 - supports:
 - single run: `--run-dir <run-dir>`
 - batch discovery: `--root-dir <root-dir>`

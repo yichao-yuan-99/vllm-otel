@@ -25,7 +25,10 @@ from pp_common.service_failure import parse_iso8601_to_utc
 
 DEFAULT_OUTPUT_NAME = "slo-decision-summary.json"
 DEFAULT_LOG_DIR_NAME = "freq-control-linespace"
-SLO_DECISION_LOG_GLOBS = ("freq-controller-ls.slo-decision.*.jsonl",)
+SLO_DECISION_LOG_GLOBS = (
+    "freq-controller-ls.slo-decision.*.jsonl",
+    "freq-controller-ls-amd.slo-decision.*.jsonl",
+)
 
 
 def _default_max_procs() -> int:

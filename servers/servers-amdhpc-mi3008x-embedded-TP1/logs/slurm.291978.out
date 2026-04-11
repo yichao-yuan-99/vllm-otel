@@ -57,3 +57,59 @@ Launching experiment profile=4 script=/work1/talati/yichaoy/vllm-otel/experiment
 Launching experiment profile=5 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1/sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/generated/20260410T143647Z/run_replay.sh
 Launching experiment profile=6 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1/sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/generated/20260410T143647Z/run_replay.sh
 Launching experiment profile=7 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1/sweep-qps-docker-power-clean-freq-ctrl-linespace-amd/generated/20260410T143647Z/run_replay.sh
+Experiment phase finished with exit code 0 at Fri Apr 10 12:44:33 PM CDT 2026
+Stopping gateway-ctx profile=0 (pid=2884056)
+Stopping gateway-ctx profile=1 (pid=2884057)
+Stopping gateway-ctx profile=2 (pid=2884058)
+Stopping gateway-ctx profile=3 (pid=2884059)
+Stopping gateway-ctx profile=4 (pid=2884060)
+Stopping gateway-ctx profile=5 (pid=2884061)
+Stopping gateway-ctx profile=6 (pid=2884062)
+Stopping gateway-ctx profile=7 (pid=2884063)
+Stopping vllm profile=0 (pid=2867029)
+Stopping vllm profile=1 (pid=2867030)
+Stopping vllm profile=2 (pid=2867031)
+Stopping vllm profile=3 (pid=2867032)
+Stopping vllm profile=4 (pid=2867033)
+Stopping vllm profile=5 (pid=2867034)
+Stopping vllm profile=6 (pid=2867035)
+Stopping vllm profile=7 (pid=2867036)
+Stopping amd-smi-power-daemon (pid=2866954)
+Stopping jaeger (pid=2866958)
+
+----------------------------------------------------------------------
+Omnistat Report Card for Job Id: 291978
+----------------------------------------------------------------------
+
+Job Overview (Num Nodes = 1, Machine = HPC Fund)
+ --> Start time = 2026-04-10 09:37:18
+ --> End   time = 2026-04-10 12:48:18
+ --> Duration   = 11460 secs
+
+GPU Statistics:
+
+           | Utilization (%)  |  Memory Use (%)  | Temperature (C)  |    Power (W)     | Energy (kWh) |
+     GPU # |    Max     Mean  |    Max     Mean  |    Max     Mean  |    Max     Mean  |    Total     |
+    ---------------------------------------------------------------------------------------------------
+         0 |  100.00   85.95  |   90.54   87.78  |   50.00   47.58  |  320.00  220.47  |   7.03e-01   |
+         1 |  100.00   93.38  |   90.54   87.79  |   50.00   47.63  |  311.00  242.21  |   7.72e-01   |
+         2 |  100.00   93.24  |   90.54   87.79  |   52.00   48.32  |  329.00  242.81  |   7.74e-01   |
+         3 |  100.00   92.55  |   90.54   87.79  |   48.00   43.63  |  387.00  254.81  |   8.12e-01   |
+         4 |  100.00   91.66  |   90.54   87.78  |   56.00   50.66  |  556.00  286.16  |   9.12e-01   |
+         5 |  100.00   90.10  |   90.54   87.78  |   51.00   46.07  |  686.00  287.18  |   9.15e-01   |
+         6 |  100.00   89.63  |   90.54   87.78  |   56.00   51.85  |  671.00  307.74  |   9.81e-01   |
+         7 |  100.00   89.19  |   90.54   87.78  |   54.00   50.11  |  644.00  318.29  |   1.01e+00   |
+
+Approximate Total GPU Energy Consumed = 6.88e+00 kWh
+
+Host Statistics:
+
+    # CPUs | CPU Utilization (%)  |    Memory Use (%)    |
+           |    Max       Mean    |    Max       Mean    |
+    ------------------------------------------------------
+       384 |  142.94     43.26    |   21.47     15.75    |
+
+--
+Query interval = 30.000 secs
+Query execution time = 0.7 secs
+Version = 1.10.0

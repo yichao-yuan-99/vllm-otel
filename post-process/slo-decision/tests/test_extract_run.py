@@ -39,10 +39,11 @@ def _write_slo_decision_log(
     run_dir: Path,
     *,
     log_dir_name: str = "freq-control-linespace",
+    file_name: str = "freq-controller-ls.slo-decision.20260402T000000Z.jsonl",
 ) -> Path:
     log_dir = run_dir / log_dir_name
     log_dir.mkdir(parents=True, exist_ok=True)
-    path = log_dir / "freq-controller-ls.slo-decision.20260402T000000Z.jsonl"
+    path = log_dir / file_name
     records = [
         {
             "timestamp": "2026-04-02T00:00:05.000Z",
@@ -180,6 +181,27 @@ def test_extract_run_dir_accepts_legacy_root_level_slo_decision_logs(
     assert payload["slo_decision_log_found"] is True
     assert payload["source_slo_decision_log_paths"] == [str(log_path.resolve())]
     assert payload["source_slo_decision_log_dir_name"] == "freq-control-linespace"
+
+
+def test_extract_run_dir_accepts_amd_slo_decision_logs(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "job"
+    _write_replay_summary(run_dir)
+    log_path = _write_slo_decision_log(
+        run_dir,
+        file_name="freq-controller-ls-amd.slo-decision.20260402T000000Z.jsonl",
+    )
+
+    output_path = extract_run.extract_run_dir(run_dir)
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert output_path.exists()
+    assert payload["slo_decision_log_found"] is True
+    assert payload["source_slo_decision_log_paths"] == [str(log_path.resolve())]
+    assert payload["slo_decision_point_count"] == 2
+    assert payload["slo_decision_change_count"] == 1
+    assert payload["decision_points"][0]["action"] == "increase_for_slo"
 
 
 def test_discover_run_dirs_with_slo_decision_sources_scans_recursively(

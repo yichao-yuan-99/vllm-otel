@@ -1,0 +1,115 @@
+MI3008X embedded TP1 service stack starting on k002-003.hpcfund at Fri Apr 10 01:04:02 PM CDT 2026
+Run ID: 291980
+Resolved model key 'qwen3_coder_30b_fp8' -> 'Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8' (served as 'Qwen3-Coder-30B-A3B-Instruct-FP8')
+Launching AMD SMI power daemon socket=/tmp/amdsmi-power-reader.291980.sock
+Launching shared Jaeger on ui=16686 otlp=4317
+Launching vLLM profile=0 port=11451 gpu=0
+Launching vLLM profile=1 port=24123 gpu=1
+Launching vLLM profile=2 port=31987 gpu=2
+Launching vLLM profile=3 port=40823 gpu=3
+Launching vLLM profile=4 port=52341 gpu=4
+Launching vLLM profile=5 port=59231 gpu=5
+Launching vLLM profile=6 port=60231 gpu=6
+Launching vLLM profile=7 port=61231 gpu=7
+Launching gateway-ctx profile=0 raw=11457 parsed=18171
+Launching gateway-ctx profile=1 raw=24157 parsed=28171
+Launching gateway-ctx profile=2 raw=31955 parsed=38171
+Launching gateway-ctx profile=3 raw=40857 parsed=48171
+Launching gateway-ctx profile=4 raw=52357 parsed=58171
+Launching gateway-ctx profile=5 raw=59257 parsed=59171
+Launching gateway-ctx profile=6 raw=60257 parsed=60171
+Launching gateway-ctx profile=7 raw=61257 parsed=61171
+Services are ready.
+  amd-smi-power-socket: /tmp/amdsmi-power-reader.291980.sock
+  jaeger: http://127.0.0.1:16686
+  profile 0: gpu=0 vLLM=http://127.0.0.1:11451 gateway-ctx=http://127.0.0.1:11457 gateway-ctx-parse=http://127.0.0.1:18171
+  profile 1: gpu=1 vLLM=http://127.0.0.1:24123 gateway-ctx=http://127.0.0.1:24157 gateway-ctx-parse=http://127.0.0.1:28171
+  profile 2: gpu=2 vLLM=http://127.0.0.1:31987 gateway-ctx=http://127.0.0.1:31955 gateway-ctx-parse=http://127.0.0.1:38171
+  profile 3: gpu=3 vLLM=http://127.0.0.1:40823 gateway-ctx=http://127.0.0.1:40857 gateway-ctx-parse=http://127.0.0.1:48171
+  profile 4: gpu=4 vLLM=http://127.0.0.1:52341 gateway-ctx=http://127.0.0.1:52357 gateway-ctx-parse=http://127.0.0.1:58171
+  profile 5: gpu=5 vLLM=http://127.0.0.1:59231 gateway-ctx=http://127.0.0.1:59257 gateway-ctx-parse=http://127.0.0.1:59171
+  profile 6: gpu=6 vLLM=http://127.0.0.1:60231 gateway-ctx=http://127.0.0.1:60257 gateway-ctx-parse=http://127.0.0.1:60171
+  profile 7: gpu=7 vLLM=http://127.0.0.1:61231 gateway-ctx=http://127.0.0.1:61257 gateway-ctx-parse=http://127.0.0.1:61171
+Logs:
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/amd-smi-power-daemon.291980.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/jaeger.291980.shared.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/vllm.291980.p0.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/gateway-ctx.291980.p0.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/vllm.291980.p1.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/gateway-ctx.291980.p1.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/vllm.291980.p2.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/gateway-ctx.291980.p2.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/vllm.291980.p3.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/gateway-ctx.291980.p3.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/vllm.291980.p4.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/gateway-ctx.291980.p4.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/vllm.291980.p5.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/gateway-ctx.291980.p5.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/vllm.291980.p6.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/gateway-ctx.291980.p6.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/vllm.291980.p7.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi3008x-embedded-TP1/logs/gateway-ctx.291980.p7.log
+Launching experiment profile=0 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1/sweep-qps-docker-power-clean-amd/generated/20260410T143801Z/run_replay.sh
+Launching experiment profile=1 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1/sweep-qps-docker-power-clean-amd/generated/20260410T143801Z/run_replay.sh
+Launching experiment profile=2 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1/sweep-qps-docker-power-clean-amd/generated/20260410T143801Z/run_replay.sh
+Launching experiment profile=3 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1/sweep-qps-docker-power-clean-amd/generated/20260410T143801Z/run_replay.sh
+Launching experiment profile=4 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1/sweep-qps-docker-power-clean-amd/generated/20260410T143801Z/run_replay.sh
+Launching experiment profile=5 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1/sweep-qps-docker-power-clean-amd/generated/20260410T143801Z/run_replay.sh
+Launching experiment profile=6 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1/sweep-qps-docker-power-clean-amd/generated/20260410T143801Z/run_replay.sh
+Launching experiment profile=7 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi3008x-embedded-TP1/sweep-qps-docker-power-clean-amd/generated/20260410T143801Z/run_replay.sh
+Experiment phase finished with exit code 0 at Fri Apr 10 04:11:26 PM CDT 2026
+Stopping gateway-ctx profile=0 (pid=3772125)
+Stopping gateway-ctx profile=1 (pid=3772126)
+Stopping gateway-ctx profile=2 (pid=3772127)
+Stopping gateway-ctx profile=3 (pid=3772128)
+Stopping gateway-ctx profile=4 (pid=3772129)
+Stopping gateway-ctx profile=5 (pid=3772130)
+Stopping gateway-ctx profile=6 (pid=3772131)
+Stopping gateway-ctx profile=7 (pid=3772132)
+Stopping vllm profile=0 (pid=3753186)
+Stopping vllm profile=1 (pid=3753187)
+Stopping vllm profile=2 (pid=3753188)
+Stopping vllm profile=3 (pid=3753189)
+Stopping vllm profile=4 (pid=3753190)
+Stopping vllm profile=5 (pid=3753191)
+Stopping vllm profile=6 (pid=3753192)
+Stopping vllm profile=7 (pid=3753193)
+Stopping amd-smi-power-daemon (pid=3753112)
+Stopping jaeger (pid=3753116)
+
+----------------------------------------------------------------------
+Omnistat Report Card for Job Id: 291980
+----------------------------------------------------------------------
+
+Job Overview (Num Nodes = 1, Machine = HPC Fund)
+ --> Start time = 2026-04-10 13:04:14
+ --> End   time = 2026-04-10 16:15:14
+ --> Duration   = 11460 secs
+
+GPU Statistics:
+
+           | Utilization (%)  |  Memory Use (%)  | Temperature (C)  |    Power (W)     | Energy (kWh) |
+     GPU # |    Max     Mean  |    Max     Mean  |    Max     Mean  |    Max     Mean  |    Total     |
+    ---------------------------------------------------------------------------------------------------
+         0 |  100.00   48.20  |   90.54   87.59  |   66.00   52.58  |  567.00  302.63  |   9.65e-01   |
+         1 |  100.00   67.22  |   90.54   87.64  |   67.00   53.54  |  668.00  360.74  |   1.15e+00   |
+         2 |  100.00   81.07  |   90.54   87.72  |   69.00   59.06  |  618.00  414.26  |   1.32e+00   |
+         3 |  100.00   89.56  |   90.54   87.81  |   64.00   54.91  |  694.00  444.75  |   1.42e+00   |
+         4 |  100.00   91.08  |   90.54   87.83  |   74.00   61.89  |  678.00  445.40  |   1.42e+00   |
+         5 |  100.00   90.42  |   90.54   87.83  |   69.00   54.51  |  666.00  424.21  |   1.35e+00   |
+         6 |  100.00   89.62  |   90.54   87.83  |   72.00   58.42  |  729.00  434.34  |   1.39e+00   |
+         7 |  100.00   91.14  |   90.54   87.83  |   86.00   60.38  |  750.00  479.03  |   1.53e+00   |
+
+Approximate Total GPU Energy Consumed = 1.05e+01 kWh
+
+Host Statistics:
+
+    # CPUs | CPU Utilization (%)  |    Memory Use (%)    |
+           |    Max       Mean    |    Max       Mean    |
+    ------------------------------------------------------
+       384 |  133.20     31.41    |   22.96     15.97    |
+
+--
+Query interval = 30.000 secs
+Query execution time = 0.8 secs
+Version = 1.10.0
