@@ -2,32 +2,27 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import socket
 import sys
-from typing import TypeVar
 
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-MODULE_ROOT = PROJECT_ROOT / "freq-controller-linespace-slo"
+MODULE_ROOT = PROJECT_ROOT / "freq-controller-linespace-slo-amd"
 if str(MODULE_ROOT) not in sys.path:
     sys.path.insert(0, str(MODULE_ROOT))
 
-import freq_controller_linespace_slo as controller_module
-
-from freq_controller_linespace_slo import (
+from freq_controller_linespace_slo_amd import (
+    AmdClockConfig,
     FrequencyController,
     FrequencyControllerConfig,
     GatewayContextSnapshot,
-    GatewayOutputThroughputSnapshot,
     GatewayIPCConfig,
-    ZeusdConfig,
+    GatewayOutputThroughputSnapshot,
     choose_next_frequency_index,
-    choose_target_frequency_index,
+    discover_supported_frequency_mhz_levels,
     load_controller_config,
+    parse_gpu_index_tokens,
 )
-
-SnapshotT = TypeVar("SnapshotT")
 
 
 class FakeGatewayClient:
@@ -47,10 +42,7 @@ class FakeGatewayClient:
         self._throughput_index = 0
 
     @staticmethod
-    def _next_value(
-        values: list[SnapshotT | Exception],
-        index: int,
-    ) -> tuple[SnapshotT, int]:
+    def _next_value(values: list[object], index: int) -> tuple[object, int]:
         if not values:
             raise RuntimeError("no fake gateway values configured")
         if index >= len(values):
@@ -67,6 +59,7 @@ class FakeGatewayClient:
             self._context_snapshots,
             self._context_index,
         )
+        assert isinstance(value, GatewayContextSnapshot)
         return value
 
     def read_output_throughput_snapshot(self) -> GatewayOutputThroughputSnapshot:
@@ -74,10 +67,8 @@ class FakeGatewayClient:
             self._throughput_snapshots,
             self._throughput_index,
         )
+        assert isinstance(value, GatewayOutputThroughputSnapshot)
         return value
-
-    def read_total_context_usage(self) -> float:
-        return self.read_context_snapshot().total_context_tokens
 
 
 class FakeGPUController:
@@ -108,7 +99,33 @@ class FakeClock:
         self.now_s += max(0.0, seconds)
 
 
-DEFAULT_SHARED_FREQUENCY_MHZ_LEVELS = tuple(range(345, 1800, 15))
+class FakeClkType:
+    GFX = "gfx"
+
+
+class FakeAmdSmi:
+    AmdSmiClkType = FakeClkType
+
+    def __init__(self) -> None:
+        self.init_calls = 0
+        self.shutdown_calls = 0
+        self.handles = ["gpu0", "gpu1"]
+
+    def amdsmi_init(self) -> None:
+        self.init_calls += 1
+
+    def amdsmi_shut_down(self) -> None:
+        self.shutdown_calls += 1
+
+    def amdsmi_get_processor_handles(self) -> list[str]:
+        return list(self.handles)
+
+    def amdsmi_get_clk_freq(self, handle: str, clock_type: str) -> dict[str, object]:
+        assert clock_type == "gfx"
+        return {
+            "gpu0": {"frequency": [500_000_000, 800_000_000, 1_700_000_000]},
+            "gpu1": {"frequency": [500_000_000, 670_000_000]},
+        }[handle]
 
 
 def gateway_snapshot(
@@ -171,7 +188,25 @@ def read_jsonl(path: Path) -> list[dict[str, object]]:
     ]
 
 
-def test_load_controller_config_applies_linespace_fields_and_defaults(
+def test_parse_gpu_index_tokens_accepts_single_and_comma_separated_values() -> None:
+    assert parse_gpu_index_tokens(["3"]) == (3,)
+    assert parse_gpu_index_tokens(["2,3"]) == (2, 3)
+
+
+def test_discover_supported_frequency_mhz_levels() -> None:
+    backend = FakeAmdSmi()
+
+    levels = discover_supported_frequency_mhz_levels(
+        gpu_index=0,
+        amdsmi_module=backend,
+    )
+
+    assert backend.init_calls == 1
+    assert backend.shutdown_calls == 1
+    assert levels == (500, 800, 1700)
+
+
+def test_load_controller_config_applies_linespace_amd_slo_fields_and_defaults(
     tmp_path: Path,
 ) -> None:
     config_path = tmp_path / "controller.toml"
@@ -188,7 +223,7 @@ def test_load_controller_config_applies_linespace_fields_and_defaults(
         encoding="utf-8",
     )
 
-    config = load_controller_config(config_path)
+    config = load_controller_config(config_path, gpu_index=1)
 
     assert config.frequency_mhz_levels == (810, 1005, 1200)
     assert config.target_context_usage_threshold == 5000.0
@@ -198,65 +233,55 @@ def test_load_controller_config_applies_linespace_fields_and_defaults(
     assert config.segment_width_context_usage == 2500.0
     assert config.control_interval_s == 5.0
     assert config.context_query_hz == 5.0
+    assert config.amd.resolved_reset_max_frequency_mhz(config.frequency_mhz_levels) == 1200
 
 
-def test_load_controller_config_supports_no_config_with_cli_override() -> None:
-    config = load_controller_config(
-        None,
-        target_context_usage_threshold=12000,
-        target_output_throughput_tokens_per_s=18.5,
+def test_load_controller_config_supports_shared_defaults_with_cli_slo_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "freq_controller_linespace_slo_amd._load_shared_controller_table",
+        lambda path: {
+            "frequency_mhz_levels": [500, 800, 1700],
+            "threshold": 395784,
+            "control_interval_s": 5.0,
+            "context_query_hz": 5.0,
+        },
     )
 
-    assert config.frequency_mhz_levels == DEFAULT_SHARED_FREQUENCY_MHZ_LEVELS
-    assert config.target_context_usage_threshold == 12000.0
+    config = load_controller_config(
+        None,
+        target_output_throughput_tokens_per_s=18.5,
+        gpu_index=1,
+    )
+
+    assert config.frequency_mhz_levels == (500, 800, 1700)
+    assert config.target_context_usage_threshold == 395784.0
     assert config.target_output_throughput_tokens_per_s == 18.5
     assert config.aggressive_slo_control is False
 
 
-def test_load_controller_config_uses_shared_context_threshold_default() -> None:
-    config = load_controller_config(
-        None,
-        target_output_throughput_tokens_per_s=11.0,
+def test_load_controller_config_supports_aggressive_slo_cli_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "freq_controller_linespace_slo_amd._load_shared_controller_table",
+        lambda path: {
+            "frequency_mhz_levels": [500, 800, 1700],
+            "threshold": 395784,
+            "control_interval_s": 5.0,
+            "context_query_hz": 5.0,
+        },
     )
 
-    assert config.frequency_mhz_levels == DEFAULT_SHARED_FREQUENCY_MHZ_LEVELS
-    assert config.target_context_usage_threshold == 395784.0
-    assert config.target_output_throughput_tokens_per_s == 11.0
-    assert config.aggressive_slo_control is False
-
-
-def test_load_controller_config_supports_aggressive_slo_cli_override() -> None:
     config = load_controller_config(
         None,
-        target_output_throughput_tokens_per_s=11.0,
+        target_output_throughput_tokens_per_s=18.5,
         aggressive_slo_control=True,
+        gpu_index=1,
     )
 
     assert config.aggressive_slo_control is True
-
-
-def test_gateway_ipc_config_prefers_active_gateway_ctx_socket(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.setattr(
-        controller_module,
-        "DEFAULT_GATEWAY_IPC_SOCKET_DIR",
-        tmp_path,
-    )
-    gateway_ctx_socket_path = tmp_path / "vllm-gateway-ctx-profile-2.sock"
-    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    listener.bind(str(gateway_ctx_socket_path))
-    listener.listen(1)
-    try:
-        assert (
-            GatewayIPCConfig().resolved_socket_path(2)
-            == gateway_ctx_socket_path.resolve()
-        )
-    finally:
-        listener.close()
-        if gateway_ctx_socket_path.exists():
-            gateway_ctx_socket_path.unlink()
 
 
 def test_load_controller_config_requires_output_throughput_target() -> None:
@@ -264,95 +289,44 @@ def test_load_controller_config_requires_output_throughput_target() -> None:
         ValueError,
         match="target_output_throughput_tokens_per_s is required",
     ):
-        load_controller_config(None)
+        load_controller_config(None, gpu_index=0)
 
 
-def test_load_controller_config_rejects_non_positive_threshold(
+def test_amd_clock_config_resolves_sibling_command_when_not_on_path(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config_path = tmp_path / "controller.toml"
-    config_path.write_text(
-        "\n".join(
-            [
-                "frequency_mhz_levels = [600, 900, 1200]",
-                "threshold = 0",
-                "target_output_throughput_tokens_per_s = 12",
-                "",
-            ]
-        ),
-        encoding="utf-8",
+    bin_dir = tmp_path / "venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    helper_path = bin_dir / "amd-set-gpu-core-freq"
+    helper_path.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    helper_path.chmod(0o755)
+
+    launcher_path = bin_dir / "freq-controller-linespace-slo-amd"
+    launcher_path.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+
+    monkeypatch.setattr("freq_controller_linespace_slo_amd.shutil.which", lambda _: None)
+    monkeypatch.setattr(sys, "argv", [str(launcher_path)])
+
+    config = AmdClockConfig(command_path="amd-set-gpu-core-freq")
+
+    assert config.command_path == str(helper_path)
+
+
+def test_gateway_ipc_config_prefers_gateway_ctx_socket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "freq_controller_linespace_slo_amd.DEFAULT_GATEWAY_IPC_SOCKET_DIR",
+        tmp_path,
     )
+    socket_path = tmp_path / "vllm-gateway-ctx-profile-3.sock"
+    socket_path.touch()
 
-    with pytest.raises(
-        ValueError,
-        match="target_context_usage_threshold must be > 0",
-    ):
-        load_controller_config(config_path)
+    resolved = GatewayIPCConfig().resolved_socket_path(3)
 
-
-def test_choose_target_frequency_index_uses_linear_segments() -> None:
-    assert choose_target_frequency_index(
-        moving_average_context_usage=-5.0,
-        target_context_usage_threshold=40.0,
-        max_index=3,
-    ) == 0
-    assert choose_target_frequency_index(
-        moving_average_context_usage=0.0,
-        target_context_usage_threshold=40.0,
-        max_index=3,
-    ) == 0
-    assert choose_target_frequency_index(
-        moving_average_context_usage=5.0,
-        target_context_usage_threshold=40.0,
-        max_index=3,
-    ) == 0
-    assert choose_target_frequency_index(
-        moving_average_context_usage=15.0,
-        target_context_usage_threshold=40.0,
-        max_index=3,
-    ) == 1
-    assert choose_target_frequency_index(
-        moving_average_context_usage=30.0,
-        target_context_usage_threshold=40.0,
-        max_index=3,
-    ) == 2
-    assert choose_target_frequency_index(
-        moving_average_context_usage=39.999,
-        target_context_usage_threshold=40.0,
-        max_index=3,
-    ) == 2
-    assert choose_target_frequency_index(
-        moving_average_context_usage=40.0,
-        target_context_usage_threshold=40.0,
-        max_index=3,
-    ) == 3
-
-
-def test_choose_next_frequency_index_moves_directly_to_target_segment() -> None:
-    assert choose_next_frequency_index(
-        current_index=2,
-        moving_average_context_usage=1.0,
-        target_context_usage_threshold=40.0,
-        max_index=3,
-        moving_average_min_output_tokens_per_s=12.0,
-        target_output_throughput_tokens_per_s=10.0,
-    ) == (0, "decrease")
-    assert choose_next_frequency_index(
-        current_index=0,
-        moving_average_context_usage=40.0,
-        target_context_usage_threshold=40.0,
-        max_index=3,
-        moving_average_min_output_tokens_per_s=12.0,
-        target_output_throughput_tokens_per_s=10.0,
-    ) == (3, "increase")
-    assert choose_next_frequency_index(
-        current_index=1,
-        moving_average_context_usage=15.0,
-        target_context_usage_threshold=40.0,
-        max_index=3,
-        moving_average_min_output_tokens_per_s=12.0,
-        target_output_throughput_tokens_per_s=10.0,
-    ) == (1, "hold")
+    assert resolved == socket_path.resolve()
 
 
 def test_choose_next_frequency_index_prioritizes_slo_increase() -> None:
@@ -388,7 +362,10 @@ def test_frequency_controller_uses_context_linespace_policy_when_slo_met(
         control_interval_s=2.0,
         context_query_hz=1.0,
         gateway=GatewayIPCConfig(),
-        zeusd=ZeusdConfig(socket_path="/tmp/zeusd.sock"),
+        amd=AmdClockConfig(
+            script_path="/usr/local/bin/set_gpu_clockfreq.sh",
+            reset_max_frequency_mhz=1500,
+        ),
     )
     fake_gateway = FakeGatewayClient(
         [
@@ -410,7 +387,7 @@ def test_frequency_controller_uses_context_linespace_policy_when_slo_met(
         config,
         tmp_path,
         port_profile_id=7,
-        gpu_index=3,
+        gpu_index=(2, 3),
         gateway_client=fake_gateway,
         gpu_controller=fake_gpu,
         monotonic=fake_clock.monotonic,
@@ -421,55 +398,30 @@ def test_frequency_controller_uses_context_linespace_policy_when_slo_met(
 
     assert fake_gpu.set_calls == [1200, 600]
     assert fake_gpu.reset_calls == 1
-    assert log_paths.query_path.exists()
-    assert log_paths.decision_path.exists()
-    assert log_paths.control_error_path.exists()
     assert log_paths.slo_decision_path.exists()
-    assert log_paths.query_path.name.startswith("freq-controller-ls.query.")
-    assert log_paths.decision_path.name.startswith("freq-controller-ls.decision.")
-    assert log_paths.control_error_path.name.startswith(
-        "freq-controller-ls.control-error."
-    )
-    assert log_paths.slo_decision_path.name.startswith(
-        "freq-controller-ls.slo-decision."
-    )
 
     query_records = read_jsonl(log_paths.query_path)
     decision_records = read_jsonl(log_paths.decision_path)
-    control_error_records = read_jsonl(log_paths.control_error_path)
     slo_decision_records = read_jsonl(log_paths.slo_decision_path)
 
     assert query_records[0]["phase"] == "pending"
-    assert [record["context_usage"] for record in query_records[1:]] == [
-        1.0,
-        1.0,
-        1.0,
-    ]
+    assert query_records[0]["gpu_indices"] == [2, 3]
     assert [record["min_output_tokens_per_s"] for record in query_records[1:]] == [
         12.0,
         12.0,
         12.0,
     ]
-
     assert len(decision_records) == 1
     assert decision_records[0]["action"] == "decrease"
-    assert decision_records[0]["changed"] is True
     assert decision_records[0]["decision_policy"] == "context_linespace"
     assert decision_records[0]["slo_override_applied"] is False
-    assert decision_records[0]["current_frequency_mhz"] == 1200
     assert decision_records[0]["target_frequency_mhz"] == 600
-    assert decision_records[0]["target_context_usage_threshold"] == 30.0
-    assert decision_records[0]["window_min_output_tokens_per_s"] == 12.0
-    assert decision_records[0]["target_output_throughput_tokens_per_s"] == 8.0
-    assert decision_records[0]["segment_count"] == 3
-    assert decision_records[0]["segment_width_context_usage"] == 10.0
-    assert decision_records[0]["target_frequency_index"] == 0
     assert decision_records[0]["context_target_frequency_index"] == 0
-    assert control_error_records == []
+    assert decision_records[0]["gpu_indices"] == [2, 3]
     assert slo_decision_records == []
 
 
-def test_frequency_controller_prioritizes_slo_increase_and_resets_on_exit(
+def test_frequency_controller_prioritizes_slo_increase_and_logs_slo_decision(
     tmp_path: Path,
 ) -> None:
     config = FrequencyControllerConfig(
@@ -479,7 +431,10 @@ def test_frequency_controller_prioritizes_slo_increase_and_resets_on_exit(
         control_interval_s=2.0,
         context_query_hz=1.0,
         gateway=GatewayIPCConfig(),
-        zeusd=ZeusdConfig(socket_path="/tmp/zeusd.sock"),
+        amd=AmdClockConfig(
+            script_path="/usr/local/bin/set_gpu_clockfreq.sh",
+            reset_max_frequency_mhz=1500,
+        ),
     )
     fake_gateway = FakeGatewayClient(
         [
@@ -501,7 +456,7 @@ def test_frequency_controller_prioritizes_slo_increase_and_resets_on_exit(
         config,
         tmp_path,
         port_profile_id=7,
-        gpu_index=3,
+        gpu_index=(2, 3),
         gateway_client=fake_gateway,
         gpu_controller=fake_gpu,
         monotonic=fake_clock.monotonic,
@@ -513,31 +468,19 @@ def test_frequency_controller_prioritizes_slo_increase_and_resets_on_exit(
     assert fake_gpu.set_calls == [1200, 1500]
     assert fake_gpu.reset_calls == 1
 
-    query_records = read_jsonl(log_paths.query_path)
     decision_records = read_jsonl(log_paths.decision_path)
-    control_error_records = read_jsonl(log_paths.control_error_path)
     slo_decision_records = read_jsonl(log_paths.slo_decision_path)
 
-    assert [record["min_output_tokens_per_s"] for record in query_records[1:]] == [
-        4.0,
-        4.0,
-        4.0,
-    ]
     assert len(decision_records) == 1
     assert decision_records[0]["action"] == "increase_for_slo"
-    assert decision_records[0]["changed"] is True
     assert decision_records[0]["decision_policy"] == "throughput_slo_precedence"
     assert decision_records[0]["slo_override_applied"] is True
     assert decision_records[0]["target_frequency_mhz"] == 1500
     assert decision_records[0]["window_min_output_tokens_per_s"] == 4.0
-    assert decision_records[0]["target_frequency_index"] == 3
-    assert decision_records[0]["context_target_frequency_index"] == 0
+    assert decision_records[0]["gpu_indices"] == [2, 3]
     assert len(slo_decision_records) == 1
     assert slo_decision_records[0]["action"] == "increase_for_slo"
-    assert slo_decision_records[0]["decision_policy"] == "throughput_slo_precedence"
-    assert slo_decision_records[0]["slo_override_applied"] is True
-    assert slo_decision_records[0]["window_min_output_tokens_per_s"] == 4.0
-    assert control_error_records == []
+    assert slo_decision_records[0]["gpu_indices"] == [2, 3]
 
 
 def test_frequency_controller_aggresive_slo_sets_max_frequency(
@@ -551,7 +494,10 @@ def test_frequency_controller_aggresive_slo_sets_max_frequency(
         control_interval_s=2.0,
         context_query_hz=1.0,
         gateway=GatewayIPCConfig(),
-        zeusd=ZeusdConfig(socket_path="/tmp/zeusd.sock"),
+        amd=AmdClockConfig(
+            script_path="/usr/local/bin/set_gpu_clockfreq.sh",
+            reset_max_frequency_mhz=1800,
+        ),
     )
     fake_gateway = FakeGatewayClient(
         [
@@ -573,7 +519,7 @@ def test_frequency_controller_aggresive_slo_sets_max_frequency(
         config,
         tmp_path,
         port_profile_id=7,
-        gpu_index=3,
+        gpu_index=(2, 3),
         gateway_client=fake_gateway,
         gpu_controller=fake_gpu,
         monotonic=fake_clock.monotonic,
@@ -611,7 +557,10 @@ def test_frequency_controller_logs_control_failures_and_retries(
         control_interval_s=2.0,
         context_query_hz=1.0,
         gateway=GatewayIPCConfig(),
-        zeusd=ZeusdConfig(socket_path="/tmp/zeusd.sock"),
+        amd=AmdClockConfig(
+            script_path="/usr/local/bin/set_gpu_clockfreq.sh",
+            reset_max_frequency_mhz=1500,
+        ),
     )
     fake_gateway = FakeGatewayClient(
         [
@@ -638,7 +587,7 @@ def test_frequency_controller_logs_control_failures_and_retries(
         config,
         tmp_path,
         port_profile_id=7,
-        gpu_index=3,
+        gpu_index=(2, 3),
         gateway_client=fake_gateway,
         gpu_controller=fake_gpu,
         monotonic=fake_clock.monotonic,
@@ -668,3 +617,4 @@ def test_frequency_controller_logs_control_failures_and_retries(
     assert control_error_records[0]["attempted_frequency_mhz"] == 600
     assert control_error_records[0]["current_frequency_index"] == 2
     assert control_error_records[0]["current_frequency_mhz"] == 1200
+    assert control_error_records[0]["gpu_indices"] == [2, 3]

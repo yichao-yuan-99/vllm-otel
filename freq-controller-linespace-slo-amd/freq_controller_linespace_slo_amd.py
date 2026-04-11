@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Linespace GPU frequency controller with output-throughput SLO precedence."""
+"""AMD linespace GPU frequency controller with output-throughput SLO precedence."""
 
 from __future__ import annotations
 
@@ -9,14 +9,15 @@ from dataclasses import dataclass
 from dataclasses import field
 from dataclasses import replace
 from datetime import datetime, timezone
-import errno
 import http.client
 import json
 import math
 import os
 from pathlib import Path
+import shutil
 import signal
 import socket
+import subprocess
 import sys
 import time
 from typing import Any
@@ -31,15 +32,14 @@ except ModuleNotFoundError:  # pragma: no cover
 
 DEFAULT_CONTROL_INTERVAL_S = 5.0
 DEFAULT_CONTEXT_QUERY_HZ = 5.0
-DEFAULT_FREQUENCY_MHZ_LEVELS = (810, 1005, 1200, 1395)
 DEFAULT_SHARED_CONFIG_FILE_NAME = "script-shared.toml"
 DEFAULT_GATEWAY_PORT_PROFILE_ID = 0
 DEFAULT_GATEWAY_IPC_SOCKET_DIR = Path("/tmp")
-DEFAULT_ZEUSD_SOCKET_PATH = "/var/run/zeusd.sock"
 DEFAULT_GPU_INDEX = 0
+DEFAULT_GPU_INDICES = (DEFAULT_GPU_INDEX,)
 DEFAULT_GATEWAY_TIMEOUT_S = 5.0
-DEFAULT_LOG_FILE_PREFIX = "freq-controller-ls"
-DEFAULT_GATEWAY_SOCKET_PROBE_TIMEOUT_S = 0.2
+DEFAULT_AMD_SET_GPU_CORE_FREQ_COMMAND = "amd-set-gpu-core-freq"
+DEFAULT_LOG_FILE_PREFIX = "freq-controller-ls-amd"
 
 
 def now_iso8601_utc() -> str:
@@ -53,6 +53,24 @@ def now_iso8601_utc() -> str:
 def iso8601_to_compact(iso_value: str) -> str:
     dt = datetime.fromisoformat(iso_value.replace("Z", "+00:00"))
     return dt.strftime("%Y%m%dT%H%M%SZ")
+
+
+def _resolve_runtime_command_path(command_path: str) -> str:
+    stripped = command_path.strip()
+    if not stripped:
+        return stripped
+    if Path(stripped).name != stripped:
+        return stripped
+    if shutil.which(stripped) is not None:
+        return stripped
+
+    for runtime_path in (sys.argv[0], sys.executable):
+        if not runtime_path:
+            continue
+        candidate = Path(runtime_path).expanduser().resolve().parent / stripped
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return stripped
 
 
 def _parse_float(value: object, key: str, *, default: float | None = None) -> float:
@@ -87,6 +105,15 @@ def _parse_optional_str(value: object, key: str) -> str | None:
     return stripped or None
 
 
+def _parse_optional_positive_int(value: object, key: str) -> int | None:
+    if value is None:
+        return None
+    parsed = _parse_int(value, key)
+    if parsed <= 0:
+        raise ValueError(f"{key} must be > 0")
+    return parsed
+
+
 def _parse_frequency_levels(value: object, key: str) -> tuple[int, ...]:
     if not isinstance(value, list) or not value:
         raise ValueError(f"{key} must be a non-empty list of integers")
@@ -103,64 +130,88 @@ def _parse_frequency_levels(value: object, key: str) -> tuple[int, ...]:
     return tuple(unique_sorted)
 
 
-def _gateway_ipc_socket_path(
+def normalize_gpu_indices(gpu_indices: Sequence[int]) -> tuple[int, ...]:
+    if isinstance(gpu_indices, (str, bytes)):
+        raise ValueError("gpu_indices must be a sequence of integers")
+    parsed: list[int] = []
+    seen: set[int] = set()
+    for index, value in enumerate(gpu_indices):
+        item_key = f"gpu_indices[{index}]"
+        item_value = _parse_int(value, item_key)
+        if item_value < 0:
+            raise ValueError(f"{item_key} must be >= 0")
+        if item_value in seen:
+            raise ValueError(f"{item_key} duplicates GPU index {item_value}")
+        seen.add(item_value)
+        parsed.append(item_value)
+    if not parsed:
+        raise ValueError("gpu_indices must be non-empty")
+    return tuple(parsed)
+
+
+def parse_gpu_index_tokens(raw_values: Sequence[str]) -> tuple[int, ...]:
+    if not raw_values:
+        raise ValueError(
+            "--gpu-index must be a non-empty integer or comma-separated GPU list"
+        )
+    flattened: list[int] = []
+    seen: set[int] = set()
+    for raw_value in raw_values:
+        for token in str(raw_value).split(","):
+            stripped = token.strip()
+            if not stripped:
+                raise ValueError(
+                    "--gpu-index must be a non-empty integer or comma-separated GPU list"
+                )
+            try:
+                parsed = int(stripped)
+            except ValueError as exc:
+                raise ValueError(
+                    f"--gpu-index contains non-integer value: {stripped!r}"
+                ) from exc
+            if parsed < 0:
+                raise ValueError("--gpu-index values must be >= 0")
+            if parsed in seen:
+                raise ValueError(f"--gpu-index contains duplicate value: {parsed}")
+            seen.add(parsed)
+            flattened.append(parsed)
+    return tuple(flattened)
+
+
+def normalize_gpu_index_selection(
+    gpu_index: int | Sequence[int] | str | None,
+) -> tuple[int, ...]:
+    if gpu_index is None:
+        return DEFAULT_GPU_INDICES
+    if isinstance(gpu_index, int):
+        return normalize_gpu_indices((gpu_index,))
+    if isinstance(gpu_index, str):
+        return parse_gpu_index_tokens((gpu_index,))
+    return normalize_gpu_indices(gpu_index)
+
+
+def gpu_target_log_payload(gpu_indices: Sequence[int]) -> dict[str, Any]:
+    normalized = normalize_gpu_indices(gpu_indices)
+    payload: dict[str, Any] = {"gpu_indices": list(normalized)}
+    if len(normalized) == 1:
+        payload["gpu_index"] = normalized[0]
+    return payload
+
+
+def _default_gateway_ipc_socket_paths(
     port_profile_id: int | str | None,
-    *,
-    gateway_ctx: bool,
-) -> Path:
+) -> tuple[Path, ...]:
     resolved_profile_id = (
         str(DEFAULT_GATEWAY_PORT_PROFILE_ID)
         if port_profile_id is None
         else str(port_profile_id)
     )
-    socket_prefix = (
-        "vllm-gateway-ctx-profile" if gateway_ctx else "vllm-gateway-profile"
-    )
     return (
         DEFAULT_GATEWAY_IPC_SOCKET_DIR
-        / f"{socket_prefix}-{resolved_profile_id}.sock"
+        / f"vllm-gateway-ctx-profile-{resolved_profile_id}.sock",
+        DEFAULT_GATEWAY_IPC_SOCKET_DIR
+        / f"vllm-gateway-profile-{resolved_profile_id}.sock",
     )
-
-
-def _unix_socket_accepting_connections(socket_path: Path) -> bool:
-    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        probe.settimeout(DEFAULT_GATEWAY_SOCKET_PROBE_TIMEOUT_S)
-        probe.connect(str(socket_path))
-    except FileNotFoundError:
-        return False
-    except ConnectionRefusedError:
-        return False
-    except OSError as exc:
-        if exc.errno in {errno.ENOENT, errno.ECONNREFUSED}:
-            return False
-        return False
-    else:
-        return True
-    finally:
-        probe.close()
-
-
-def _default_gateway_ipc_socket_path(port_profile_id: int | str | None) -> Path:
-    gateway_socket_path = _gateway_ipc_socket_path(
-        port_profile_id,
-        gateway_ctx=False,
-    )
-    gateway_ctx_socket_path = _gateway_ipc_socket_path(
-        port_profile_id,
-        gateway_ctx=True,
-    )
-    gateway_socket_active = _unix_socket_accepting_connections(gateway_socket_path)
-    gateway_ctx_socket_active = _unix_socket_accepting_connections(
-        gateway_ctx_socket_path
-    )
-    if gateway_ctx_socket_active and not gateway_socket_active:
-        return gateway_ctx_socket_path
-    if gateway_socket_active and not gateway_ctx_socket_active:
-        return gateway_socket_path
-    if gateway_ctx_socket_path.exists() and not gateway_socket_path.exists():
-        return gateway_ctx_socket_path
-    return gateway_socket_path
 
 
 def _lookup_first(mapping: dict[str, Any], keys: Sequence[str]) -> Any:
@@ -205,6 +256,52 @@ def _load_shared_controller_table(path: Path) -> dict[str, Any]:
     raise ValueError(f"shared controller must be a TOML table: {path}")
 
 
+def discover_supported_frequency_mhz_levels(
+    *,
+    gpu_index: int,
+    amdsmi_module: Any | None = None,
+) -> tuple[int, ...]:
+    """Read supported sclk frequencies for the selected AMD GPU from AMD SMI."""
+    if gpu_index < 0:
+        raise ValueError("gpu_index must be >= 0")
+
+    if amdsmi_module is None:
+        try:
+            import amdsmi as amdsmi_module  # type: ignore[no-redef]
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError(
+                "amdsmi import failed; install ROCm AMD SMI Python bindings first"
+            ) from exc
+
+    amdsmi_module.amdsmi_init()
+    try:
+        handles = list(amdsmi_module.amdsmi_get_processor_handles())
+        if gpu_index >= len(handles):
+            raise IndexError(
+                f"gpu_index {gpu_index} out of range; found {len(handles)} GPU(s)"
+            )
+
+        freq_info = amdsmi_module.amdsmi_get_clk_freq(
+            handles[gpu_index],
+            amdsmi_module.AmdSmiClkType.GFX,
+        )
+        raw_frequencies = freq_info.get("frequency", [])
+        parsed = sorted(
+            {
+                int(round(float(value) / 1_000_000))
+                for value in raw_frequencies
+                if isinstance(value, (int, float)) and float(value) > 0
+            }
+        )
+        if not parsed:
+            raise RuntimeError(
+                f"AMD SMI did not report any supported sclk frequencies for GPU {gpu_index}"
+            )
+        return tuple(parsed)
+    finally:
+        amdsmi_module.amdsmi_shut_down()
+
+
 @dataclass(frozen=True)
 class GatewayIPCConfig:
     ipc_socket_path: str | None = None
@@ -213,7 +310,14 @@ class GatewayIPCConfig:
     def resolved_socket_path(self, port_profile_id: int) -> Path:
         if self.ipc_socket_path:
             return Path(self.ipc_socket_path).expanduser().resolve()
-        return _default_gateway_ipc_socket_path(port_profile_id).resolve()
+        candidates = tuple(
+            candidate.resolve()
+            for candidate in _default_gateway_ipc_socket_paths(port_profile_id)
+        )
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return candidates[0]
 
     def to_log_payload(self, *, port_profile_id: int) -> dict[str, Any]:
         return {
@@ -251,13 +355,47 @@ class FrequencyControllerLogPaths:
 
 
 @dataclass(frozen=True)
-class ZeusdConfig:
-    socket_path: str = DEFAULT_ZEUSD_SOCKET_PATH
+class AmdClockConfig:
+    command_path: str = DEFAULT_AMD_SET_GPU_CORE_FREQ_COMMAND
+    script_path: str | None = None
+    reset_max_frequency_mhz: int | None = None
 
-    def to_log_payload(self, *, gpu_index: int) -> dict[str, Any]:
+    def __post_init__(self) -> None:
+        if not self.command_path.strip():
+            raise ValueError("amd.command_path must not be empty")
+        object.__setattr__(
+            self,
+            "command_path",
+            _resolve_runtime_command_path(self.command_path),
+        )
+        if self.script_path is not None and not self.script_path.strip():
+            raise ValueError("amd.script_path must not be empty")
+        if self.reset_max_frequency_mhz is not None and self.reset_max_frequency_mhz <= 0:
+            raise ValueError("amd.reset_max_frequency_mhz must be > 0")
+
+    def resolved_reset_max_frequency_mhz(
+        self,
+        frequency_mhz_levels: Sequence[int],
+    ) -> int:
+        if self.reset_max_frequency_mhz is not None:
+            return self.reset_max_frequency_mhz
+        return max(frequency_mhz_levels)
+
+    def to_log_payload(
+        self,
+        *,
+        gpu_indices: Sequence[int],
+        frequency_mhz_levels: Sequence[int],
+    ) -> dict[str, Any]:
         return {
-            "socket_path": self.socket_path,
-            "gpu_index": gpu_index,
+            "command_path": self.command_path,
+            "script_path": self.script_path,
+            **gpu_target_log_payload(gpu_indices),
+            "clock": "sclk",
+            "limit": "max",
+            "reset_max_frequency_mhz": self.resolved_reset_max_frequency_mhz(
+                frequency_mhz_levels
+            ),
         }
 
 
@@ -270,7 +408,7 @@ class FrequencyControllerConfig:
     control_interval_s: float = DEFAULT_CONTROL_INTERVAL_S
     context_query_hz: float = DEFAULT_CONTEXT_QUERY_HZ
     gateway: GatewayIPCConfig = field(default_factory=GatewayIPCConfig)
-    zeusd: ZeusdConfig = field(default_factory=ZeusdConfig)
+    amd: AmdClockConfig = field(default_factory=AmdClockConfig)
 
     def __post_init__(self) -> None:
         if not self.frequency_mhz_levels:
@@ -310,7 +448,7 @@ class FrequencyControllerConfig:
         self,
         *,
         port_profile_id: int,
-        gpu_index: int,
+        gpu_indices: Sequence[int],
     ) -> dict[str, Any]:
         return {
             "frequency_mhz_levels": list(self.frequency_mhz_levels),
@@ -326,7 +464,10 @@ class FrequencyControllerConfig:
             "gateway": self.gateway.to_log_payload(
                 port_profile_id=port_profile_id,
             ),
-            "zeusd": self.zeusd.to_log_payload(gpu_index=gpu_index),
+            "amd": self.amd.to_log_payload(
+                gpu_indices=gpu_indices,
+                frequency_mhz_levels=self.frequency_mhz_levels,
+            ),
         }
 
 
@@ -336,6 +477,7 @@ def load_controller_config(
     target_context_usage_threshold: float | None = None,
     target_output_throughput_tokens_per_s: float | None = None,
     aggressive_slo_control: bool = False,
+    gpu_index: int | Sequence[int] | str = DEFAULT_GPU_INDEX,
 ) -> FrequencyControllerConfig:
     default_shared_config_table = _load_shared_controller_table(
         _default_shared_config_path(),
@@ -389,25 +531,28 @@ def load_controller_config(
             "use --port-profile-id instead"
         )
 
-    zeusd_table = payload.get("zeusd")
-    if zeusd_table is None:
-        zeusd_table = {}
-    elif not isinstance(zeusd_table, dict):
-        raise ValueError("zeusd must be a TOML table")
-    if "gpu_index" in zeusd_table:
+    amd_table = payload.get("amd")
+    if amd_table is None:
+        amd_table = {}
+    elif not isinstance(amd_table, dict):
+        raise ValueError("amd must be a TOML table")
+    if "gpu_index" in amd_table or "gpu_indices" in amd_table:
         raise ValueError(
-            "zeusd.gpu_index is no longer configured in TOML; "
-            "use --gpu-index instead"
+            "amd GPU targeting is no longer configured in TOML; use --gpu-index instead"
         )
 
+    frequency_levels_value = _lookup_with_fallback(
+        config_table,
+        shared_config_table,
+        ("frequency_mhz_levels", "frequencies_mhz", "frequency_mhz"),
+    )
+    if frequency_levels_value is None:
+        raise ValueError("frequency_mhz_levels is required")
     frequency_levels = _parse_frequency_levels(
-        _lookup_with_fallback(
-            config_table,
-            shared_config_table,
-            ("frequency_mhz_levels", "frequencies_mhz", "frequency_mhz"),
-        ),
+        frequency_levels_value,
         "frequency_mhz_levels",
     )
+
     threshold_value = (
         target_context_usage_threshold
         if target_context_usage_threshold is not None
@@ -426,6 +571,7 @@ def load_controller_config(
         threshold_value,
         "target_context_usage_threshold",
     )
+
     output_throughput_target_value = (
         target_output_throughput_tokens_per_s
         if target_output_throughput_tokens_per_s is not None
@@ -444,6 +590,7 @@ def load_controller_config(
         output_throughput_target_value,
         "target_output_throughput_tokens_per_s",
     )
+
     control_interval_s = _parse_float(
         _lookup_with_fallback(
             config_table,
@@ -472,13 +619,29 @@ def load_controller_config(
             default=DEFAULT_GATEWAY_TIMEOUT_S,
         ),
     )
-    zeusd = ZeusdConfig(
-        socket_path=_parse_optional_str(
-            zeusd_table.get("socket_path"),
-            "zeusd.socket_path",
+    amd = AmdClockConfig(
+        command_path=_parse_optional_str(
+            _lookup_first(
+                amd_table,
+                ("command_path", "set_gpu_core_freq_command"),
+            ),
+            "amd.command_path",
         )
-        or DEFAULT_ZEUSD_SOCKET_PATH,
+        or DEFAULT_AMD_SET_GPU_CORE_FREQ_COMMAND,
+        script_path=_parse_optional_str(
+            amd_table.get("script_path"),
+            "amd.script_path",
+        )
+        or None,
+        reset_max_frequency_mhz=_parse_optional_positive_int(
+            _lookup_first(
+                amd_table,
+                ("reset_max_frequency_mhz", "reset_frequency_mhz"),
+            ),
+            "amd.reset_max_frequency_mhz",
+        ),
     )
+    normalize_gpu_index_selection(gpu_index)
     return FrequencyControllerConfig(
         frequency_mhz_levels=frequency_levels,
         target_context_usage_threshold=resolved_threshold,
@@ -487,7 +650,7 @@ def load_controller_config(
         control_interval_s=control_interval_s,
         context_query_hz=context_query_hz,
         gateway=gateway,
-        zeusd=zeusd,
+        amd=amd,
     )
 
 
@@ -641,31 +804,74 @@ class GatewayContextClient:
         return self.read_context_snapshot().total_context_tokens
 
 
-class ZeusdGPUFrequencyController:
-    def __init__(self, *, socket_path: str, gpu_index: int) -> None:
-        self.socket_path = socket_path
-        self.gpu_index = gpu_index
-        self._gpus: Any | None = None
+class AmdMaxGPUFrequencyController:
+    def __init__(
+        self,
+        *,
+        command_path: str,
+        gpu_index: int | Sequence[int] | str,
+        script_path: str | None,
+        reset_max_frequency_mhz: int,
+    ) -> None:
+        self.command_path = _resolve_runtime_command_path(command_path)
+        self.gpu_indices = normalize_gpu_index_selection(gpu_index)
+        self.script_path = script_path
+        self.reset_max_frequency_mhz = reset_max_frequency_mhz
 
-    def _get_gpus(self) -> Any:
-        if self._gpus is None:
-            os.environ["ZEUSD_SOCK_PATH"] = self.socket_path
-            from zeus.device import get_gpus  # pylint: disable=import-outside-toplevel
+    def _run_command(self, *, gpu_index: int, value: int) -> None:
+        command = [
+            self.command_path,
+            "--gpu-index",
+            str(gpu_index),
+            "--max-mhz",
+            str(value),
+        ]
+        if self.script_path is not None:
+            command.extend(["--script-path", self.script_path])
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode == 0:
+            return
 
-            self._gpus = get_gpus()
-        return self._gpus
+        error_parts = [
+            part.strip()
+            for part in (completed.stderr, completed.stdout)
+            if part and part.strip()
+        ]
+        error_message = " | ".join(error_parts) or f"command exited with {completed.returncode}"
+        raise RuntimeError(error_message)
 
     def set_frequency(self, frequency_mhz: int) -> None:
-        gpus = self._get_gpus()
-        gpus.set_gpu_locked_clocks(
-            gpu_index=self.gpu_index,
-            min_clock_mhz=frequency_mhz,
-            max_clock_mhz=frequency_mhz,
-        )
+        errors: list[str] = []
+        for gpu_index in self.gpu_indices:
+            try:
+                self._run_command(gpu_index=gpu_index, value=frequency_mhz)
+            except Exception as exc:
+                errors.append(f"gpu {gpu_index}: {exc}")
+        if errors:
+            raise RuntimeError(
+                f"failed to set one or more GPUs to {frequency_mhz} MHz: "
+                + "; ".join(errors)
+            )
 
     def reset_frequency(self) -> None:
-        gpus = self._get_gpus()
-        gpus.reset_gpu_locked_clocks(gpu_index=self.gpu_index)
+        errors: list[str] = []
+        for gpu_index in self.gpu_indices:
+            try:
+                self._run_command(
+                    gpu_index=gpu_index,
+                    value=self.reset_max_frequency_mhz,
+                )
+            except Exception as exc:
+                errors.append(f"gpu {gpu_index}: {exc}")
+        if errors:
+            raise RuntimeError(
+                "failed to reset one or more GPUs: " + "; ".join(errors)
+            )
 
 
 class JsonlLogFile:
@@ -799,26 +1005,29 @@ class FrequencyController:
         log_dir: Path,
         *,
         port_profile_id: int = DEFAULT_GATEWAY_PORT_PROFILE_ID,
-        gpu_index: int = DEFAULT_GPU_INDEX,
+        gpu_index: int | Sequence[int] | str = DEFAULT_GPU_INDEX,
         gateway_client: GatewayContextClient | None = None,
-        gpu_controller: ZeusdGPUFrequencyController | None = None,
+        gpu_controller: AmdMaxGPUFrequencyController | None = None,
         monotonic: Callable[[], float] | None = None,
         sleep_func: Callable[[float], None] | None = None,
     ) -> None:
         if port_profile_id < 0:
             raise ValueError("port_profile_id must be >= 0")
-        if gpu_index < 0:
-            raise ValueError("gpu_index must be >= 0")
+        resolved_gpu_indices = normalize_gpu_index_selection(gpu_index)
         self.config = config
         self.port_profile_id = port_profile_id
-        self.gpu_index = gpu_index
+        self.gpu_indices = resolved_gpu_indices
         self.gateway_client = gateway_client or GatewayContextClient(
             config.gateway.resolved_socket_path(port_profile_id),
             timeout_s=config.gateway.timeout_s,
         )
-        self.gpu_controller = gpu_controller or ZeusdGPUFrequencyController(
-            socket_path=config.zeusd.socket_path,
-            gpu_index=gpu_index,
+        self.gpu_controller = gpu_controller or AmdMaxGPUFrequencyController(
+            command_path=config.amd.command_path,
+            script_path=config.amd.script_path,
+            gpu_index=resolved_gpu_indices,
+            reset_max_frequency_mhz=config.amd.resolved_reset_max_frequency_mhz(
+                config.frequency_mhz_levels
+            ),
         )
         self.monotonic = monotonic or time.monotonic
         self.sleep_func = sleep_func or time.sleep
@@ -834,6 +1043,9 @@ class FrequencyController:
     @property
     def current_frequency_mhz(self) -> int:
         return self.config.frequency_mhz_levels[self.current_frequency_index]
+
+    def _gpu_log_payload(self) -> dict[str, Any]:
+        return gpu_target_log_payload(self.gpu_indices)
 
     def _apply_frequency_index(
         self,
@@ -860,6 +1072,7 @@ class FrequencyController:
                 current_frequency_mhz=previous_frequency_mhz,
                 moving_average_context_usage=moving_average_context_usage,
                 sample_count=sample_count,
+                **self._gpu_log_payload(),
             )
             return False
         self.current_frequency_index = index
@@ -910,7 +1123,7 @@ class FrequencyController:
             else:
                 self.output_throughput_window.add(now_s, min_output_tokens_per_s)
 
-        error_messages = []
+        error_messages: list[str] = []
         if context_read_error is not None:
             error_messages.append(f"context: {context_read_error}")
         if throughput_read_error is not None:
@@ -942,12 +1155,11 @@ class FrequencyController:
                 if throughput_snapshot is None
                 else throughput_snapshot.avg_output_tokens_per_s
             ),
+            **self._gpu_log_payload(),
         }
         if error_messages:
             query_fields["error"] = "; ".join(error_messages)
-        self.logs.query.write(
-            **query_fields,
-        )
+        self.logs.query.write(**query_fields)
 
     def _wait_for_job_start(
         self,
@@ -964,6 +1176,7 @@ class FrequencyController:
                 self.logs.query.write(
                     phase="pending",
                     error=str(exc),
+                    **self._gpu_log_payload(),
                 )
             else:
                 query_fields: dict[str, Any] = {
@@ -971,6 +1184,7 @@ class FrequencyController:
                     "context_usage": snapshot.total_context_tokens,
                     "job_active": snapshot.job_active,
                     "agent_count": snapshot.agent_count,
+                    **self._gpu_log_payload(),
                 }
                 if read_error is not None:
                     query_fields["error"] = read_error
@@ -1044,14 +1258,11 @@ class FrequencyController:
             ),
             "target_frequency_index": target_index,
             "context_target_frequency_index": context_target_index,
+            **self._gpu_log_payload(),
         }
-        self.logs.decision.write(
-            **decision_fields,
-        )
+        self.logs.decision.write(**decision_fields)
         if slo_override_applied:
-            self.logs.slo_decision.write(
-                **decision_fields,
-            )
+            self.logs.slo_decision.write(**decision_fields)
         if not changed:
             return
 
@@ -1101,6 +1312,7 @@ class FrequencyController:
                         self.logs.query.write(
                             phase="active",
                             error=str(exc),
+                            **self._gpu_log_payload(),
                         )
                     next_sample_s += self.config.query_interval_s
                     while next_sample_s <= now_s:
@@ -1121,6 +1333,7 @@ class FrequencyController:
                             current_frequency_mhz=self.current_frequency_mhz,
                             moving_average_context_usage=self.context_window.average(now_s),
                             sample_count=self.context_window.sample_count,
+                            **self._gpu_log_payload(),
                         )
                     decision_count += 1
                     next_control_s += self.config.control_interval_s
@@ -1150,7 +1363,7 @@ def run_controller(
     aggressive_slo_control: bool = False,
     gateway_ipc_socket_path: Path | None = None,
     port_profile_id: int = DEFAULT_GATEWAY_PORT_PROFILE_ID,
-    gpu_index: int = DEFAULT_GPU_INDEX,
+    gpu_index: int | Sequence[int] | str = DEFAULT_GPU_INDEX,
 ) -> FrequencyControllerLogPaths:
     config = load_controller_config(
         config_path,
@@ -1159,6 +1372,7 @@ def run_controller(
             target_output_throughput_tokens_per_s
         ),
         aggressive_slo_control=aggressive_slo_control,
+        gpu_index=gpu_index,
     )
     if gateway_ipc_socket_path is not None:
         config = replace(
@@ -1193,10 +1407,10 @@ def run_controller(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="freq-controller-linespace-slo",
+        prog="freq-controller-linespace-slo-amd",
         description=(
-            "Control GPU core frequency from gateway context usage with "
-            "output-throughput SLO precedence and zeusd."
+            "Control AMD GPU core frequency from gateway context usage with "
+            "output-throughput SLO precedence and a max-only sclk cap."
         ),
     )
     parser.add_argument(
@@ -1257,10 +1471,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--gpu-index",
-        type=int,
-        default=DEFAULT_GPU_INDEX,
+        default=str(DEFAULT_GPU_INDEX),
         help=(
-            "GPU index to control through zeusd. "
+            "GPU index to control through the AMD max-only core clock command. "
+            "Pass a single integer for one GPU or a comma-separated list to "
+            "apply the same max-frequency cap to multiple GPUs. "
             f"Default: {DEFAULT_GPU_INDEX}."
         ),
     )
@@ -1277,6 +1492,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        gpu_indices = parse_gpu_index_tokens((str(args.gpu_index),))
         log_paths = run_controller(
             args.config,
             args.log_dir,
@@ -1287,11 +1503,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             aggressive_slo_control=args.aggressive_slo_control,
             gateway_ipc_socket_path=args.gateway_ipc_socket_path,
             port_profile_id=args.port_profile_id,
-            gpu_index=args.gpu_index,
+            gpu_index=gpu_indices,
         )
+        gpu_index_text = ",".join(str(gpu_index) for gpu_index in gpu_indices)
         print(
             (
-                "freq-controller-linespace-slo logs: "
+                "freq-controller-linespace-slo-amd logs: "
+                f"gpu_index={gpu_index_text} "
                 f"query={log_paths.query_path} "
                 f"decision={log_paths.decision_path} "
                 f"control_error={log_paths.control_error_path} "

@@ -17,7 +17,9 @@ second control signal from gateway `GET /ipc/output-throughput`.
   `target_output_throughput_tokens_per_s`.
 - At each control decision:
   - if moving-average `min_output_tokens_per_s` is below the target, the
-    controller forces a one-step frequency increase
+    controller forces a one-step frequency increase by default
+  - with `--aggresive`, an SLO violation jumps directly to the highest
+    configured frequency for that decision
   - otherwise it follows the original linespace context-usage policy
 - If gateway has no throughput samples yet
   (`throughput_agent_count = 0`, summary values are `null`), the controller
@@ -63,6 +65,10 @@ Optional aliases accepted in TOML:
 - `target_output_throughput`
 - `throughput_target`
 
+Optional CLI-only behavior flags:
+
+- `--aggresive`
+
 ## Usage
 
 Install locally:
@@ -78,6 +84,7 @@ freq-controller-linespace-slo \
   --log-dir ./logs \
   --threshold 395784 \
   --throughput-target 12 \
+  --aggresive \
   --port-profile-id 0 \
   --gpu-index 0
 ```
@@ -146,6 +153,7 @@ The decision log includes the existing linespace fields plus:
 
 - `decision_policy`
 - `slo_override_applied`
+- `aggressive_slo_control`
 - `window_min_output_tokens_per_s`
 - `throughput_sample_count`
 - `target_output_throughput_tokens_per_s`
