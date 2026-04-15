@@ -103,6 +103,24 @@ def _parse_frequency_levels(value: object, key: str) -> tuple[int, ...]:
     return tuple(unique_sorted)
 
 
+def _filter_frequency_levels_geq(
+    frequency_levels: Sequence[int],
+    minimum_frequency_mhz: int | None,
+) -> tuple[int, ...]:
+    if minimum_frequency_mhz is None:
+        return tuple(frequency_levels)
+    filtered = tuple(
+        frequency_mhz
+        for frequency_mhz in frequency_levels
+        if frequency_mhz >= minimum_frequency_mhz
+    )
+    if not filtered:
+        raise ValueError(
+            "--only-freq-list-geq filtered frequency_mhz_levels to an empty list"
+        )
+    return filtered
+
+
 def normalize_gpu_indices(gpu_indices: Sequence[int]) -> tuple[int, ...]:
     if isinstance(gpu_indices, (str, bytes)):
         raise ValueError("gpu_indices must be a sequence of integers")
@@ -382,6 +400,7 @@ def load_controller_config(
     config_path: Path | None,
     *,
     target_context_usage_threshold: float | None = None,
+    only_freq_list_geq: int | None = None,
 ) -> FrequencyControllerConfig:
     default_shared_config_table = _load_shared_controller_table(
         _default_shared_config_path(),
@@ -453,6 +472,10 @@ def load_controller_config(
             ("frequency_mhz_levels", "frequencies_mhz", "frequency_mhz"),
         ),
         "frequency_mhz_levels",
+    )
+    frequency_levels = _filter_frequency_levels_geq(
+        frequency_levels,
+        only_freq_list_geq,
     )
     threshold_value = (
         target_context_usage_threshold
@@ -1005,12 +1028,14 @@ def run_controller(
     log_dir: Path,
     *,
     target_context_usage_threshold: float | None = None,
+    only_freq_list_geq: int | None = None,
     port_profile_id: int = DEFAULT_GATEWAY_PORT_PROFILE_ID,
     gpu_index: int | Sequence[int] | str = DEFAULT_GPU_INDEX,
 ) -> FrequencyControllerLogPaths:
     config = load_controller_config(
         config_path,
         target_context_usage_threshold=target_context_usage_threshold,
+        only_freq_list_geq=only_freq_list_geq,
     )
     stop_flag = {"requested": False}
 
@@ -1070,6 +1095,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--only-freq-list-geq",
+        type=int,
+        help=(
+            "If set, keep only frequency_mhz_levels values greater than or "
+            "equal to this MHz threshold before the controller uses them."
+        ),
+    )
+    parser.add_argument(
         "--port-profile-id",
         type=int,
         default=DEFAULT_GATEWAY_PORT_PROFILE_ID,
@@ -1095,6 +1128,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.config,
             args.log_dir,
             target_context_usage_threshold=args.target_context_usage_threshold,
+            only_freq_list_geq=args.only_freq_list_geq,
             port_profile_id=args.port_profile_id,
             gpu_index=gpu_indices,
         )

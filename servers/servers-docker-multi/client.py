@@ -1134,8 +1134,15 @@ def _format_wait_progress(snapshot: dict[str, Any], *, attempts: int, elapsed_se
             profile_id = backend.get("port_profile_id")
             services = backend.get("services")
             if isinstance(services, dict):
-                vllm_status = _single._format_health_service_status("vllm", services["vllm"])
-                parts.append(f"p{profile_id}:{vllm_status}")
+                service_parts: list[str] = []
+                for service_name in ("vllm", "jaeger_api", "jaeger_ui", "jaeger_otlp"):
+                    payload = services.get(service_name)
+                    if isinstance(payload, dict):
+                        service_parts.append(
+                            _single._format_health_service_status(service_name, payload)
+                        )
+                if service_parts:
+                    parts.append(f"p{profile_id}:{','.join(service_parts)}")
     return " | ".join(parts)
 
 

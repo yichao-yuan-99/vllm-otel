@@ -3,6 +3,7 @@ schema_version = 1
 [run]
 port_profile_ids = [0, 1]
 assignment_policy = "round_robin"
+balanced_usage_threshold_tokens = 263856
 output_root = "./tests/output/gateway-multi-artifacts"
 
 [telemetry]

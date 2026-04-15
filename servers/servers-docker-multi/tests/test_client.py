@@ -81,6 +81,37 @@ class DockerMultiClientTest(unittest.TestCase):
         parsed = client._parse_port_profile_ids(("0,1", "2"))
         self.assertEqual(parsed, [0, 1, 2])
 
+    def test_format_wait_progress_includes_backend_jaeger_details(self) -> None:
+        progress = client._format_wait_progress(
+            {
+                "gateway_services": {
+                    "gateway": {"ok": True},
+                    "gateway_parse": {"ok": True},
+                },
+                "backends": [
+                    {
+                        "port_profile_id": 0,
+                        "services": {
+                            "vllm": {"ok": True},
+                            "jaeger_api": {"ok": False, "status_code": 503},
+                            "jaeger_ui": {"ok": True},
+                            "jaeger_otlp": {"ok": False, "error": "connection refused"},
+                        },
+                    }
+                ],
+            },
+            attempts=7,
+            elapsed_seconds=12.3,
+        )
+
+        self.assertIn("wait-up attempt=7 elapsed=12.3s", progress)
+        self.assertIn("gateway=ok", progress)
+        self.assertIn("gateway_parse=ok", progress)
+        self.assertIn(
+            "p0:vllm=ok,jaeger_api=status:503,jaeger_ui=ok,jaeger_otlp=waiting:connection refused",
+            progress,
+        )
+
     def test_stop_impl_keeps_selection_visible_when_residual_services_remain(self) -> None:
         selection = {
             "model_key": "qwen3_coder_30b_fp8",

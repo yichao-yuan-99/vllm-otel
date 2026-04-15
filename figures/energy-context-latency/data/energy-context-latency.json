@@ -1,0 +1,1398 @@
+{
+  "figure_name": "energy-context-latency",
+  "context_max_tokens": 527664.0,
+  "experiment_count": 3,
+  "implementation_count": 3,
+  "metric_count": 5,
+  "implementations": [
+    {
+      "implementation_key": "uncontrolled",
+      "implementation_label": "Uncontrolled",
+      "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean"
+    },
+    {
+      "implementation_key": "fixed_freq",
+      "implementation_label": "Fixed Freq",
+      "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-fixed-freq"
+    },
+    {
+      "implementation_key": "steer",
+      "implementation_label": "STEER",
+      "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance"
+    }
+  ],
+  "metrics": [
+    {
+      "metric_key": "average_energy_per_finished_agent_kj",
+      "metric_label": "Average Energy per Finished Agent",
+      "panel_title": "Average Energy per Finished Agent",
+      "metric_unit": "kJ",
+      "y_axis_label": "Energy per Finished Agent (kJ)",
+      "formula": "(power_stats_w.avg * analysis_window_duration_s) / replay_summary.workers_completed / 1000"
+    },
+    {
+      "metric_key": "average_power_w",
+      "metric_label": "Average Power",
+      "panel_title": "Average Power",
+      "metric_unit": "W",
+      "y_axis_label": "Average Power (W)",
+      "formula": "power_stats_w.avg; fallback: mean(power_points[].power_w)"
+    },
+    {
+      "metric_key": "average_context_usage_pct",
+      "metric_label": "Average Context Usage",
+      "panel_title": "Average Context Usage",
+      "metric_unit": "%",
+      "y_axis_label": "Average Context Usage (% of 527,664 tokens)",
+      "formula": "mean(points[].accumulated_value) / 527664 * 100"
+    },
+    {
+      "metric_key": "p5_output_throughput_tokens_per_s",
+      "metric_label": "P5 Output Throughput",
+      "panel_title": "5th Percentile Output Throughput",
+      "metric_unit": "tokens/s",
+      "y_axis_label": "P5 Output Throughput (tokens/s)",
+      "formula": "agent_output_throughput_tokens_per_s_summary.percentiles['5']; fallback: interpolated 5th percentile of agents[].output_throughput_tokens_per_s"
+    },
+    {
+      "metric_key": "average_job_throughput_jobs_per_s",
+      "metric_label": "Average Job Throughput",
+      "panel_title": "Average Job Throughput",
+      "metric_unit": "jobs/s",
+      "y_axis_label": "Average Job Throughput (jobs/s)",
+      "formula": "mean(throughput_points[].throughput_jobs_per_s)"
+    }
+  ],
+  "experiments": [
+    {
+      "experiment_id": "A",
+      "dataset_slug": "swebench-verified",
+      "dataset_label": "swebench-verified",
+      "agent_slug": "mini-swe-agent",
+      "agent_label": "mini-swe-agent",
+      "subplot_title": "A. swebench-verified + mini-swe-agent",
+      "qps": [
+        {
+          "qps_slug": "qps0_04",
+          "qps_value": 0.04,
+          "qps_label": "0.04",
+          "implementations": [
+            {
+              "implementation_key": "uncontrolled",
+              "implementation_label": "Uncontrolled",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean/swebench-verified/mini-swe-agent/split/exclude-unranked/qps0_04/20260413T041049Z",
+              "run_dir_name": "20260413T041049Z",
+              "candidate_run_count": 1,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 8.209776,
+                  "value_raw_j": 8209.776456,
+                  "total_energy_estimate_j": 3694399.4052,
+                  "average_power_w": 342.074019,
+                  "duration_s": 10800.0,
+                  "workers_completed": 450
+                },
+                "average_power_w": {
+                  "value": 342.074019,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 18.540118,
+                  "average_context_tokens": 97829.530267,
+                  "point_count": 10800,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 40.924944,
+                  "sample_count": 454,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.04186,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 8.209776,
+                "average_power_w": 342.074019,
+                "average_context_usage_pct": 18.540118,
+                "p5_output_throughput_tokens_per_s": 40.924944,
+                "average_job_throughput_jobs_per_s": 0.04186
+              }
+            },
+            {
+              "implementation_key": "fixed_freq",
+              "implementation_label": "Fixed Freq",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-fixed-freq",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-fixed-freq/swebench-verified/mini-swe-agent/split/exclude-unranked/qps0_04/20260411T140633Z/core-345-810",
+              "run_dir_name": "core-345-810",
+              "candidate_run_count": 2,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 5.043198,
+                  "value_raw_j": 5043.198211,
+                  "total_energy_estimate_j": 2239180.0056,
+                  "average_power_w": 207.331482,
+                  "duration_s": 10800.0,
+                  "workers_completed": 444
+                },
+                "average_power_w": {
+                  "value": 207.331482,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 28.021074,
+                  "average_context_tokens": 147857.120866,
+                  "point_count": 10800,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 22.009944,
+                  "sample_count": 454,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.041297,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 5.043198,
+                "average_power_w": 207.331482,
+                "average_context_usage_pct": 28.021074,
+                "p5_output_throughput_tokens_per_s": 22.009944,
+                "average_job_throughput_jobs_per_s": 0.041297
+              }
+            },
+            {
+              "implementation_key": "steer",
+              "implementation_label": "STEER",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance/swebench-verified/mini-swe-agent/split/exclude-unranked/qps0_04/20260412T150646Z",
+              "run_dir_name": "20260412T150646Z",
+              "candidate_run_count": 1,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 4.985578,
+                  "value_raw_j": 4985.578235,
+                  "total_energy_estimate_j": 2223567.8928,
+                  "average_power_w": 205.885916,
+                  "duration_s": 10800.0,
+                  "workers_completed": 446
+                },
+                "average_power_w": {
+                  "value": 205.885916,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 25.967022,
+                  "average_context_tokens": 137018.624554,
+                  "point_count": 10800,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 26.386168,
+                  "sample_count": 454,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.041561,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 4.985578,
+                "average_power_w": 205.885916,
+                "average_context_usage_pct": 25.967022,
+                "p5_output_throughput_tokens_per_s": 26.386168,
+                "average_job_throughput_jobs_per_s": 0.041561
+              }
+            }
+          ]
+        },
+        {
+          "qps_slug": "qps0_06",
+          "qps_value": 0.06,
+          "qps_label": "0.06",
+          "implementations": [
+            {
+              "implementation_key": "uncontrolled",
+              "implementation_label": "Uncontrolled",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean/swebench-verified/mini-swe-agent/split/exclude-unranked/qps0_06/20260413T041049Z",
+              "run_dir_name": "20260413T041049Z",
+              "candidate_run_count": 1,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 6.057443,
+                  "value_raw_j": 6057.442822,
+                  "total_energy_estimate_j": 3973682.4912,
+                  "average_power_w": 367.933564,
+                  "duration_s": 10800.0,
+                  "workers_completed": 656
+                },
+                "average_power_w": {
+                  "value": 367.933564,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 27.730057,
+                  "average_context_tokens": 146321.527298,
+                  "point_count": 10800,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 35.697532,
+                  "sample_count": 666,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.061079,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 6.057443,
+                "average_power_w": 367.933564,
+                "average_context_usage_pct": 27.730057,
+                "p5_output_throughput_tokens_per_s": 35.697532,
+                "average_job_throughput_jobs_per_s": 0.061079
+              }
+            },
+            {
+              "implementation_key": "fixed_freq",
+              "implementation_label": "Fixed Freq",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-fixed-freq",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-fixed-freq/swebench-verified/mini-swe-agent/split/exclude-unranked/qps0_06/20260414T131050Z/core-345-810",
+              "run_dir_name": "core-345-810",
+              "candidate_run_count": 2,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 3.695755,
+                  "value_raw_j": 3695.7546,
+                  "total_energy_estimate_j": 2402240.49,
+                  "average_power_w": 222.429675,
+                  "duration_s": 10800.0,
+                  "workers_completed": 650
+                },
+                "average_power_w": {
+                  "value": 222.429675,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 43.860892,
+                  "average_context_tokens": 231438.135665,
+                  "point_count": 10800,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 18.255335,
+                  "sample_count": 665,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.060558,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 3.695755,
+                "average_power_w": 222.429675,
+                "average_context_usage_pct": 43.860892,
+                "p5_output_throughput_tokens_per_s": 18.255335,
+                "average_job_throughput_jobs_per_s": 0.060558
+              }
+            },
+            {
+              "implementation_key": "steer",
+              "implementation_label": "STEER",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance",
+              "run_dir": null,
+              "run_dir_name": null,
+              "candidate_run_count": 0,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 0.0,
+                  "value_raw_j": 0.0,
+                  "total_energy_estimate_j": 0.0,
+                  "average_power_w": 0.0,
+                  "duration_s": 0.0,
+                  "workers_completed": 0
+                },
+                "average_power_w": {
+                  "value": 0.0,
+                  "source": "missing"
+                },
+                "average_context_usage_pct": {
+                  "value": 0.0,
+                  "average_context_tokens": 0.0,
+                  "point_count": 0,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 0.0,
+                  "sample_count": 0,
+                  "source": "missing"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.0,
+                  "sample_count": 0,
+                  "source": "missing"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 0.0,
+                "average_power_w": 0.0,
+                "average_context_usage_pct": 0.0,
+                "p5_output_throughput_tokens_per_s": 0.0,
+                "average_job_throughput_jobs_per_s": 0.0
+              }
+            }
+          ]
+        },
+        {
+          "qps_slug": "qps0_08",
+          "qps_value": 0.08,
+          "qps_label": "0.08",
+          "implementations": [
+            {
+              "implementation_key": "uncontrolled",
+              "implementation_label": "Uncontrolled",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean/swebench-verified/mini-swe-agent/split/exclude-unranked/qps0_08/20260321T143624Z",
+              "run_dir_name": "20260321T143624Z",
+              "candidate_run_count": 1,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 4.591757,
+                  "value_raw_j": 4591.75683,
+                  "total_energy_estimate_j": 4614715.6146,
+                  "average_power_w": 366.247271,
+                  "duration_s": 12600.0,
+                  "workers_completed": 1005
+                },
+                "average_power_w": {
+                  "value": 366.247271,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 41.259336,
+                  "average_context_tokens": 217710.66187,
+                  "point_count": 12600,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 31.009549,
+                  "sample_count": 1009,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.079909,
+                  "sample_count": 12600,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 4.591757,
+                "average_power_w": 366.247271,
+                "average_context_usage_pct": 41.259336,
+                "p5_output_throughput_tokens_per_s": 31.009549,
+                "average_job_throughput_jobs_per_s": 0.079909
+              }
+            },
+            {
+              "implementation_key": "fixed_freq",
+              "implementation_label": "Fixed Freq",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-fixed-freq",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-fixed-freq/swebench-verified/mini-swe-agent/split/exclude-unranked/qps0_08/20260411T140605Z/core-345-810",
+              "run_dir_name": "core-345-810",
+              "candidate_run_count": 2,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 2.963978,
+                  "value_raw_j": 2963.97761,
+                  "total_energy_estimate_j": 2474921.304,
+                  "average_power_w": 229.15938,
+                  "duration_s": 10800.0,
+                  "workers_completed": 835
+                },
+                "average_power_w": {
+                  "value": 229.15938,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 68.792605,
+                  "average_context_tokens": 362993.813111,
+                  "point_count": 10800,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 15.868603,
+                  "sample_count": 861,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.077634,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 2.963978,
+                "average_power_w": 229.15938,
+                "average_context_usage_pct": 68.792605,
+                "p5_output_throughput_tokens_per_s": 15.868603,
+                "average_job_throughput_jobs_per_s": 0.077634
+              }
+            },
+            {
+              "implementation_key": "steer",
+              "implementation_label": "STEER",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance/swebench-verified/mini-swe-agent/split/exclude-unranked/qps0_08/20260412T150646Z",
+              "run_dir_name": "20260412T150646Z",
+              "candidate_run_count": 1,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 3.624769,
+                  "value_raw_j": 3624.769257,
+                  "total_energy_estimate_j": 3073804.3296,
+                  "average_power_w": 284.611512,
+                  "duration_s": 10800.0,
+                  "workers_completed": 848
+                },
+                "average_power_w": {
+                  "value": 284.611512,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 46.799019,
+                  "average_context_tokens": 246941.575137,
+                  "point_count": 10800,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 28.126416,
+                  "sample_count": 861,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.078913,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 3.624769,
+                "average_power_w": 284.611512,
+                "average_context_usage_pct": 46.799019,
+                "p5_output_throughput_tokens_per_s": 28.126416,
+                "average_job_throughput_jobs_per_s": 0.078913
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "experiment_id": "B",
+      "dataset_slug": "dabstep",
+      "dataset_label": "dabstep",
+      "agent_slug": "mini-swe-agent",
+      "agent_label": "mini-swe-agent",
+      "subplot_title": "B. dabstep + mini-swe-agent",
+      "qps": [
+        {
+          "qps_slug": "qps0_03",
+          "qps_value": 0.03,
+          "qps_label": "0.03",
+          "implementations": [
+            {
+              "implementation_key": "uncontrolled",
+              "implementation_label": "Uncontrolled",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean/dabstep/mini-swe-agent/split/exclude-unranked/qps0_03/20260410T142848Z",
+              "run_dir_name": "20260410T142848Z",
+              "candidate_run_count": 1,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 10.970624,
+                  "value_raw_j": 10970.624162,
+                  "total_energy_estimate_j": 3598364.7252,
+                  "average_power_w": 333.181919,
+                  "duration_s": 10800.0,
+                  "workers_completed": 328
+                },
+                "average_power_w": {
+                  "value": 333.181919,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 21.634087,
+                  "average_context_tokens": 114155.286652,
+                  "point_count": 10801,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 45.115374,
+                  "sample_count": 330,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.030224,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 10.970624,
+                "average_power_w": 333.181919,
+                "average_context_usage_pct": 21.634087,
+                "p5_output_throughput_tokens_per_s": 45.115374,
+                "average_job_throughput_jobs_per_s": 0.030224
+              }
+            },
+            {
+              "implementation_key": "fixed_freq",
+              "implementation_label": "Fixed Freq",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-fixed-freq",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-fixed-freq/dabstep/mini-swe-agent/split/exclude-unranked/qps0_03/20260413T034308Z/core-345-810",
+              "run_dir_name": "core-345-810",
+              "candidate_run_count": 5,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 6.806157,
+                  "value_raw_j": 6806.157168,
+                  "total_energy_estimate_j": 2232419.5512,
+                  "average_power_w": 206.705514,
+                  "duration_s": 10800.0,
+                  "workers_completed": 328
+                },
+                "average_power_w": {
+                  "value": 206.705514,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 42.274808,
+                  "average_context_tokens": 223068.943775,
+                  "point_count": 10799,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 19.309585,
+                  "sample_count": 330,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.030228,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 6.806157,
+                "average_power_w": 206.705514,
+                "average_context_usage_pct": 42.274808,
+                "p5_output_throughput_tokens_per_s": 19.309585,
+                "average_job_throughput_jobs_per_s": 0.030228
+              }
+            },
+            {
+              "implementation_key": "steer",
+              "implementation_label": "STEER",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance/dabstep/mini-swe-agent/split/exclude-unranked/qps0_03/20260412T014805Z",
+              "run_dir_name": "20260412T014805Z",
+              "candidate_run_count": 1,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 7.361308,
+                  "value_raw_j": 7361.30756,
+                  "total_energy_estimate_j": 2414508.8796,
+                  "average_power_w": 223.565637,
+                  "duration_s": 10800.0,
+                  "workers_completed": 328
+                },
+                "average_power_w": {
+                  "value": 223.565637,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 29.524691,
+                  "average_context_tokens": 155791.167715,
+                  "point_count": 10799,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 26.106501,
+                  "sample_count": 330,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.030208,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 7.361308,
+                "average_power_w": 223.565637,
+                "average_context_usage_pct": 29.524691,
+                "p5_output_throughput_tokens_per_s": 26.106501,
+                "average_job_throughput_jobs_per_s": 0.030208
+              }
+            }
+          ]
+        },
+        {
+          "qps_slug": "qps0_04",
+          "qps_value": 0.04,
+          "qps_label": "0.04",
+          "implementations": [
+            {
+              "implementation_key": "uncontrolled",
+              "implementation_label": "Uncontrolled",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean/dabstep/mini-swe-agent/split/exclude-unranked/qps0_04/20260412T054925Z",
+              "run_dir_name": "20260412T054925Z",
+              "candidate_run_count": 1,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 8.42813,
+                  "value_raw_j": 8428.129813,
+                  "total_energy_estimate_j": 3758945.8968,
+                  "average_power_w": 348.050546,
+                  "duration_s": 10800.0,
+                  "workers_completed": 446
+                },
+                "average_power_w": {
+                  "value": 348.050546,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 28.350803,
+                  "average_context_tokens": 149596.98092,
+                  "point_count": 10800,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 35.806377,
+                  "sample_count": 452,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.041395,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 8.42813,
+                "average_power_w": 348.050546,
+                "average_context_usage_pct": 28.350803,
+                "p5_output_throughput_tokens_per_s": 35.806377,
+                "average_job_throughput_jobs_per_s": 0.041395
+              }
+            },
+            {
+              "implementation_key": "fixed_freq",
+              "implementation_label": "Fixed Freq",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-fixed-freq",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-fixed-freq/dabstep/mini-swe-agent/split/exclude-unranked/qps0_04/20260413T034308Z/core-345-810",
+              "run_dir_name": "core-345-810",
+              "candidate_run_count": 1,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 7.075282,
+                  "value_raw_j": 7075.282255,
+                  "total_energy_estimate_j": 2723983.668,
+                  "average_power_w": 252.22071,
+                  "duration_s": 10800.0,
+                  "workers_completed": 385
+                },
+                "average_power_w": {
+                  "value": 252.22071,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 117.719913,
+                  "average_context_tokens": 621165.602016,
+                  "point_count": 10799,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 1.273915,
+                  "sample_count": 452,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.03576,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 7.075282,
+                "average_power_w": 252.22071,
+                "average_context_usage_pct": 117.719913,
+                "p5_output_throughput_tokens_per_s": 1.273915,
+                "average_job_throughput_jobs_per_s": 0.03576
+              }
+            },
+            {
+              "implementation_key": "steer",
+              "implementation_label": "STEER",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance/dabstep/mini-swe-agent/split/exclude-unranked/qps0_04/20260412T054715Z",
+              "run_dir_name": "20260412T054715Z",
+              "candidate_run_count": 1,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 6.042275,
+                  "value_raw_j": 6042.275466,
+                  "total_energy_estimate_j": 2688812.5824,
+                  "average_power_w": 248.964128,
+                  "duration_s": 10800.0,
+                  "workers_completed": 445
+                },
+                "average_power_w": {
+                  "value": 248.964128,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 35.931869,
+                  "average_context_tokens": 189599.535393,
+                  "point_count": 10801,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 26.175437,
+                  "sample_count": 452,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.041311,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 6.042275,
+                "average_power_w": 248.964128,
+                "average_context_usage_pct": 35.931869,
+                "p5_output_throughput_tokens_per_s": 26.175437,
+                "average_job_throughput_jobs_per_s": 0.041311
+              }
+            }
+          ]
+        },
+        {
+          "qps_slug": "qps0_05",
+          "qps_value": 0.05,
+          "qps_label": "0.05",
+          "implementations": [
+            {
+              "implementation_key": "uncontrolled",
+              "implementation_label": "Uncontrolled",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean/dabstep/mini-swe-agent/split/exclude-unranked/qps0_05/20260413T140439Z",
+              "run_dir_name": "20260413T140439Z",
+              "candidate_run_count": 2,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 7.2566,
+                  "value_raw_j": 7256.600172,
+                  "total_energy_estimate_j": 3976616.8944,
+                  "average_power_w": 368.205268,
+                  "duration_s": 10800.0,
+                  "workers_completed": 548
+                },
+                "average_power_w": {
+                  "value": 368.205268,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 44.498126,
+                  "average_context_tokens": 234800.589626,
+                  "point_count": 10800,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 28.579751,
+                  "sample_count": 559,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.050691,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 7.2566,
+                "average_power_w": 368.205268,
+                "average_context_usage_pct": 44.498126,
+                "p5_output_throughput_tokens_per_s": 28.579751,
+                "average_job_throughput_jobs_per_s": 0.050691
+              }
+            },
+            {
+              "implementation_key": "fixed_freq",
+              "implementation_label": "Fixed Freq",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-fixed-freq",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-fixed-freq/dabstep/mini-swe-agent/split/exclude-unranked/qps0_05/20260414T001410Z/core-345-810",
+              "run_dir_name": "core-345-810",
+              "candidate_run_count": 2,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 6.224085,
+                  "value_raw_j": 6224.085197,
+                  "total_energy_estimate_j": 2962664.5536,
+                  "average_power_w": 274.320792,
+                  "duration_s": 10800.0,
+                  "workers_completed": 476
+                },
+                "average_power_w": {
+                  "value": 274.320792,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 150.576724,
+                  "average_context_tokens": 794539.16456,
+                  "point_count": 10800,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 1.250338,
+                  "sample_count": 559,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.044218,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 6.224085,
+                "average_power_w": 274.320792,
+                "average_context_usage_pct": 150.576724,
+                "p5_output_throughput_tokens_per_s": 1.250338,
+                "average_job_throughput_jobs_per_s": 0.044218
+              }
+            },
+            {
+              "implementation_key": "steer",
+              "implementation_label": "STEER",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance-ctx-aware",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance-ctx-aware/dabstep/mini-swe-agent/split/exclude-unranked/qps0_05/20260413T235024Z",
+              "run_dir_name": "20260413T235024Z",
+              "candidate_run_count": 1,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 5.790623,
+                  "value_raw_j": 5790.622574,
+                  "total_energy_estimate_j": 3167470.548,
+                  "average_power_w": 293.28431,
+                  "duration_s": 10800.0,
+                  "workers_completed": 547
+                },
+                "average_power_w": {
+                  "value": 293.28431,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 51.765308,
+                  "average_context_tokens": 273146.895115,
+                  "point_count": 10801,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 19.943127,
+                  "sample_count": 559,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.050706,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 5.790623,
+                "average_power_w": 293.28431,
+                "average_context_usage_pct": 51.765308,
+                "p5_output_throughput_tokens_per_s": 19.943127,
+                "average_job_throughput_jobs_per_s": 0.050706
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "experiment_id": "C",
+      "dataset_slug": "terminal-bench-2.0",
+      "dataset_label": "terminal-bench-2.0",
+      "agent_slug": "terminus-2",
+      "agent_label": "terminus-2",
+      "subplot_title": "C. terminal-bench-2.0 + terminus-2",
+      "qps": [
+        {
+          "qps_slug": "qps0_015",
+          "qps_value": 0.015,
+          "qps_label": "0.015",
+          "implementations": [
+            {
+              "implementation_key": "uncontrolled",
+              "implementation_label": "Uncontrolled",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean/terminal-bench-2.0/terminus-2/split/exclude-unranked/qps0_015/20260410T142256Z",
+              "run_dir_name": "20260410T142256Z",
+              "candidate_run_count": 1,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 21.085362,
+                  "value_raw_j": 21085.361834,
+                  "total_energy_estimate_j": 3647767.5972,
+                  "average_power_w": 337.756259,
+                  "duration_s": 10800.0,
+                  "workers_completed": 173
+                },
+                "average_power_w": {
+                  "value": 337.756259,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 27.836459,
+                  "average_context_tokens": 146882.974366,
+                  "point_count": 10800,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 43.902938,
+                  "sample_count": 184,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.01604,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 21.085362,
+                "average_power_w": 337.756259,
+                "average_context_usage_pct": 27.836459,
+                "p5_output_throughput_tokens_per_s": 43.902938,
+                "average_job_throughput_jobs_per_s": 0.01604
+              }
+            },
+            {
+              "implementation_key": "fixed_freq",
+              "implementation_label": "Fixed Freq",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-fixed-freq",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-fixed-freq/terminal-bench-2.0/terminus-2/split/exclude-unranked/qps0_015/20260411T042857Z/core-345-810",
+              "run_dir_name": "core-345-810",
+              "candidate_run_count": 2,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 13.182672,
+                  "value_raw_j": 13182.67215,
+                  "total_energy_estimate_j": 2214688.9212,
+                  "average_power_w": 205.063789,
+                  "duration_s": 10800.0,
+                  "workers_completed": 168
+                },
+                "average_power_w": {
+                  "value": 205.063789,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 43.675103,
+                  "average_context_tokens": 230457.795989,
+                  "point_count": 10801,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 20.308759,
+                  "sample_count": 184,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.015636,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 13.182672,
+                "average_power_w": 205.063789,
+                "average_context_usage_pct": 43.675103,
+                "p5_output_throughput_tokens_per_s": 20.308759,
+                "average_job_throughput_jobs_per_s": 0.015636
+              }
+            },
+            {
+              "implementation_key": "steer",
+              "implementation_label": "STEER",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance/terminal-bench-2.0/terminus-2/split/exclude-unranked/qps0_015/20260412T212001Z",
+              "run_dir_name": "20260412T212001Z",
+              "candidate_run_count": 1,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 14.707421,
+                  "value_raw_j": 14707.420926,
+                  "total_energy_estimate_j": 2514968.9784,
+                  "average_power_w": 232.867498,
+                  "duration_s": 10800.0,
+                  "workers_completed": 171
+                },
+                "average_power_w": {
+                  "value": 232.867498,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 34.027407,
+                  "average_context_tokens": 179550.377756,
+                  "point_count": 10800,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 27.448649,
+                  "sample_count": 184,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.015976,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 14.707421,
+                "average_power_w": 232.867498,
+                "average_context_usage_pct": 34.027407,
+                "p5_output_throughput_tokens_per_s": 27.448649,
+                "average_job_throughput_jobs_per_s": 0.015976
+              }
+            }
+          ]
+        },
+        {
+          "qps_slug": "qps0_02",
+          "qps_value": 0.02,
+          "qps_label": "0.02",
+          "implementations": [
+            {
+              "implementation_key": "uncontrolled",
+              "implementation_label": "Uncontrolled",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean/terminal-bench-2.0/terminus-2/split/exclude-unranked/qps0_02/20260410T033253Z",
+              "run_dir_name": "20260410T033253Z",
+              "candidate_run_count": 1,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 17.846883,
+                  "value_raw_j": 17846.882764,
+                  "total_energy_estimate_j": 3944161.0908,
+                  "average_power_w": 365.200101,
+                  "duration_s": 10800.0,
+                  "workers_completed": 221
+                },
+                "average_power_w": {
+                  "value": 365.200101,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 48.381538,
+                  "average_context_tokens": 255291.958444,
+                  "point_count": 10800,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 32.184088,
+                  "sample_count": 223,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.020394,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 17.846883,
+                "average_power_w": 365.200101,
+                "average_context_usage_pct": 48.381538,
+                "p5_output_throughput_tokens_per_s": 32.184088,
+                "average_job_throughput_jobs_per_s": 0.020394
+              }
+            },
+            {
+              "implementation_key": "fixed_freq",
+              "implementation_label": "Fixed Freq",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-fixed-freq",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-fixed-freq/terminal-bench-2.0/terminus-2/split/exclude-unranked/qps0_02/20260411T042857Z/core-345-810",
+              "run_dir_name": "core-345-810",
+              "candidate_run_count": 2,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 15.285136,
+                  "value_raw_j": 15285.135707,
+                  "total_energy_estimate_j": 2583187.9344,
+                  "average_power_w": 239.184068,
+                  "duration_s": 10800.0,
+                  "workers_completed": 169
+                },
+                "average_power_w": {
+                  "value": 239.184068,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 91.562148,
+                  "average_context_tokens": 483140.490232,
+                  "point_count": 10801,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 1.873824,
+                  "sample_count": 223,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.01562,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 15.285136,
+                "average_power_w": 239.184068,
+                "average_context_usage_pct": 91.562148,
+                "p5_output_throughput_tokens_per_s": 1.873824,
+                "average_job_throughput_jobs_per_s": 0.01562
+              }
+            },
+            {
+              "implementation_key": "steer",
+              "implementation_label": "STEER",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance/terminal-bench-2.0/terminus-2/split/exclude-unranked/qps0_02/20260412T212001Z",
+              "run_dir_name": "20260412T212001Z",
+              "candidate_run_count": 1,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 14.285548,
+                  "value_raw_j": 14285.548407,
+                  "total_energy_estimate_j": 3142820.6496,
+                  "average_power_w": 291.001912,
+                  "duration_s": 10800.0,
+                  "workers_completed": 220
+                },
+                "average_power_w": {
+                  "value": 291.001912,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 52.544659,
+                  "average_context_tokens": 277259.25143,
+                  "point_count": 10800,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 28.623619,
+                  "sample_count": 223,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.020384,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 14.285548,
+                "average_power_w": 291.001912,
+                "average_context_usage_pct": 52.544659,
+                "p5_output_throughput_tokens_per_s": 28.623619,
+                "average_job_throughput_jobs_per_s": 0.020384
+              }
+            }
+          ]
+        },
+        {
+          "qps_slug": "qps0_025",
+          "qps_value": 0.025,
+          "qps_label": "0.025",
+          "implementations": [
+            {
+              "implementation_key": "uncontrolled",
+              "implementation_label": "Uncontrolled",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean/terminal-bench-2.0/terminus-2/split/exclude-unranked/qps0_025/20260410T210213Z",
+              "run_dir_name": "20260410T210213Z",
+              "candidate_run_count": 1,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 14.824324,
+                  "value_raw_j": 14824.323732,
+                  "total_energy_estimate_j": 4047040.3788,
+                  "average_power_w": 374.725961,
+                  "duration_s": 10800.0,
+                  "workers_completed": 273
+                },
+                "average_power_w": {
+                  "value": 374.725961,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 58.945252,
+                  "average_context_tokens": 311032.872206,
+                  "point_count": 10800,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 31.07358,
+                  "sample_count": 283,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.025277,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 14.824324,
+                "average_power_w": 374.725961,
+                "average_context_usage_pct": 58.945252,
+                "p5_output_throughput_tokens_per_s": 31.07358,
+                "average_job_throughput_jobs_per_s": 0.025277
+              }
+            },
+            {
+              "implementation_key": "fixed_freq",
+              "implementation_label": "Fixed Freq",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-fixed-freq",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-fixed-freq/terminal-bench-2.0/terminus-2/split/exclude-unranked/qps0_025/20260411T042857Z/core-345-810",
+              "run_dir_name": "core-345-810",
+              "candidate_run_count": 2,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 14.050459,
+                  "value_raw_j": 14050.459143,
+                  "total_energy_estimate_j": 2655536.778,
+                  "average_power_w": 245.883035,
+                  "duration_s": 10800.0,
+                  "workers_completed": 189
+                },
+                "average_power_w": {
+                  "value": 245.883035,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 121.994337,
+                  "average_context_tokens": 643720.196521,
+                  "point_count": 10800,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 1.263849,
+                  "sample_count": 283,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.017507,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 14.050459,
+                "average_power_w": 245.883035,
+                "average_context_usage_pct": 121.994337,
+                "p5_output_throughput_tokens_per_s": 1.263849,
+                "average_job_throughput_jobs_per_s": 0.017507
+              }
+            },
+            {
+              "implementation_key": "steer",
+              "implementation_label": "STEER",
+              "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance",
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance/terminal-bench-2.0/terminus-2/split/exclude-unranked/qps0_025/20260413T040626Z",
+              "run_dir_name": "20260413T040626Z",
+              "candidate_run_count": 1,
+              "metrics": {
+                "average_energy_per_finished_agent_kj": {
+                  "value": 12.855016,
+                  "value_raw_j": 12855.016218,
+                  "total_energy_estimate_j": 3496564.4112,
+                  "average_power_w": 323.755964,
+                  "duration_s": 10800.0,
+                  "workers_completed": 272
+                },
+                "average_power_w": {
+                  "value": 323.755964,
+                  "source": "power_stats_w.avg"
+                },
+                "average_context_usage_pct": {
+                  "value": 62.992847,
+                  "average_context_tokens": 332390.574286,
+                  "point_count": 10800,
+                  "context_max_tokens": 527664.0
+                },
+                "p5_output_throughput_tokens_per_s": {
+                  "value": 27.88233,
+                  "sample_count": 283,
+                  "source": "summary.percentiles.5"
+                },
+                "average_job_throughput_jobs_per_s": {
+                  "value": 0.025253,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
+                }
+              },
+              "metric_values": {
+                "average_energy_per_finished_agent_kj": 12.855016,
+                "average_power_w": 323.755964,
+                "average_context_usage_pct": 62.992847,
+                "p5_output_throughput_tokens_per_s": 27.88233,
+                "average_job_throughput_jobs_per_s": 0.025253
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "missing_entries": [
+    {
+      "implementation_key": "steer",
+      "implementation_label": "STEER",
+      "experiment_id": "A",
+      "dataset_slug": "swebench-verified",
+      "agent_slug": "mini-swe-agent",
+      "qps_slug": "qps0_06",
+      "scope": "qps-dir",
+      "reason": "QPS directory does not exist",
+      "path": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance/swebench-verified/mini-swe-agent/split/exclude-unranked/qps0_06"
+    }
+  ],
+  "missing_entry_count": 1,
+  "notes": [
+    "Newest timestamp directory is selected for each (implementation, dataset, agent, qps) combination.",
+    "Missing directories, files, or fields are logged and plotted as 0.",
+    "The on-disk terminal benchmark path uses 'terminal-bench-2.0/terminus-2'.",
+    "For experiment B at qps0_05, the STEER run is read from the ctx-aware result root."
+  ],
+  "output_path": "/srv/local/scratch/yichaoy2/work/vllm-otel/figures/energy-context-latency/data/energy-context-latency.json",
+  "missing_log_path": "/srv/local/scratch/yichaoy2/work/vllm-otel/figures/energy-context-latency/data/energy-context-latency.missing.log"
+}

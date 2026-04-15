@@ -204,6 +204,32 @@ def test_extract_run_dir_accepts_amd_slo_decision_logs(
     assert payload["decision_points"][0]["action"] == "increase_for_slo"
 
 
+def test_extract_run_dir_accepts_instance_slo_slo_decision_logs(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "job"
+    _write_replay_summary(run_dir)
+    log_path = _write_slo_decision_log(
+        run_dir,
+        log_dir_name="freq-control-linespace-instance-slo",
+        file_name="freq-controller-ls-instance-slo.slo-decision.20260402T000000Z.jsonl",
+    )
+
+    output_path = extract_run.extract_run_dir(run_dir)
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert output_path.exists()
+    assert payload["slo_decision_log_found"] is True
+    assert payload["source_slo_decision_log_paths"] == [str(log_path.resolve())]
+    assert (
+        payload["source_slo_decision_log_dir_name"]
+        == "freq-control-linespace-instance-slo"
+    )
+    assert payload["slo_decision_point_count"] == 2
+    assert payload["slo_decision_change_count"] == 1
+    assert payload["decision_points"][0]["action"] == "increase_for_slo"
+
+
 def test_discover_run_dirs_with_slo_decision_sources_scans_recursively(
     tmp_path: Path,
 ) -> None:

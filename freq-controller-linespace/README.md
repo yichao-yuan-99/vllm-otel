@@ -51,9 +51,14 @@ Like the baseline controller, GPU targeting stays on the CLI:
 
 - `--port-profile-id`
 - `--gpu-index`
+- `--only-freq-list-geq`
 
 `zeusd.gpu_index` and `zeusd.gpu_indices` are intentionally rejected in TOML so
 the target GPU set is always explicit at launch time.
+
+If `--only-freq-list-geq` is provided, the controller filters
+`frequency_mhz_levels` to values greater than or equal to that MHz threshold
+before computing the initial frequency and linespace segments.
 
 ## Usage
 
@@ -69,6 +74,7 @@ Run directly from CLI arguments:
 freq-controller-linespace \
   --log-dir ./logs \
   --threshold 395784 \
+  --only-freq-list-geq 915 \
   --port-profile-id 0 \
   --gpu-index 0
 ```

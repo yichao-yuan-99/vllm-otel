@@ -25,9 +25,12 @@ from pp_common.service_failure import parse_iso8601_to_utc
 
 DEFAULT_OUTPUT_NAME = "slo-decision-summary.json"
 DEFAULT_LOG_DIR_NAME = "freq-control-linespace"
+AMD_LOG_DIR_NAME = "freq-control-linespace-amd"
+INSTANCE_SLO_LOG_DIR_NAME = "freq-control-linespace-instance-slo"
 SLO_DECISION_LOG_GLOBS = (
     "freq-controller-ls.slo-decision.*.jsonl",
     "freq-controller-ls-amd.slo-decision.*.jsonl",
+    "freq-controller-ls-instance-slo.slo-decision.*.jsonl",
 )
 
 
@@ -154,10 +157,16 @@ def _iter_jsonl_dict_records(path: Path) -> Iterable[dict[str, Any]]:
 
 def _resolve_log_dir_candidates(run_dir: Path) -> list[tuple[str | None, Path]]:
     candidates: list[tuple[str | None, Path]] = []
-    log_dir = (run_dir / DEFAULT_LOG_DIR_NAME).resolve()
-    candidates.append((DEFAULT_LOG_DIR_NAME, log_dir))
+    for log_dir_name in (
+        INSTANCE_SLO_LOG_DIR_NAME,
+        AMD_LOG_DIR_NAME,
+        DEFAULT_LOG_DIR_NAME,
+    ):
+        log_dir = (run_dir / log_dir_name).resolve()
+        if all(existing_path != log_dir for _, existing_path in candidates):
+            candidates.append((log_dir_name, log_dir))
     resolved_run_dir = run_dir.resolve()
-    if resolved_run_dir != log_dir:
+    if all(existing_path != resolved_run_dir for _, existing_path in candidates):
         candidates.append((None, resolved_run_dir))
     return candidates
 

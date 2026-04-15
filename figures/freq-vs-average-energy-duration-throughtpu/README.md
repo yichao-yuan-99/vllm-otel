@@ -1,7 +1,8 @@
-This figure plots GPU core frequency against three windowed metrics using 2
+This figure plots GPU core frequency against four windowed metrics using 2
 subplots:
 
-- Top subplot: average energy cost per finished replay.
+- Top subplot left y-axis: average energy cost per finished replay.
+- Top subplot right y-axis: average power in the selected window.
 - Bottom subplot left y-axis: average throughput.
 - Bottom subplot right y-axis: average time spent in LLM.
 

@@ -28,7 +28,10 @@ Default controller threshold:
 
 Default replay output layout:
 
-- `results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace/<dataset>/<agent>/split/<split>/<qps>/<timestamp>/`
+- default threshold (`395784`):
+  `results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace/<dataset>/<agent>/split/<split>/<qps>/<timestamp>/`
+- non-default threshold:
+  `results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-<threshold>/<dataset>/<agent>/split/<split>/<qps>/<timestamp>/`
 
 Inside each replay output directory, the generated runner writes:
 
@@ -62,6 +65,10 @@ Optional flags:
 
 - `--split-two-group-metric context_usage`
 - `--freq-controller-threshold 395784`
+
+If `--freq-controller-threshold` is non-default and you do not pass
+`--replay-output-root`, the generated replay output root is automatically
+suffixed with that threshold value.
 
 `--split` values are `top`, `rest`, or `exclude-unranked`. `full` is accepted
 as a compatibility alias for `exclude-unranked`.
@@ -109,6 +116,14 @@ the linespace controller logs through the `freq-control-linespace` flow.
 ```bash
 python3 post-process/run_all.py \
   --root-dir results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace
+```
+
+For non-default thresholds, point `--root-dir` at the matching suffixed replay
+root, for example:
+
+```bash
+python3 post-process/run_all.py \
+  --root-dir results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-200
 ```
 
 Each run produces:

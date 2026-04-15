@@ -5,6 +5,7 @@ SLO linespace controller from:
 
 - `freq-control-linespace/freq-controller-ls.slo-decision.*.jsonl`
 - `freq-control-linespace/freq-controller-ls-amd.slo-decision.*.jsonl`
+- `freq-control-linespace-instance-slo/freq-controller-ls-instance-slo.slo-decision.*.jsonl`
 
 For backward compatibility, it also accepts runs where that file was written
 directly at the run root.

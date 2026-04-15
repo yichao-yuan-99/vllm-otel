@@ -12,6 +12,12 @@ from:
 - `freq-control-linespace/freq-controller-ls.query.*.jsonl`
 - `freq-control-linespace/freq-controller-ls.decision.*.jsonl`
 - `freq-control-linespace/freq-controller-ls.control-error.*.jsonl`
+- `freq-control-linespace-instance-slo/freq-controller-ls-instance-slo.query.*.jsonl`
+- `freq-control-linespace-instance-slo/freq-controller-ls-instance-slo.decision.*.jsonl`
+- `freq-control-linespace-instance-slo/freq-controller-ls-instance-slo.control-error.*.jsonl`
+- `freq-control-linespace-instance/freq-controller-ls-instance.query.*.jsonl`
+- `freq-control-linespace-instance/freq-controller-ls-instance.decision.*.jsonl`
+- `freq-control-linespace-instance/freq-controller-ls-instance.control-error.*.jsonl`
 - `freq-control-linespace-amd/freq-controller-ls-amd.query.*.jsonl`
 - `freq-control-linespace-amd/freq-controller-ls-amd.decision.*.jsonl`
 - `freq-control-linespace-amd/freq-controller-ls-amd.control-error.*.jsonl`
@@ -49,7 +55,7 @@ python post-process/freq-control/extract_run.py \
 Default output:
 
 ```text
-<run-dir>/post-processed/<freq-control|freq-control-seg|freq-control-linespace|freq-control-linespace-amd|freq-control-linespace-multi>/freq-control-summary.json
+<run-dir>/post-processed/<freq-control|freq-control-seg|freq-control-linespace|freq-control-linespace-instance-slo|freq-control-linespace-instance|freq-control-linespace-amd|freq-control-linespace-multi>/freq-control-summary.json
 ```
 
 Optional arguments:

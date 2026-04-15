@@ -230,7 +230,8 @@ Pipeline order:
 - `post-process/slo-decision/extract_run.py`
 - purpose: extract SLO-triggered controller decisions from
   `freq-controller-ls.slo-decision.*.jsonl` and
-  `freq-controller-ls-amd.slo-decision.*.jsonl`
+  `freq-controller-ls-amd.slo-decision.*.jsonl` and
+  `freq-controller-ls-instance-slo.slo-decision.*.jsonl`
 - supports:
 - single run: `--run-dir <run-dir>`
 - batch discovery: `--root-dir <root-dir>`
@@ -261,7 +262,7 @@ Pipeline order:
 - parallel workers: `--max-procs`
 - dry-run: `--dry-run`
 - default output:
-- `<run-dir>/post-processed/<freq-control|freq-control-seg|freq-control-linespace|freq-control-linespace-multi>/freq-control-summary.json`
+- `<run-dir>/post-processed/<freq-control|freq-control-seg|freq-control-linespace|freq-control-linespace-instance-slo|freq-control-linespace-instance|freq-control-linespace-amd|freq-control-linespace-multi>/freq-control-summary.json`
 
 - `post-process/visualization/freq-control/generate_all_figures.py`
 - purpose: render a freq-control timeline showing context/query history,
@@ -275,7 +276,7 @@ Pipeline order:
 - `--format`
 - `--dpi`
 - default output:
-- `<run-dir>/post-processed/visualization/<freq-control|freq-control-seg|freq-control-linespace|freq-control-linespace-multi>/`
+- `<run-dir>/post-processed/visualization/<freq-control|freq-control-seg|freq-control-linespace|freq-control-linespace-instance-slo|freq-control-linespace-instance|freq-control-linespace-amd|freq-control-linespace-multi>/`
 
 - `post-process/visualization/job-concurrency/generate_all_figures.py`
 - purpose: render one concurrency line chart per run from extracted job-concurrency timeseries

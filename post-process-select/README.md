@@ -54,7 +54,9 @@ Supported outputs are rewritten in-place to preserve the original post-process s
 - `global-progress`
 - `job-throughput`
 - `job-concurrency`
+- `request-throughput`
 - `gateway/llm-requests`
+- `agent-output-throughput`
 - `gateway/usage`
 - `prefill-concurrency`
 - `split/duration`
@@ -65,7 +67,32 @@ Supported outputs are rewritten in-place to preserve the original post-process s
 - `gateway/stack`
 - `gateway/stack-context`
 - `gateway/stack-kv`
+- `gateway/ctx-aware-log`
+- `gateway/slo-aware-log`
+- `freq-control`
+- `freq-control-seg`
+- `freq-control-linespace`
+- `freq-control-linespace-amd`
+- `freq-control-linespace-multi`
+- `slo-decision`
+- `key-stats`
 
 The selector also writes `selection-summary.json` at the output root with the selected time window plus the written and skipped files.
 
-Visualization outputs are regenerated under `visualization/` in the derived directory rather than copied byte-for-byte from the source tree.
+Visualization outputs are regenerated under `visualization/` in the derived directory rather than copied byte-for-byte from the source tree. Supported regenerated figures currently include:
+
+- `job-throughput`
+- `request-throughput`
+- `agent-output-throughput`
+- `job-concurrency`
+- `prefill-concurrency`
+- `gateway-stack`
+- `gateway-stack-context`
+- `gateway-stack-kv`
+- `stacked-per-agent`
+- `gateway-ctx-aware`
+- `gateway-slo-aware`
+- `vllm-metrics`
+- `power`
+- `freq-control`
+- `slo-decision`

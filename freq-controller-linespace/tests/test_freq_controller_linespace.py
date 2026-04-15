@@ -162,6 +162,32 @@ def test_load_controller_config_supports_no_config_with_cli_override() -> None:
     assert config.target_context_usage_threshold == 12000.0
 
 
+def test_load_controller_config_filters_frequency_list_geq() -> None:
+    config = load_controller_config(
+        None,
+        target_context_usage_threshold=12000,
+        only_freq_list_geq=915,
+    )
+
+    assert config.frequency_mhz_levels == tuple(
+        frequency_mhz
+        for frequency_mhz in DEFAULT_SHARED_FREQUENCY_MHZ_LEVELS
+        if frequency_mhz >= 915
+    )
+
+
+def test_load_controller_config_rejects_empty_frequency_list_after_geq_filter() -> None:
+    with pytest.raises(
+        ValueError,
+        match="--only-freq-list-geq filtered frequency_mhz_levels to an empty list",
+    ):
+        load_controller_config(
+            None,
+            target_context_usage_threshold=12000,
+            only_freq_list_geq=999999,
+        )
+
+
 def test_load_controller_config_uses_shared_threshold_default() -> None:
     config = load_controller_config(None)
 
@@ -233,6 +259,58 @@ def test_load_controller_config_rejects_gpu_targeting_in_toml(
 
     with pytest.raises(ValueError, match="use --gpu-index instead"):
         load_controller_config(config_path)
+
+
+def test_main_passes_only_freq_list_geq_to_run_controller(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    fake_log_paths = controller_module.FrequencyControllerLogPaths(
+        query_path=tmp_path / "query.jsonl",
+        decision_path=tmp_path / "decision.jsonl",
+        control_error_path=tmp_path / "control-error.jsonl",
+    )
+
+    def fake_run_controller(
+        config_path: Path | None,
+        log_dir: Path,
+        *,
+        target_context_usage_threshold: float | None = None,
+        only_freq_list_geq: int | None = None,
+        port_profile_id: int = controller_module.DEFAULT_GATEWAY_PORT_PROFILE_ID,
+        gpu_index: int | tuple[int, ...] | str = controller_module.DEFAULT_GPU_INDEX,
+    ) -> controller_module.FrequencyControllerLogPaths:
+        captured["config_path"] = config_path
+        captured["log_dir"] = log_dir
+        captured["target_context_usage_threshold"] = target_context_usage_threshold
+        captured["only_freq_list_geq"] = only_freq_list_geq
+        captured["port_profile_id"] = port_profile_id
+        captured["gpu_index"] = gpu_index
+        return fake_log_paths
+
+    monkeypatch.setattr(controller_module, "run_controller", fake_run_controller)
+
+    exit_code = controller_module.main(
+        [
+            "--log-dir",
+            str(tmp_path),
+            "--threshold",
+            "395784",
+            "--only-freq-list-geq",
+            "915",
+            "--gpu-index",
+            "2,3",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["config_path"] is None
+    assert captured["log_dir"] == tmp_path
+    assert captured["target_context_usage_threshold"] == 395784.0
+    assert captured["only_freq_list_geq"] == 915
+    assert captured["port_profile_id"] == 0
+    assert captured["gpu_index"] == (2, 3)
 
 
 def test_choose_target_frequency_index_uses_linear_segments() -> None:

@@ -4,7 +4,8 @@
 stack that fronts multiple independent vLLM/Jaeger backend profiles with one
 shared control-plane gateway.
 
-It keeps the same lifecycle, proxy, context tracking, and ctx-aware scheduling
+It keeps the same lifecycle, proxy, context tracking, ctx-aware scheduling, and
+SLO-aware scheduling
 behavior as `gateway_ctx`, but changes the topology:
 
 - only the first configured port profile exposes the public HTTP listeners
@@ -13,6 +14,9 @@ behavior as `gateway_ctx`, but changes the topology:
   - `GET /ctx-aware`
   - `POST /ctx-aware/start`
   - `POST /ctx-aware/end`
+  - `GET /slo-aware`
+  - `POST /slo-aware/start`
+  - `POST /slo-aware/end`
   - `POST /job/start`
   - `POST /job/end`
   - `POST /agent/start`
@@ -33,6 +37,10 @@ behavior as `gateway_ctx`, but changes the topology:
 
 Currently the supported policies are:
 
+- `balanced`: if any backend already has ongoing context usage strictly between
+  `0` and `balanced_usage_threshold_tokens`, assign the new agent to the one
+  with the lowest usage inside that subset; otherwise fall back to
+  `lowest_usage`
 - `round_robin`: assign agents evenly across backend profiles in order
 - `lowest_usage`: assign each incoming agent to the backend with the lowest
   total `context_tokens` across ongoing agents; ties fall back to round-robin
@@ -68,9 +76,13 @@ You can inspect and update the active assignment policy over HTTP:
 
 ```json
 {
-  "assignment_policy": "round_robin"
+  "assignment_policy": "round_robin",
+  "balanced_usage_threshold_tokens": 263856
 }
 ```
+
+`balanced_usage_threshold_tokens` is optional on `POST /policy` and only affects
+the `balanced` policy. If omitted, the gateway keeps the existing threshold.
 
 ## Ctx-Aware Mode
 
@@ -90,6 +102,25 @@ Each backend also writes its own ctx-aware sampler log under the shared job
 output directory:
 
 - `job/ctx_aware_<job_started_at>_profile-<port_profile_id>.jsonl`
+
+## SLO-Aware Mode
+
+The public control profile also exposes the same SLO-aware control endpoints as
+`gateway_ctx`:
+
+- `GET /slo-aware`
+- `POST /slo-aware/start`
+- `POST /slo-aware/end`
+
+`gateway_multi` fans the selected SLO-aware configuration out to every backend
+profile. Like ctx-aware mode, `ralexation` decisions still happen
+independently inside each backend after an agent has been assigned there, and
+`GET /slo-aware` returns both aggregate totals and per-backend summaries.
+
+Each backend also writes its own SLO-aware decision log under the shared job
+output directory:
+
+- `job/slo_aware_decisions_<job_started_at>_profile-<port_profile_id>.jsonl`
 
 Replay result note:
 
@@ -125,6 +156,8 @@ Optional flags:
 ```bash
 python3 -m gateway_multi start --config gateway_multi/config.toml --skip-install
 python3 -m gateway_multi start --config gateway_multi/config.toml --port-profile-id 2 --port-profile-id 3
+python3 -m gateway_multi start --config gateway_multi/config.toml --policy balanced
+python3 -m gateway_multi start --config gateway_multi/config.toml --policy balanced --balanced-usage-threshold-tokens 263856
 python3 -m gateway_multi start --config gateway_multi/config.toml --policy round_robin
 python3 -m gateway_multi start --config gateway_multi/config.toml --policy lowest_usage
 python3 -m gateway_multi start --config gateway_multi/config.toml --policy lowest_profile_without_pending
@@ -139,6 +172,7 @@ Runtime settings live in `gateway_multi/config.toml`:
 
 - `[run].port_profile_ids`
 - `[run].assignment_policy`
+- `[run].balanced_usage_threshold_tokens`
 - `[run].output_root`
 - `[telemetry].service_name`
 - `[telemetry].otlp_traces_insecure`
@@ -156,6 +190,7 @@ Example:
 [run]
 port_profile_ids = [2, 3]
 assignment_policy = "round_robin"
+balanced_usage_threshold_tokens = 263856
 ```
 
 Each backend profile resolves its own `vllm_port`, `jaeger_api_port`, and

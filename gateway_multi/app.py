@@ -36,6 +36,7 @@ from gateway_ctx.app import (
     JobEndRequest,
     JobStartRequest,
     ResponseTransformer,
+    SloAwareStartRequest,
     extract_api_token,
     file_sha256_and_size,
     iso8601_to_compact,
@@ -49,13 +50,13 @@ from gateway_ctx.app import (
 from gateway.model_configs import ModelRegistry, load_model_registry
 from gateway.port_profiles import PortProfile, load_port_profile
 from gateway.reasoning_response_parser import ReasoningResponseParser
-from gateway_multi.runtime_config import GatewayMultiRuntimeSettings
+from gateway_multi.runtime_config import (
+    DEFAULT_BALANCED_USAGE_THRESHOLD_TOKENS,
+    GatewayMultiRuntimeSettings,
+    SUPPORTED_ASSIGNMENT_POLICIES as RUNTIME_SUPPORTED_ASSIGNMENT_POLICIES,
+)
 
-SUPPORTED_ASSIGNMENT_POLICIES = {
-    "round_robin",
-    "lowest_usage",
-    "lowest_profile_without_pending",
-}
+SUPPORTED_ASSIGNMENT_POLICIES = set(RUNTIME_SUPPORTED_ASSIGNMENT_POLICIES)
 
 
 def normalize_assignment_policy(value: str) -> str:
@@ -64,6 +65,14 @@ def normalize_assignment_policy(value: str) -> str:
         supported = ", ".join(sorted(SUPPORTED_ASSIGNMENT_POLICIES))
         raise ValueError(f"assignment policy must be one of: {supported}")
     return normalized
+
+
+def normalize_balanced_usage_threshold_tokens(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("balanced usage threshold tokens must be an integer")
+    if value <= 0:
+        raise ValueError("balanced usage threshold tokens must be > 0")
+    return value
 
 
 def _port_profile_sort_key(profile_id: str) -> tuple[int, int | str, str]:
@@ -257,6 +266,13 @@ class BackendGatewayService(GatewayService):
             agent["backend_port_profile_id"] = self.backend_port_profile_id
         return payload
 
+    def get_slo_aware_summary(self) -> dict[str, Any]:
+        payload = super().get_slo_aware_summary()
+        payload["backend_port_profile_id"] = self.backend_port_profile_id
+        for agent in payload["agents"]:
+            agent["backend_port_profile_id"] = self.backend_port_profile_id
+        return payload
+
     def get_output_throughput_summary(self) -> dict[str, Any]:
         payload = super().get_output_throughput_summary()
         payload["backend_port_profile_id"] = self.backend_port_profile_id
@@ -282,6 +298,19 @@ class BackendGatewayService(GatewayService):
         )
         return job_dir / file_name
 
+    def _job_slo_aware_decision_log_path_for_output(
+        self,
+        output_path: Path,
+        *,
+        job_started_at: str,
+    ) -> Path:
+        job_dir = output_path / CTX_AWARE_JOB_LOG_DIRNAME
+        file_name = (
+            f"slo_aware_decisions_{iso8601_to_compact(job_started_at)}"
+            f"_profile-{self.backend_port_profile_id}.jsonl"
+        )
+        return job_dir / file_name
+
     def end_job(
         self,
         status: str,
@@ -303,6 +332,11 @@ class BackendGatewayService(GatewayService):
             job_log_path = (
                 str(self.ctx_aware_job_log_path)
                 if self.ctx_aware_job_log_path is not None
+                else None
+            )
+            slo_decision_log_path = (
+                str(self.slo_aware_decision_log_path)
+                if self.slo_aware_decision_log_path is not None
                 else None
             )
 
@@ -345,6 +379,7 @@ class BackendGatewayService(GatewayService):
                 "artifact_count": len(artifacts),
                 "artifacts": artifacts,
                 "ctx_aware_job_log_path": job_log_path,
+                "slo_aware_decision_log_path": slo_decision_log_path,
             }
 
     def _write_artifact(
@@ -456,6 +491,7 @@ class BackendBinding:
 
 class AssignmentPolicyRequest(BaseModel):
     assignment_policy: str = Field(min_length=1)
+    balanced_usage_threshold_tokens: int | None = None
 
 
 class GatewayMultiService:
@@ -464,11 +500,15 @@ class GatewayMultiService:
         backends: Sequence[BackendBinding],
         *,
         assignment_policy: str,
+        balanced_usage_threshold_tokens: int = DEFAULT_BALANCED_USAGE_THRESHOLD_TOKENS,
     ) -> None:
         if not backends:
             raise ValueError("gateway_multi requires at least one backend profile")
         self.backends = list(backends)
         self.assignment_policy = normalize_assignment_policy(assignment_policy)
+        self.balanced_usage_threshold_tokens = normalize_balanced_usage_threshold_tokens(
+            balanced_usage_threshold_tokens
+        )
         self._lock = Lock()
         self._next_backend_index = 0
         self._active_backend_by_token: dict[str, BackendBinding] = {}
@@ -496,23 +536,46 @@ class GatewayMultiService:
     def _ctx_aware_enabled_for_all_backends(self) -> bool:
         return all(backend.service.is_ctx_aware_enabled() for backend in self.backends)
 
+    def _backend_ongoing_context_usages(self) -> list[tuple[int, int, BackendBinding]]:
+        return [
+            (backend.service.get_ongoing_context_tokens(), index, backend)
+            for index, backend in enumerate(self.backends)
+        ]
+
+    def _select_lowest_usage_backend(
+        self,
+        backend_usages: Sequence[tuple[int, int, BackendBinding]],
+    ) -> BackendBinding:
+        if not backend_usages:
+            raise ValueError("backend usage candidates must not be empty")
+        lowest_usage = min(usage for usage, _, _ in backend_usages)
+        candidate_indices = {
+            index for usage, index, _ in backend_usages if usage == lowest_usage
+        }
+        start_index = self._next_backend_index % len(self.backends)
+        for offset in range(len(self.backends)):
+            candidate_index = (start_index + offset) % len(self.backends)
+            if candidate_index in candidate_indices:
+                return self.backends[candidate_index]
+        raise RuntimeError("failed to choose a backend from the lowest-usage candidates")
+
     def _select_backend_for_new_agent(self) -> BackendBinding:
         if self.assignment_policy == "round_robin":
             return self.backends[self._next_backend_index % len(self.backends)]
         if self.assignment_policy == "lowest_usage":
-            backend_usages = [
-                (backend.service.get_ongoing_context_tokens(), index, backend)
-                for index, backend in enumerate(self.backends)
+            return self._select_lowest_usage_backend(
+                self._backend_ongoing_context_usages()
+            )
+        if self.assignment_policy == "balanced":
+            backend_usages = self._backend_ongoing_context_usages()
+            active_under_threshold = [
+                item
+                for item in backend_usages
+                if 0 < item[0] < self.balanced_usage_threshold_tokens
             ]
-            lowest_usage = min(usage for usage, _, _ in backend_usages)
-            candidate_indices = {
-                index for usage, index, _ in backend_usages if usage == lowest_usage
-            }
-            start_index = self._next_backend_index % len(self.backends)
-            for offset in range(len(self.backends)):
-                candidate_index = (start_index + offset) % len(self.backends)
-                if candidate_index in candidate_indices:
-                    return self.backends[candidate_index]
+            if active_under_threshold:
+                return self._select_lowest_usage_backend(active_under_threshold)
+            return self._select_lowest_usage_backend(backend_usages)
         if self.assignment_policy == "lowest_profile_without_pending":
             ordered_backends = sorted(
                 self.backends,
@@ -603,13 +666,67 @@ class GatewayMultiService:
             "agents": combined_agents,
         }
 
+    @staticmethod
+    def _round_metric(value: float | None) -> float | None:
+        if value is None:
+            return None
+        return round(value, 6)
+
+    def get_slo_aware_summary(self) -> dict[str, Any]:
+        summaries = [backend.service.get_slo_aware_summary() for backend in self.backends]
+        combined_agents = sorted(
+            [agent for summary in summaries for agent in summary["agents"]],
+            key=lambda agent: (
+                agent.get("run_start_time") or "",
+                str(agent.get("backend_port_profile_id") or ""),
+                agent.get("api_token_hash") or "",
+                agent.get("trace_id") or "",
+            ),
+        )
+        throughput_values = [
+            float(agent["output_tokens_per_s"])
+            for agent in combined_agents
+            if isinstance(agent.get("output_tokens_per_s"), (int, float))
+        ]
+        min_output_tokens_per_s: float | None = None
+        avg_output_tokens_per_s: float | None = None
+        if throughput_values:
+            min_output_tokens_per_s = min(throughput_values)
+            avg_output_tokens_per_s = sum(throughput_values) / len(throughput_values)
+        first = summaries[0]
+        return {
+            "status": "ok",
+            "enabled": first["enabled"],
+            "requires_ctx_aware": True,
+            "ctx_aware_enabled": first["ctx_aware_enabled"],
+            "target_tokens_per_s": first["target_tokens_per_s"],
+            "policy_mode": first["policy_mode"],
+            "ralexation_agent_count": sum(
+                summary["ralexation_agent_count"] for summary in summaries
+            ),
+            "ralexation_effective_context_tokens": sum(
+                summary["ralexation_effective_context_tokens"]
+                for summary in summaries
+            ),
+            "min_output_tokens_per_s": self._round_metric(min_output_tokens_per_s),
+            "avg_output_tokens_per_s": self._round_metric(avg_output_tokens_per_s),
+            "backend_port_profile_ids": [
+                backend.profile.profile_id for backend in self.backends
+            ],
+            "control_port_profile_id": self.control_backend.profile.profile_id,
+            "backends": summaries,
+            "agents": combined_agents,
+        }
+
     def get_policy_summary(self) -> dict[str, Any]:
         with self._lock:
             assignment_policy = self.assignment_policy
+            balanced_usage_threshold_tokens = self.balanced_usage_threshold_tokens
             job_active = self._job_active()
         return {
             "status": "ok",
             "assignment_policy": assignment_policy,
+            "balanced_usage_threshold_tokens": balanced_usage_threshold_tokens,
             "supported_assignment_policies": sorted(SUPPORTED_ASSIGNMENT_POLICIES),
             "job_active": job_active,
             "backend_port_profile_ids": [
@@ -618,12 +735,24 @@ class GatewayMultiService:
             "control_port_profile_id": self.control_backend.profile.profile_id,
         }
 
-    def set_assignment_policy(self, assignment_policy: str) -> dict[str, Any]:
+    def set_assignment_policy(
+        self,
+        assignment_policy: str,
+        *,
+        balanced_usage_threshold_tokens: int | None = None,
+    ) -> dict[str, Any]:
         normalized_policy = normalize_assignment_policy(assignment_policy)
+        normalized_threshold = (
+            normalize_balanced_usage_threshold_tokens(balanced_usage_threshold_tokens)
+            if balanced_usage_threshold_tokens is not None
+            else None
+        )
         with self._lock:
             if self._job_active():
                 raise RuntimeError("assignment policy cannot be changed while a job is active")
             self.assignment_policy = normalized_policy
+            if normalized_threshold is not None:
+                self.balanced_usage_threshold_tokens = normalized_threshold
             self._next_backend_index = 0
         return self.get_policy_summary()
 
@@ -657,9 +786,38 @@ class GatewayMultiService:
             backend.service.end_ctx_aware()
         return self.get_ctx_aware_summary()
 
+    def start_slo_aware(
+        self,
+        *,
+        target_tokens_per_s: float,
+        policy_mode: str,
+    ) -> dict[str, Any]:
+        with self._lock:
+            if self._job_active():
+                raise RuntimeError("slo-aware mode cannot be changed while a job is active")
+            backends = list(self.backends)
+
+        for backend in backends:
+            backend.service.start_slo_aware(
+                target_tokens_per_s=target_tokens_per_s,
+                policy_mode=policy_mode,
+            )
+        return self.get_slo_aware_summary()
+
+    def end_slo_aware(self) -> dict[str, Any]:
+        with self._lock:
+            if self._job_active():
+                raise RuntimeError("slo-aware mode cannot be changed while a job is active")
+            backends = list(self.backends)
+
+        for backend in backends:
+            backend.service.end_slo_aware()
+        return self.get_slo_aware_summary()
+
     def start_job(self, output_location: str) -> dict[str, Any]:
         normalized_output = str(parse_output_location(output_location))
         ctx_aware_job_log_paths: dict[str, str] = {}
+        slo_aware_decision_log_paths: dict[str, str] = {}
         with self._lock:
             if self._job_active():
                 raise RuntimeError("job already active")
@@ -678,6 +836,9 @@ class GatewayMultiService:
                 job_log_path = payload.get("ctx_aware_job_log_path")
                 if isinstance(job_log_path, str):
                     ctx_aware_job_log_paths[backend.profile.profile_id] = job_log_path
+                slo_log_path = payload.get("slo_aware_decision_log_path")
+                if isinstance(slo_log_path, str):
+                    slo_aware_decision_log_paths[backend.profile.profile_id] = slo_log_path
 
         return {
             "status": "ok",
@@ -689,6 +850,7 @@ class GatewayMultiService:
             ],
             "control_port_profile_id": self.control_backend.profile.profile_id,
             "ctx_aware_job_log_paths": ctx_aware_job_log_paths,
+            "slo_aware_decision_log_paths": slo_aware_decision_log_paths,
         }
 
     def start_agent(self, api_token: str) -> dict[str, Any]:
@@ -763,6 +925,7 @@ class GatewayMultiService:
 
         artifacts: list[dict[str, Any]] = []
         ctx_aware_job_log_paths: dict[str, str] = {}
+        slo_aware_decision_log_paths: dict[str, str] = {}
         for backend in backends:
             result = backend.service.end_job(
                 status,
@@ -773,6 +936,9 @@ class GatewayMultiService:
             job_log_path = result.get("ctx_aware_job_log_path")
             if isinstance(job_log_path, str):
                 ctx_aware_job_log_paths[backend.profile.profile_id] = job_log_path
+            slo_log_path = result.get("slo_aware_decision_log_path")
+            if isinstance(slo_log_path, str):
+                slo_aware_decision_log_paths[backend.profile.profile_id] = slo_log_path
 
         with self._lock:
             self._active_backend_by_token = {}
@@ -788,6 +954,7 @@ class GatewayMultiService:
             ],
             "control_port_profile_id": self.control_backend.profile.profile_id,
             "ctx_aware_job_log_paths": ctx_aware_job_log_paths,
+            "slo_aware_decision_log_paths": slo_aware_decision_log_paths,
         }
 
 
@@ -826,6 +993,7 @@ def create_gateway_service(
     return GatewayMultiService(
         bindings,
         assignment_policy=runtime_settings.assignment_policy,
+        balanced_usage_threshold_tokens=runtime_settings.balanced_usage_threshold_tokens,
     )
 
 
@@ -892,7 +1060,10 @@ def create_control_app(
     @app.post("/policy")
     async def policy_update(payload: AssignmentPolicyRequest) -> dict[str, Any]:
         try:
-            return service.set_assignment_policy(payload.assignment_policy)
+            return service.set_assignment_policy(
+                payload.assignment_policy,
+                balanced_usage_threshold_tokens=payload.balanced_usage_threshold_tokens,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RuntimeError as exc:
@@ -915,6 +1086,29 @@ def create_control_app(
     async def ctx_aware_end() -> dict[str, Any]:
         try:
             return service.end_ctx_aware()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/slo-aware")
+    async def slo_aware_status() -> dict[str, Any]:
+        return service.get_slo_aware_summary()
+
+    @app.post("/slo-aware/start")
+    async def slo_aware_start(payload: SloAwareStartRequest) -> dict[str, Any]:
+        try:
+            return service.start_slo_aware(
+                target_tokens_per_s=payload.target_tokens_per_s,
+                policy_mode=payload.policy_mode,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/slo-aware/end")
+    async def slo_aware_end() -> dict[str, Any]:
+        try:
+            return service.end_slo_aware()
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 

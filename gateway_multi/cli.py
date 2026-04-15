@@ -21,8 +21,13 @@ from gateway_multi.app import (
     create_gateway_service,
     create_ipc_app,
     normalize_assignment_policy,
+    normalize_balanced_usage_threshold_tokens,
 )
-from gateway_multi.runtime_config import DEFAULT_CONFIG_PATH, load_runtime_settings
+from gateway_multi.runtime_config import (
+    DEFAULT_BALANCED_USAGE_THRESHOLD_TOKENS,
+    DEFAULT_CONFIG_PATH,
+    load_runtime_settings,
+)
 
 
 app = typer.Typer(
@@ -82,6 +87,7 @@ def _reexec_in_venv(
     venv_dir: Path,
     port_profile_ids: Sequence[int],
     policy: str | None,
+    balanced_usage_threshold_tokens: int | None,
     skip_install: bool,
 ) -> None:
     command = [
@@ -100,6 +106,13 @@ def _reexec_in_venv(
         command.extend(["--port-profile-id", str(port_profile_id)])
     if policy is not None:
         command.extend(["--policy", policy])
+    if balanced_usage_threshold_tokens is not None:
+        command.extend(
+            [
+                "--balanced-usage-threshold-tokens",
+                str(balanced_usage_threshold_tokens),
+            ]
+        )
     if skip_install:
         command.append("--skip-install")
     env = os.environ.copy()
@@ -274,6 +287,7 @@ def _run_gateway(
     host: str,
     port_profile_ids_override: Sequence[int],
     policy_override: str | None,
+    balanced_usage_threshold_tokens_override: int | None,
 ) -> None:
     runtime_settings = load_runtime_settings(config_path)
     if port_profile_ids_override:
@@ -285,6 +299,13 @@ def _run_gateway(
         runtime_settings = replace(
             runtime_settings,
             assignment_policy=normalize_assignment_policy(policy_override),
+        )
+    if balanced_usage_threshold_tokens_override is not None:
+        runtime_settings = replace(
+            runtime_settings,
+            balanced_usage_threshold_tokens=normalize_balanced_usage_threshold_tokens(
+                balanced_usage_threshold_tokens_override
+            ),
         )
 
     profiles = [
@@ -370,8 +391,17 @@ def start(
         None,
         "--policy",
         help=(
-            "Agent assignment policy. Supported values: round_robin, "
+            "Agent assignment policy. Supported values: balanced, round_robin, "
             "lowest_usage, lowest_profile_without_pending."
+        ),
+    ),
+    balanced_usage_threshold_tokens: int | None = typer.Option(
+        None,
+        "--balanced-usage-threshold-tokens",
+        help=(
+            "Context-token threshold used by the balanced assignment policy. "
+            f"Defaults to run.balanced_usage_threshold_tokens or "
+            f"{DEFAULT_BALANCED_USAGE_THRESHOLD_TOKENS}."
         ),
     ),
     skip_install: bool = typer.Option(
@@ -410,6 +440,7 @@ def start(
             venv_dir=venv_dir,
             port_profile_ids=resolved_port_profile_ids,
             policy=policy,
+            balanced_usage_threshold_tokens=balanced_usage_threshold_tokens,
             skip_install=True,
         )
         raise typer.Exit()
@@ -419,6 +450,7 @@ def start(
         host=host,
         port_profile_ids_override=resolved_port_profile_ids,
         policy_override=policy,
+        balanced_usage_threshold_tokens_override=balanced_usage_threshold_tokens,
     )
 
 

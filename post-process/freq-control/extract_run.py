@@ -28,27 +28,39 @@ DEFAULT_OUTPUT_NAME = "freq-control-summary.json"
 DEFAULT_FREQ_CONTROL_LOG_DIR_NAME = "freq-control"
 SEGMENTED_FREQ_CONTROL_LOG_DIR_NAME = "freq-control-seg"
 LINESPACE_FREQ_CONTROL_LOG_DIR_NAME = "freq-control-linespace"
+INSTANCE_SLO_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME = (
+    "freq-control-linespace-instance-slo"
+)
+INSTANCE_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME = "freq-control-linespace-instance"
 AMD_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME = "freq-control-linespace-amd"
 MULTI_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME = "freq-control-linespace-multi"
 QUERY_LOG_GLOBS = (
     "freq-controller.query.*.jsonl",
     "freq-controller-ls.query.*.jsonl",
+    "freq-controller-ls-instance-slo.query.*.jsonl",
+    "freq-controller-ls-instance.query.*.jsonl",
     "freq-controller-ls-amd.query.*.jsonl",
     "freq-controller-ls-multi.query.*.jsonl",
 )
 DECISION_LOG_GLOBS = (
     "freq-controller.decision.*.jsonl",
     "freq-controller-ls.decision.*.jsonl",
+    "freq-controller-ls-instance-slo.decision.*.jsonl",
+    "freq-controller-ls-instance.decision.*.jsonl",
     "freq-controller-ls-amd.decision.*.jsonl",
     "freq-controller-ls-multi.decision.*.jsonl",
 )
 CONTROL_ERROR_LOG_GLOBS = (
     "freq-controller.control-error.*.jsonl",
     "freq-controller-ls.control-error.*.jsonl",
+    "freq-controller-ls-instance-slo.control-error.*.jsonl",
+    "freq-controller-ls-instance.control-error.*.jsonl",
     "freq-controller-ls-amd.control-error.*.jsonl",
     "freq-controller-ls-multi.control-error.*.jsonl",
 )
 LINESPACE_LOG_PREFIX = "freq-controller-ls."
+INSTANCE_SLO_LINESPACE_LOG_PREFIX = "freq-controller-ls-instance-slo."
+INSTANCE_LINESPACE_LOG_PREFIX = "freq-controller-ls-instance."
 AMD_LINESPACE_LOG_PREFIX = "freq-controller-ls-amd."
 MULTI_LINESPACE_LOG_PREFIX = "freq-controller-ls-multi."
 PROFILE_DIR_RE = re.compile(r"^profile-(\d+)$")
@@ -99,6 +111,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             f"<run-dir>/post-processed/freq-control/{DEFAULT_OUTPUT_NAME} or "
             f"<run-dir>/post-processed/freq-control-seg/{DEFAULT_OUTPUT_NAME} or "
             f"<run-dir>/post-processed/freq-control-linespace/{DEFAULT_OUTPUT_NAME} or "
+            f"<run-dir>/post-processed/freq-control-linespace-instance-slo/{DEFAULT_OUTPUT_NAME} or "
+            f"<run-dir>/post-processed/freq-control-linespace-instance/{DEFAULT_OUTPUT_NAME} or "
             f"<run-dir>/post-processed/freq-control-linespace-amd/{DEFAULT_OUTPUT_NAME} or "
             f"<run-dir>/post-processed/freq-control-linespace-multi/{DEFAULT_OUTPUT_NAME}"
         ),
@@ -186,6 +200,16 @@ def _detect_freq_control_layout_name(run_dir: Path) -> str:
     multi_linespace_dir = (run_dir / MULTI_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME).resolve()
     if multi_linespace_dir.exists():
         return MULTI_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
+    instance_slo_linespace_dir = (
+        run_dir / INSTANCE_SLO_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
+    ).resolve()
+    if instance_slo_linespace_dir.exists():
+        return INSTANCE_SLO_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
+    instance_linespace_dir = (
+        run_dir / INSTANCE_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
+    ).resolve()
+    if instance_linespace_dir.exists():
+        return INSTANCE_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
     amd_linespace_dir = (run_dir / AMD_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME).resolve()
     if amd_linespace_dir.exists():
         return AMD_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
@@ -202,6 +226,26 @@ def _detect_freq_control_layout_name(run_dir: Path) -> str:
     )
     if multi_linespace_log_paths:
         return MULTI_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
+    instance_slo_linespace_log_paths, _ = _discover_log_paths(
+        run_dir,
+        (
+            "freq-controller-ls-instance-slo.query.*.jsonl",
+            "freq-controller-ls-instance-slo.decision.*.jsonl",
+            "freq-controller-ls-instance-slo.control-error.*.jsonl",
+        ),
+    )
+    if instance_slo_linespace_log_paths:
+        return INSTANCE_SLO_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
+    instance_linespace_log_paths, _ = _discover_log_paths(
+        run_dir,
+        (
+            "freq-controller-ls-instance.query.*.jsonl",
+            "freq-controller-ls-instance.decision.*.jsonl",
+            "freq-controller-ls-instance.control-error.*.jsonl",
+        ),
+    )
+    if instance_linespace_log_paths:
+        return INSTANCE_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
     amd_linespace_log_paths, _ = _discover_log_paths(
         run_dir,
         (
@@ -233,6 +277,8 @@ def _resolve_log_dir_candidates(run_dir: Path) -> list[tuple[str | None, Path]]:
     for log_dir_name in (
         SEGMENTED_FREQ_CONTROL_LOG_DIR_NAME,
         MULTI_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME,
+        INSTANCE_SLO_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME,
+        INSTANCE_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME,
         AMD_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME,
         LINESPACE_FREQ_CONTROL_LOG_DIR_NAME,
         DEFAULT_FREQ_CONTROL_LOG_DIR_NAME,
@@ -636,6 +682,24 @@ def _build_summary_from_log_paths(
         path.name.startswith(MULTI_LINESPACE_LOG_PREFIX)
         for path in control_error_log_paths
     )
+    instance_slo_linespace_log_detected = any(
+        path.name.startswith(INSTANCE_SLO_LINESPACE_LOG_PREFIX)
+        for path in query_log_paths
+    ) or any(
+        path.name.startswith(INSTANCE_SLO_LINESPACE_LOG_PREFIX)
+        for path in decision_log_paths
+    ) or any(
+        path.name.startswith(INSTANCE_SLO_LINESPACE_LOG_PREFIX)
+        for path in control_error_log_paths
+    )
+    instance_linespace_log_detected = any(
+        path.name.startswith(INSTANCE_LINESPACE_LOG_PREFIX) for path in query_log_paths
+    ) or any(
+        path.name.startswith(INSTANCE_LINESPACE_LOG_PREFIX) for path in decision_log_paths
+    ) or any(
+        path.name.startswith(INSTANCE_LINESPACE_LOG_PREFIX)
+        for path in control_error_log_paths
+    )
     amd_linespace_log_detected = any(
         path.name.startswith(AMD_LINESPACE_LOG_PREFIX) for path in query_log_paths
     ) or any(
@@ -657,9 +721,14 @@ def _build_summary_from_log_paths(
         or segment_count is not None
         or segment_width_context_usage is not None
         or source_freq_control_log_dir_name == LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
+        or source_freq_control_log_dir_name
+        == INSTANCE_SLO_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
+        or source_freq_control_log_dir_name == INSTANCE_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
         or source_freq_control_log_dir_name == AMD_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
         or source_freq_control_log_dir_name == MULTI_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
         or linespace_log_detected
+        or instance_slo_linespace_log_detected
+        or instance_linespace_log_detected
         or amd_linespace_log_detected
         or multi_linespace_log_detected
     )
@@ -671,6 +740,10 @@ def _build_summary_from_log_paths(
         effective_source_freq_control_log_dir_name = (
             MULTI_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
             if multi_linespace_log_detected
+            else INSTANCE_SLO_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
+            if instance_slo_linespace_log_detected
+            else INSTANCE_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
+            if instance_linespace_log_detected
             else AMD_LINESPACE_FREQ_CONTROL_LOG_DIR_NAME
             if amd_linespace_log_detected
             else LINESPACE_FREQ_CONTROL_LOG_DIR_NAME

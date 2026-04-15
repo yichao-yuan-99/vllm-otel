@@ -1,0 +1,3 @@
+Maximum Context Usage Violin Distribution Across Qwen3-Coder-30B Benchmark and Agent Runs
+
+This figure compares per-job maximum context usage for six selected runs under `results/qwen3-coder-30b`, covering three benchmarks and two agent implementations. The violin-plus-boxplot layout makes the full distribution shape, central tendency, and long-context outliers visible at once so benchmark-agent differences in context demand are easy to compare side by side.

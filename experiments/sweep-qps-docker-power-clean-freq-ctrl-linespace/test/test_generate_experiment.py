@@ -255,7 +255,7 @@ def test_main_supports_additional_suffix_and_custom_threshold(tmp_path: Path) ->
         (batch_dir / "qps0_5" / "replay.toml").read_text(encoding="utf-8")
     )
     assert replay_config["replay"]["output_dir"].endswith(
-        "results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace/"
+        "results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-200/"
         f"dataset-a/agent-a/split/exclude-unranked/qps0_5/{batch_timestamp}"
     )
     assert replay_config["replay"]["plan"] == module.path_for_config(expected_plan_copy)
@@ -269,13 +269,67 @@ def test_main_supports_additional_suffix_and_custom_threshold(tmp_path: Path) ->
     assert manifest["selected_plan_copy"] == str(expected_plan_copy)
     assert manifest["freq_controller_threshold"] == 200.0
     assert manifest["qps_points"][0]["freq_controller_log_dir"].endswith(
-        "results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace/"
+        "results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-200/"
         f"dataset-a/agent-a/split/exclude-unranked/qps0_5/{batch_timestamp}/freq-control-linespace"
     )
 
     run_script_text = (batch_dir / "run_replay.sh").read_text(encoding="utf-8")
     assert "DEFAULT_FREQ_CONTROLLER_THRESHOLD=200.0" in run_script_text
     assert "POWER_GPU_INDICES" not in run_script_text
+
+
+def test_main_preserves_explicit_replay_output_root_with_custom_threshold(tmp_path: Path) -> None:
+    module, _, source_run_dir = prepare_module_and_source_run(tmp_path)
+    output_config_dir = tmp_path / "generated"
+    explicit_replay_output_root = tmp_path / "custom-replay-root"
+
+    exit_code = module.main(
+        [
+            "--source-run-dir",
+            str(source_run_dir),
+            "--poisson-seed",
+            "7",
+            "--randomize-seed",
+            "11",
+            "--qps-list",
+            "0.5",
+            "--time-constraint-s",
+            "600",
+            "--target-model",
+            "test_model",
+            "--port-profile",
+            "3",
+            "--split",
+            "full",
+            "--gpu-id",
+            "2",
+            "--freq-controller-threshold",
+            "200",
+            "--replay-output-root",
+            str(explicit_replay_output_root),
+            "--output-config-dir",
+            str(output_config_dir),
+        ]
+    )
+    assert exit_code == 0
+
+    batch_dir = resolve_single_output_batch_dir(output_config_dir)
+    batch_timestamp = batch_dir.name
+
+    replay_config = tomllib.loads(
+        (batch_dir / "qps0_5" / "replay.toml").read_text(encoding="utf-8")
+    )
+    assert replay_config["replay"]["output_dir"] == str(
+        (
+            explicit_replay_output_root
+            / "dataset-a"
+            / "agent-a"
+            / "split"
+            / "exclude-unranked"
+            / "qps0_5"
+            / batch_timestamp
+        ).resolve()
+    )
 
 
 def test_main_rejects_source_run_outside_results(tmp_path: Path) -> None:

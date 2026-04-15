@@ -12,7 +12,9 @@ except ModuleNotFoundError:  # pragma: no cover
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "gateway_multi" / "config.toml"
+DEFAULT_BALANCED_USAGE_THRESHOLD_TOKENS = 263_856
 SUPPORTED_ASSIGNMENT_POLICIES = {
+    "balanced",
     "round_robin",
     "lowest_usage",
     "lowest_profile_without_pending",
@@ -23,6 +25,7 @@ SUPPORTED_ASSIGNMENT_POLICIES = {
 class GatewayMultiRuntimeSettings:
     port_profile_ids: tuple[str, ...] = ("0",)
     assignment_policy: str = "round_robin"
+    balanced_usage_threshold_tokens: int = DEFAULT_BALANCED_USAGE_THRESHOLD_TOKENS
     output_root: str | None = None
     service_name: str = "vllm-gateway-multi"
     otlp_traces_insecure: bool = True
@@ -82,6 +85,16 @@ def _parse_float(value: object, key: str, *, default: float) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{key} must be a number")
     return float(value)
+
+
+def _parse_positive_int(value: object, key: str, *, default: int) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{key} must be an integer")
+    if value <= 0:
+        raise ValueError(f"{key} must be > 0")
+    return value
 
 
 def _parse_octal_permissions(value: object, key: str, *, default: int) -> int:
@@ -172,6 +185,11 @@ def load_runtime_settings(
             )
             or "round_robin",
             "run.assignment_policy",
+        ),
+        balanced_usage_threshold_tokens=_parse_positive_int(
+            run_table.get("balanced_usage_threshold_tokens"),
+            "run.balanced_usage_threshold_tokens",
+            default=DEFAULT_BALANCED_USAGE_THRESHOLD_TOKENS,
         ),
         output_root=_parse_optional_str(run_table.get("output_root"), "run.output_root"),
         service_name=_parse_optional_str(

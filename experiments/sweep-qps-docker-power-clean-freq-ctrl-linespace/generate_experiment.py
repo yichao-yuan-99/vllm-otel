@@ -28,8 +28,9 @@ DEFAULT_OUTPUT_CONFIG_DIR = (
     / "sweep-qps-docker-power-clean-freq-ctrl-linespace"
     / "generated"
 )
+DEFAULT_REPLAY_OUTPUT_ROOT_NAME = "sweep-qps-docker-power-clean-freq-ctrl-linespace"
 DEFAULT_REPLAY_OUTPUT_ROOT = (
-    Path("results") / "replay" / "sweep-qps-docker-power-clean-freq-ctrl-linespace"
+    Path("results") / "replay" / DEFAULT_REPLAY_OUTPUT_ROOT_NAME
 )
 MODEL_CONFIG_PATH = REPO_ROOT / "configs" / "model_config.toml"
 EXPERIMENT_DIR_NAME = "sweep-qps-docker-power-clean-freq-ctrl-linespace"
@@ -163,6 +164,26 @@ def path_for_config(path: Path) -> str:
         return str(path.resolve().relative_to(REPO_ROOT))
     except ValueError:
         return str(path.resolve())
+
+
+def _cli_option_provided(argv: list[str] | None, option_name: str) -> bool:
+    raw_tokens = sys.argv[1:] if argv is None else list(argv)
+    return any(token == option_name or token.startswith(f"{option_name}=") for token in raw_tokens)
+
+
+def format_freq_controller_threshold_path_component(threshold: float) -> str:
+    text = f"{threshold:.12f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def default_replay_output_root_for_threshold(threshold: float) -> Path:
+    root_name = DEFAULT_REPLAY_OUTPUT_ROOT_NAME
+    if threshold != DEFAULT_FREQ_CONTROLLER_THRESHOLD:
+        root_name = (
+            f"{DEFAULT_REPLAY_OUTPUT_ROOT_NAME}-"
+            f"{format_freq_controller_threshold_path_component(threshold)}"
+        )
+    return Path("results") / "replay" / root_name
 
 
 def derive_dataset_lineage_from_source_run_dir(source_run_dir: Path) -> Path:
@@ -613,8 +634,11 @@ def build_parser() -> argparse.ArgumentParser:
             "Replay output root. Default appends "
             "<dataset-lineage>/split/<split>/<qps>/<timestamp> under "
             "results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace/. "
-            "dataset-lineage is inferred from --source-run-dir by dropping "
-            "the first (<model>) and last (<run-dir>) path segments."
+            "When --freq-controller-threshold differs from its default and this "
+            "flag is not provided, the root name becomes "
+            "results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-<threshold>/. "
+            "dataset-lineage is inferred from --source-run-dir by dropping the "
+            "first (<model>) and last (<run-dir>) path segments."
         ),
     )
     return parser
@@ -664,7 +688,11 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         output_config_root = Path(args.output_config_dir).expanduser().resolve()
-        replay_output_root = Path(args.replay_output_root).expanduser()
+        replay_output_root_raw = str(args.replay_output_root)
+        if _cli_option_provided(argv, "--replay-output-root"):
+            replay_output_root = Path(replay_output_root_raw).expanduser()
+        else:
+            replay_output_root = default_replay_output_root_for_threshold(threshold_value)
         if not replay_output_root.is_absolute():
             replay_output_root = (REPO_ROOT / replay_output_root).resolve()
         else:

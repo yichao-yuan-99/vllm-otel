@@ -1,0 +1,24 @@
+[project]
+name = "freq-controller-linespace-instance"
+version = "0.1.0"
+description = "Linespace instance GPU frequency controller driven by gateway context usage"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "zeus",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0,<9.0.0",
+]
+
+[project.scripts]
+freq-controller-linespace-instance = "freq_controller_linespace_instance:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["freq_controller_linespace_instance"]

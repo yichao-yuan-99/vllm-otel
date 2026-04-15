@@ -13,6 +13,8 @@ DEFAULT_INPUT_NAME = "freq-control-summary.json"
 SEGMENTED_INPUT_DIR_NAME = "freq-control-seg"
 MULTI_LINESPACE_INPUT_DIR_NAME = "freq-control-linespace-multi"
 AMD_LINESPACE_INPUT_DIR_NAME = "freq-control-linespace-amd"
+INSTANCE_SLO_LINESPACE_INPUT_DIR_NAME = "freq-control-linespace-instance-slo"
+INSTANCE_LINESPACE_INPUT_DIR_NAME = "freq-control-linespace-instance"
 LINESPACE_INPUT_DIR_NAME = "freq-control-linespace"
 BASELINE_INPUT_DIR_NAME = "freq-control"
 DEFAULT_MANIFEST_NAME = "figures-manifest.json"
@@ -52,6 +54,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "or post-processed/freq-control-seg/ or "
             "post-processed/freq-control-linespace-multi/ or "
             "post-processed/freq-control-linespace-amd/ or "
+            "post-processed/freq-control-linespace-instance-slo/ or "
+            "post-processed/freq-control-linespace-instance/ or "
             "post-processed/freq-control-linespace/."
         ),
     )
@@ -64,6 +68,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "post-processed/freq-control-seg/freq-control-summary.json or "
             "post-processed/freq-control-linespace-multi/freq-control-summary.json or "
             "post-processed/freq-control-linespace-amd/freq-control-summary.json or "
+            "post-processed/freq-control-linespace-instance-slo/freq-control-summary.json or "
+            "post-processed/freq-control-linespace-instance/freq-control-summary.json or "
             "post-processed/freq-control-linespace/freq-control-summary.json will be processed."
         ),
     )
@@ -75,6 +81,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             f"<run-dir>/post-processed/freq-control-seg/{DEFAULT_INPUT_NAME} "
             f"if present, else <run-dir>/post-processed/freq-control-linespace-multi/{DEFAULT_INPUT_NAME} "
             f"if present, else <run-dir>/post-processed/freq-control-linespace-amd/{DEFAULT_INPUT_NAME} "
+            f"if present, else <run-dir>/post-processed/freq-control-linespace-instance-slo/{DEFAULT_INPUT_NAME} "
+            f"if present, else <run-dir>/post-processed/freq-control-linespace-instance/{DEFAULT_INPUT_NAME} "
             f"if present, else <run-dir>/post-processed/freq-control-linespace/{DEFAULT_INPUT_NAME} "
             f"if present, else <run-dir>/post-processed/freq-control/{DEFAULT_INPUT_NAME}"
         ),
@@ -136,6 +144,18 @@ def _candidate_freq_control_input_paths_for_run(run_dir: Path) -> list[Path]:
             / AMD_LINESPACE_INPUT_DIR_NAME
             / DEFAULT_INPUT_NAME
         ).resolve(),
+        (
+            run_dir
+            / "post-processed"
+            / INSTANCE_SLO_LINESPACE_INPUT_DIR_NAME
+            / DEFAULT_INPUT_NAME
+        ).resolve(),
+        (
+            run_dir
+            / "post-processed"
+            / INSTANCE_LINESPACE_INPUT_DIR_NAME
+            / DEFAULT_INPUT_NAME
+        ).resolve(),
         (run_dir / "post-processed" / LINESPACE_INPUT_DIR_NAME / DEFAULT_INPUT_NAME).resolve(),
         (run_dir / "post-processed" / BASELINE_INPUT_DIR_NAME / DEFAULT_INPUT_NAME).resolve(),
     ]
@@ -156,6 +176,10 @@ def _summary_dir_name_for_input_path(freq_control_input_path: Path) -> str:
         return MULTI_LINESPACE_INPUT_DIR_NAME
     if parent_name == AMD_LINESPACE_INPUT_DIR_NAME:
         return AMD_LINESPACE_INPUT_DIR_NAME
+    if parent_name == INSTANCE_SLO_LINESPACE_INPUT_DIR_NAME:
+        return INSTANCE_SLO_LINESPACE_INPUT_DIR_NAME
+    if parent_name == INSTANCE_LINESPACE_INPUT_DIR_NAME:
+        return INSTANCE_LINESPACE_INPUT_DIR_NAME
     if parent_name == LINESPACE_INPUT_DIR_NAME:
         return LINESPACE_INPUT_DIR_NAME
     return BASELINE_INPUT_DIR_NAME
@@ -176,6 +200,8 @@ def discover_run_dirs_with_freq_control_summary(root_dir: Path) -> list[Path]:
             SEGMENTED_INPUT_DIR_NAME,
             MULTI_LINESPACE_INPUT_DIR_NAME,
             AMD_LINESPACE_INPUT_DIR_NAME,
+            INSTANCE_SLO_LINESPACE_INPUT_DIR_NAME,
+            INSTANCE_LINESPACE_INPUT_DIR_NAME,
             LINESPACE_INPUT_DIR_NAME,
         }:
             continue
@@ -457,6 +483,8 @@ def _build_profile_payload(
         or segment_width_context_usage is not None
         or source_freq_control_log_dir_name in {
             LINESPACE_INPUT_DIR_NAME,
+            INSTANCE_SLO_LINESPACE_INPUT_DIR_NAME,
+            INSTANCE_LINESPACE_INPUT_DIR_NAME,
             AMD_LINESPACE_INPUT_DIR_NAME,
             MULTI_LINESPACE_INPUT_DIR_NAME,
         }

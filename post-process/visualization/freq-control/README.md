@@ -2,7 +2,11 @@ This directory contains figure-generation scripts for post-processed
 freq-control summary output. It supports both baseline summaries under
 `post-processed/freq-control/`, linespace-controller summaries under
 `post-processed/freq-control-linespace/`, AMD linespace-controller summaries
-under `post-processed/freq-control-linespace-amd/`, multi-GPU
+under `post-processed/freq-control-linespace-amd/`, instance-aware
+linespace-instance-slo summaries under
+`post-processed/freq-control-linespace-instance-slo/`, instance-aware
+linespace-controller summaries under
+`post-processed/freq-control-linespace-instance/`, multi-GPU
 linespace-controller summaries under
 `post-processed/freq-control-linespace-multi/`, and segmented-controller
 summaries under `post-processed/freq-control-seg/`.
@@ -39,6 +43,8 @@ Input file (default):
 - `<run-dir>/post-processed/freq-control-seg/freq-control-summary.json` if present
 - otherwise `<run-dir>/post-processed/freq-control-linespace-multi/freq-control-summary.json` if present
 - otherwise `<run-dir>/post-processed/freq-control-linespace-amd/freq-control-summary.json` if present
+- otherwise `<run-dir>/post-processed/freq-control-linespace-instance-slo/freq-control-summary.json` if present
+- otherwise `<run-dir>/post-processed/freq-control-linespace-instance/freq-control-summary.json` if present
 - otherwise `<run-dir>/post-processed/freq-control-linespace/freq-control-summary.json` if present
 - otherwise `<run-dir>/post-processed/freq-control/freq-control-summary.json`
 
@@ -52,7 +58,7 @@ python post-process/visualization/freq-control/generate_all_figures.py \
 Default output directory:
 
 ```text
-<run-dir>/post-processed/visualization/<freq-control|freq-control-seg|freq-control-linespace|freq-control-linespace-amd|freq-control-linespace-multi>/
+<run-dir>/post-processed/visualization/<freq-control|freq-control-seg|freq-control-linespace|freq-control-linespace-instance-slo|freq-control-linespace-instance|freq-control-linespace-amd|freq-control-linespace-multi>/
 ```
 
 It writes:
@@ -81,6 +87,8 @@ Discovery rule:
   - `post-processed/freq-control/freq-control-summary.json`
   - or `post-processed/freq-control-linespace-multi/freq-control-summary.json`
   - or `post-processed/freq-control-linespace-amd/freq-control-summary.json`
+  - or `post-processed/freq-control-linespace-instance-slo/freq-control-summary.json`
+  - or `post-processed/freq-control-linespace-instance/freq-control-summary.json`
   - or `post-processed/freq-control-linespace/freq-control-summary.json`
   - or `post-processed/freq-control-seg/freq-control-summary.json`
 

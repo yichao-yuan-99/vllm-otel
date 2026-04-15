@@ -29,7 +29,11 @@ from gateway_multi.cli import (
     _default_ipc_socket_path,
     _resolve_ipc_socket_path,
 )
-from gateway_multi.runtime_config import GatewayMultiRuntimeSettings, load_runtime_settings
+from gateway_multi.runtime_config import (
+    DEFAULT_BALANCED_USAGE_THRESHOLD_TOKENS,
+    GatewayMultiRuntimeSettings,
+    load_runtime_settings,
+)
 
 
 def load_artifact_json(artifact_path: Path, member_name: str) -> dict[str, Any]:
@@ -45,10 +49,12 @@ def build_multi_clients(
     *,
     profile_ids: tuple[str, ...] = ("0", "1"),
     assignment_policy: str = "round_robin",
+    balanced_usage_threshold_tokens: int = DEFAULT_BALANCED_USAGE_THRESHOLD_TOKENS,
 ) -> tuple[TestClient, dict[str, TestClient], GatewayMultiService]:
     runtime_settings = GatewayMultiRuntimeSettings(
         port_profile_ids=profile_ids,
         assignment_policy=assignment_policy,
+        balanced_usage_threshold_tokens=balanced_usage_threshold_tokens,
         artifact_compression="none",
         job_end_trace_wait_seconds=0.0,
         service_name="gateway-multi-test",
@@ -117,7 +123,11 @@ def build_multi_clients(
         )
         bindings.append(BackendBinding(profile=profile, service=backend_service))
 
-    multi_service = GatewayMultiService(bindings, assignment_policy=assignment_policy)
+    multi_service = GatewayMultiService(
+        bindings,
+        assignment_policy=assignment_policy,
+        balanced_usage_threshold_tokens=balanced_usage_threshold_tokens,
+    )
     control_profile = bindings[0].profile
     control_client = TestClient(
         create_control_app(
@@ -248,6 +258,102 @@ def test_lowest_usage_assignment_uses_ongoing_context_usage(tmp_path: Path) -> N
     assert third.status_code == 200
     assert third.json()["assignment_policy"] == "lowest_usage"
     assert third.json()["backend_port_profile_id"] == "0"
+
+
+def test_balanced_assignment_prefers_lightly_used_active_backends_over_idle_ones(
+    tmp_path: Path,
+) -> None:
+    control_client, _, _ = build_multi_clients(
+        profile_ids=("0", "1", "2"),
+        assignment_policy="balanced",
+        balanced_usage_threshold_tokens=300,
+    )
+    output_dir = tmp_path / "balanced-prefers-active"
+
+    response = control_client.post("/job/start", json={"output_location": str(output_dir)})
+    assert response.status_code == 200
+    assert response.json()["assignment_policy"] == "balanced"
+
+    first = control_client.post("/agent/start", json={"api_token": "token-a"})
+    second = control_client.post("/agent/start", json={"api_token": "token-b"})
+    third = control_client.post("/agent/start", json={"api_token": "token-c"})
+    assert [first.json()["backend_port_profile_id"], second.json()["backend_port_profile_id"], third.json()["backend_port_profile_id"]] == [
+        "0",
+        "1",
+        "2",
+    ]
+
+    assert control_client.post(
+        "/v1/chat/completions",
+        headers={"x-api-key": "token-a"},
+        json={
+            "model": "Qwen3-Coder-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "hi"}],
+            "test_usage": {"prompt_tokens": 100, "completion_tokens": 10},
+        },
+    ).status_code == 200
+    assert control_client.post(
+        "/v1/chat/completions",
+        headers={"x-api-key": "token-b"},
+        json={
+            "model": "Qwen3-Coder-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "hi"}],
+            "test_usage": {"prompt_tokens": 200, "completion_tokens": 5},
+        },
+    ).status_code == 200
+
+    fourth = control_client.post("/agent/start", json={"api_token": "token-d"})
+    assert fourth.status_code == 200
+    assert fourth.json()["assignment_policy"] == "balanced"
+    assert fourth.json()["backend_port_profile_id"] == "0"
+
+
+def test_balanced_assignment_falls_back_to_lowest_usage_when_no_backend_is_under_threshold(
+    tmp_path: Path,
+) -> None:
+    control_client, _, _ = build_multi_clients(
+        profile_ids=("0", "1", "2"),
+        assignment_policy="balanced",
+        balanced_usage_threshold_tokens=100,
+    )
+    output_dir = tmp_path / "balanced-fallback"
+
+    response = control_client.post("/job/start", json={"output_location": str(output_dir)})
+    assert response.status_code == 200
+    assert response.json()["assignment_policy"] == "balanced"
+
+    first = control_client.post("/agent/start", json={"api_token": "token-a"})
+    second = control_client.post("/agent/start", json={"api_token": "token-b"})
+    third = control_client.post("/agent/start", json={"api_token": "token-c"})
+    assert [first.json()["backend_port_profile_id"], second.json()["backend_port_profile_id"], third.json()["backend_port_profile_id"]] == [
+        "0",
+        "1",
+        "2",
+    ]
+
+    assert control_client.post(
+        "/v1/chat/completions",
+        headers={"x-api-key": "token-a"},
+        json={
+            "model": "Qwen3-Coder-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "hi"}],
+            "test_usage": {"prompt_tokens": 100, "completion_tokens": 10},
+        },
+    ).status_code == 200
+    assert control_client.post(
+        "/v1/chat/completions",
+        headers={"x-api-key": "token-b"},
+        json={
+            "model": "Qwen3-Coder-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "hi"}],
+            "test_usage": {"prompt_tokens": 200, "completion_tokens": 5},
+        },
+    ).status_code == 200
+
+    fourth = control_client.post("/agent/start", json={"api_token": "token-d"})
+    assert fourth.status_code == 200
+    assert fourth.json()["assignment_policy"] == "balanced"
+    assert fourth.json()["backend_port_profile_id"] == "2"
 
 
 def test_lowest_profile_without_pending_prefers_lowest_profile_and_pending_fallback(
@@ -475,6 +581,108 @@ def test_ctx_aware_control_propagates_to_all_backends(tmp_path: Path) -> None:
     assert disabled.json()["policy_mode"] == "age"
 
 
+def test_slo_aware_control_propagates_to_all_backends(tmp_path: Path) -> None:
+    control_client, ipc_clients, _ = build_multi_clients()
+    output_dir = tmp_path / "slo-aware-multi"
+
+    response = control_client.get("/slo-aware")
+    assert response.status_code == 200
+    assert response.json()["enabled"] is False
+    assert response.json()["target_tokens_per_s"] is None
+    assert response.json()["policy_mode"] is None
+    assert response.json()["backend_port_profile_ids"] == ["0", "1"]
+
+    requires_ctx = control_client.post(
+        "/slo-aware/start",
+        json={
+            "target_tokens_per_s": 25.0,
+            "policy_mode": "push-back-half-slack",
+        },
+    )
+    assert requires_ctx.status_code == 409
+    assert "ctx-aware" in requires_ctx.json()["detail"]
+
+    assert control_client.post(
+        "/ctx-aware/start",
+        json={
+            "usage_threshold_tokens": 9000,
+            "scheduling_threshold_tokens": 6000,
+        },
+    ).status_code == 200
+
+    invalid_policy = control_client.post(
+        "/slo-aware/start",
+        json={
+            "target_tokens_per_s": 25.0,
+            "policy_mode": "fastest",
+        },
+    )
+    assert invalid_policy.status_code == 400
+    assert "policy_mode" in invalid_policy.json()["detail"]
+
+    response = control_client.post(
+        "/slo-aware/start",
+        json={
+            "target_tokens_per_s": 25.0,
+            "policy_mode": "push-back-half-slack",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["enabled"] is True
+    assert payload["requires_ctx_aware"] is True
+    assert payload["ctx_aware_enabled"] is True
+    assert payload["target_tokens_per_s"] == 25.0
+    assert payload["policy_mode"] == "push-back-half-slack"
+    assert payload["ralexation_agent_count"] == 0
+    assert payload["ralexation_effective_context_tokens"] == 0
+    assert len(payload["backends"]) == 2
+    assert {backend["backend_port_profile_id"] for backend in payload["backends"]} == {"0", "1"}
+    assert all(backend["enabled"] is True for backend in payload["backends"])
+
+    response = control_client.post("/job/start", json={"output_location": str(output_dir)})
+    assert response.status_code == 200
+    assert set(response.json()["ctx_aware_job_log_paths"]) == {"0", "1"}
+    assert set(response.json()["slo_aware_decision_log_paths"]) == {"0", "1"}
+    assert len(set(response.json()["slo_aware_decision_log_paths"].values())) == 2
+
+    assert control_client.post(
+        "/slo-aware/start",
+        json={
+            "target_tokens_per_s": 30.0,
+            "policy_mode": "push-back-half-slack",
+        },
+    ).status_code == 409
+    assert control_client.post("/slo-aware/end").status_code == 409
+
+    ipc_first = ipc_clients["0"].get("/ipc/context")
+    assert ipc_first.status_code == 200
+    assert ipc_first.json()["slo_aware_enabled"] is True
+    assert ipc_first.json()["slo_target_tokens_per_s"] == 25.0
+    assert ipc_first.json()["slo_policy_mode"] == "push-back-half-slack"
+
+    response = control_client.post("/job/end", json={"status": "completed"})
+    assert response.status_code == 200
+    assert set(response.json()["ctx_aware_job_log_paths"]) == {"0", "1"}
+    assert set(response.json()["slo_aware_decision_log_paths"]) == {"0", "1"}
+    assert len(set(response.json()["slo_aware_decision_log_paths"].values())) == 2
+    for log_path in response.json()["slo_aware_decision_log_paths"].values():
+        assert Path(log_path).exists()
+
+    persisted = control_client.get("/slo-aware")
+    assert persisted.status_code == 200
+    assert persisted.json()["enabled"] is True
+    assert persisted.json()["target_tokens_per_s"] == 25.0
+    assert persisted.json()["policy_mode"] == "push-back-half-slack"
+
+    assert control_client.post("/ctx-aware/end").status_code == 200
+    disabled = control_client.get("/slo-aware")
+    assert disabled.status_code == 200
+    assert disabled.json()["enabled"] is False
+    assert disabled.json()["target_tokens_per_s"] is None
+    assert disabled.json()["policy_mode"] is None
+
+
 def test_policy_endpoint_only_allows_changes_when_no_job_is_running(tmp_path: Path) -> None:
     control_client, _, _ = build_multi_clients()
     output_dir = tmp_path / "policy-multi"
@@ -484,7 +692,9 @@ def test_policy_endpoint_only_allows_changes_when_no_job_is_running(tmp_path: Pa
     assert status.json() == {
         "status": "ok",
         "assignment_policy": "round_robin",
+        "balanced_usage_threshold_tokens": DEFAULT_BALANCED_USAGE_THRESHOLD_TOKENS,
         "supported_assignment_policies": [
+            "balanced",
             "lowest_profile_without_pending",
             "lowest_usage",
             "round_robin",
@@ -496,10 +706,14 @@ def test_policy_endpoint_only_allows_changes_when_no_job_is_running(tmp_path: Pa
 
     updated = control_client.post(
         "/policy",
-        json={"assignment_policy": "lowest_usage"},
+        json={
+            "assignment_policy": "balanced",
+            "balanced_usage_threshold_tokens": 4000,
+        },
     )
     assert updated.status_code == 200
-    assert updated.json()["assignment_policy"] == "lowest_usage"
+    assert updated.json()["assignment_policy"] == "balanced"
+    assert updated.json()["balanced_usage_threshold_tokens"] == 4000
     assert updated.json()["job_active"] is False
 
     invalid = control_client.post(
@@ -546,6 +760,27 @@ def test_runtime_settings_accept_lowest_usage_policy(tmp_path: Path) -> None:
 
     settings = load_runtime_settings(config_path, allow_missing=False)
     assert settings.assignment_policy == "lowest_usage"
+
+
+def test_runtime_settings_accept_balanced_policy_and_threshold(tmp_path: Path) -> None:
+    config_path = tmp_path / "gateway-multi-balanced.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "schema_version = 1",
+                "",
+                "[run]",
+                'port_profile_ids = [0, 1]',
+                'assignment_policy = "balanced"',
+                "balanced_usage_threshold_tokens = 123456",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_runtime_settings(config_path, allow_missing=False)
+    assert settings.assignment_policy == "balanced"
+    assert settings.balanced_usage_threshold_tokens == 123456
 
 
 def test_runtime_settings_accept_lowest_profile_without_pending_policy(
@@ -726,6 +961,7 @@ def test_runtime_settings_and_ipc_path_resolution(tmp_path: Path) -> None:
     settings = load_runtime_settings(config_path, allow_missing=False)
     assert settings.port_profile_ids == ("2", "3")
     assert settings.assignment_policy == "round_robin"
+    assert settings.balanced_usage_threshold_tokens == DEFAULT_BALANCED_USAGE_THRESHOLD_TOKENS
     assert settings.output_root == "./artifacts"
     assert settings.service_name == "gateway-multi-from-toml"
     assert settings.otlp_traces_insecure is False

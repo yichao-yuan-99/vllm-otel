@@ -33,6 +33,13 @@ DEFAULT_TIMEPOINT_FREQUENCY_HZ = 1.0
 DEFAULT_WINDOW_SIZE_S = 600.0
 DEFAULT_VISUALIZATION_FORMAT = "png"
 DEFAULT_VISUALIZATION_DPI = 220
+FREQ_CONTROL_SUMMARY_DIR_CANDIDATES = (
+    "freq-control",
+    "freq-control-seg",
+    "freq-control-linespace",
+    "freq-control-linespace-amd",
+    "freq-control-linespace-multi",
+)
 
 _HELPER_MODULES: dict[str, Any] = {}
 
@@ -220,6 +227,10 @@ def _round_ms_from_seconds(value_s: float) -> float:
 
 def _round_value(value: float) -> float:
     return round(value, 12)
+
+
+def _profile_label(profile_id: int) -> str:
+    return f"profile-{profile_id}"
 
 
 def _extract_power_series_points_from_payload(payload: dict[str, Any]) -> list[tuple[float, float]]:
@@ -417,14 +428,15 @@ def _is_cancelled_status(value: Any) -> bool:
     return value.strip().lower() in {"cancelled", "canceled"}
 
 
-def _extract_figure_paths_from_manifest_payload(payload: Any) -> list[Path]:
-    figure_paths: list[Path] = []
+def _extract_generated_paths_from_manifest_payload(payload: Any) -> list[Path]:
+    generated_paths: list[Path] = []
+    generated_keys = {"figure_path", "materialized_data_path"}
 
     def visit(value: Any) -> None:
         if isinstance(value, dict):
             for key, child in value.items():
-                if key == "figure_path" and isinstance(child, str) and child.strip():
-                    figure_paths.append(Path(child).expanduser().resolve())
+                if key in generated_keys and isinstance(child, str) and child.strip():
+                    generated_paths.append(Path(child).expanduser().resolve())
                 else:
                     visit(child)
         elif isinstance(value, list):
@@ -432,7 +444,7 @@ def _extract_figure_paths_from_manifest_payload(payload: Any) -> list[Path]:
                 visit(child)
 
     visit(payload)
-    return figure_paths
+    return generated_paths
 
 
 class Selector:
@@ -592,13 +604,17 @@ class Selector:
             manifest_payload = _read_json(resolved_manifest_path)
         except Exception:
             return
-        for figure_path in _extract_figure_paths_from_manifest_payload(manifest_payload):
+        for generated_path in _extract_generated_paths_from_manifest_payload(manifest_payload):
             try:
-                relative_figure_path = str(figure_path.relative_to(self.output_dir))
+                relative_generated_path = str(generated_path.relative_to(self.output_dir))
             except ValueError:
                 continue
-            if figure_path.is_file():
-                self.written_non_json_paths.add(relative_figure_path)
+            if not generated_path.is_file():
+                continue
+            if generated_path.suffix.lower() == ".json":
+                self.written_json_paths.add(relative_generated_path)
+            else:
+                self.written_non_json_paths.add(relative_generated_path)
 
     def _run_visualization_generator(
         self,
@@ -638,6 +654,24 @@ class Selector:
                         "job-throughput/job-throughput-timeseries.json"
                     ),
                     "output_dir": self._output_path("visualization/job-throughput"),
+                    "image_format": DEFAULT_VISUALIZATION_FORMAT,
+                    "dpi": DEFAULT_VISUALIZATION_DPI,
+                },
+            )
+
+        if self._has_output_file("request-throughput/request-throughput-timeseries.json"):
+            self._run_visualization_generator(
+                name="request-throughput",
+                module_cache_key="visualization_request_throughput",
+                module_relative_path=(
+                    "post-process/visualization/request-throughput/generate_all_figures.py"
+                ),
+                function_name="generate_figure_for_run_dir",
+                kwargs={
+                    "timeseries_input_path": self._output_path(
+                        "request-throughput/request-throughput-timeseries.json"
+                    ),
+                    "output_dir": self._output_path("visualization/request-throughput"),
                     "image_format": DEFAULT_VISUALIZATION_FORMAT,
                     "dpi": DEFAULT_VISUALIZATION_DPI,
                 },
@@ -796,6 +830,42 @@ class Selector:
                 },
             )
 
+        if self._has_output_file("gateway/ctx-aware-log/ctx-aware-timeseries.json"):
+            self._run_visualization_generator(
+                name="gateway-ctx-aware",
+                module_cache_key="visualization_gateway_ctx_aware",
+                module_relative_path=(
+                    "post-process/visualization/gateway-ctx-aware/generate_all_figures.py"
+                ),
+                function_name="generate_figure_for_run_dir",
+                kwargs={
+                    "timeseries_input_path": self._output_path(
+                        "gateway/ctx-aware-log/ctx-aware-timeseries.json"
+                    ),
+                    "output_dir": self._output_path("visualization/gateway-ctx-aware"),
+                    "image_format": DEFAULT_VISUALIZATION_FORMAT,
+                    "dpi": DEFAULT_VISUALIZATION_DPI,
+                },
+            )
+
+        if self._has_output_file("gateway/slo-aware-log/slo-aware-events.json"):
+            self._run_visualization_generator(
+                name="gateway-slo-aware",
+                module_cache_key="visualization_gateway_slo_aware",
+                module_relative_path=(
+                    "post-process/visualization/gateway-slo-aware/generate_all_figures.py"
+                ),
+                function_name="generate_figure_for_run_dir",
+                kwargs={
+                    "slo_aware_input_path": self._output_path(
+                        "gateway/slo-aware-log/slo-aware-events.json"
+                    ),
+                    "output_dir": self._output_path("visualization/gateway-slo-aware"),
+                    "image_format": DEFAULT_VISUALIZATION_FORMAT,
+                    "dpi": DEFAULT_VISUALIZATION_DPI,
+                },
+            )
+
         if self._has_output_file("gateway/stack-kv/kv-usage-stacked-histogram.json"):
             self._run_visualization_generator(
                 name="gateway-stack-kv",
@@ -807,6 +877,60 @@ class Selector:
                 kwargs={
                     "stack_kv_input_dir": self._output_path("gateway/stack-kv"),
                     "output_dir": self._output_path("visualization/gateway-stack-kv"),
+                    "image_format": DEFAULT_VISUALIZATION_FORMAT,
+                    "dpi": DEFAULT_VISUALIZATION_DPI,
+                },
+            )
+
+        if self._has_output_file("gateway/stack-context/context-usage-ranges.json"):
+            self._run_visualization_generator(
+                name="stacked-per-agent",
+                module_cache_key="visualization_stacked_per_agent",
+                module_relative_path=(
+                    "post-process/visualization/stacked-per-agent/generate_all_figures.py"
+                ),
+                function_name="generate_figures_for_run_dir",
+                kwargs={
+                    "ranges_input_path": self._output_path(
+                        "gateway/stack-context/context-usage-ranges.json"
+                    ),
+                    "output_dir": self._output_path("visualization/stacked-per-agent"),
+                    "image_format": DEFAULT_VISUALIZATION_FORMAT,
+                    "dpi": DEFAULT_VISUALIZATION_DPI,
+                },
+            )
+
+        freq_control_relative_path = self._freq_control_summary_relative_path()
+        if freq_control_relative_path is not None and self._has_output_file(freq_control_relative_path):
+            summary_dir_name = Path(freq_control_relative_path).parent.name
+            self._run_visualization_generator(
+                name="freq-control",
+                module_cache_key="visualization_freq_control",
+                module_relative_path=(
+                    "post-process/visualization/freq-control/generate_all_figures.py"
+                ),
+                function_name="generate_figure_for_run_dir",
+                kwargs={
+                    "freq_control_input_path": self._output_path(freq_control_relative_path),
+                    "output_dir": self._output_path(f"visualization/{summary_dir_name}"),
+                    "image_format": DEFAULT_VISUALIZATION_FORMAT,
+                    "dpi": DEFAULT_VISUALIZATION_DPI,
+                },
+            )
+
+        if self._has_output_file("slo-decision/slo-decision-summary.json"):
+            self._run_visualization_generator(
+                name="slo-decision",
+                module_cache_key="visualization_slo_decision",
+                module_relative_path=(
+                    "post-process/visualization/slo-decision/generate_all_figures.py"
+                ),
+                function_name="generate_figure_for_run_dir",
+                kwargs={
+                    "slo_decision_input_path": self._output_path(
+                        "slo-decision/slo-decision-summary.json"
+                    ),
+                    "output_dir": self._output_path("visualization/slo-decision"),
                     "image_format": DEFAULT_VISUALIZATION_FORMAT,
                     "dpi": DEFAULT_VISUALIZATION_DPI,
                 },
@@ -892,6 +1016,103 @@ class Selector:
             return []
         return [item for item in raw_trials if isinstance(item, dict)]
 
+    def _declared_port_profile_ids(self, payload: dict[str, Any]) -> list[int]:
+        raw_port_profile_ids = payload.get("port_profile_ids")
+        if not isinstance(raw_port_profile_ids, list):
+            return []
+        return sorted(
+            {
+                profile_id
+                for profile_id in (_int_or_none(value) for value in raw_port_profile_ids)
+                if profile_id is not None
+            }
+        )
+
+    def _source_api_token_hash_to_gateway_profile_id(self) -> dict[str, int]:
+        mapping: dict[str, int] = {}
+
+        if self._has_source_json("gateway/llm-requests/llm-requests.json"):
+            raw_requests = self._load_source_requests_payload().get("requests")
+            if isinstance(raw_requests, list):
+                for record in raw_requests:
+                    if not isinstance(record, dict):
+                        continue
+                    api_token_hash = record.get("api_token_hash")
+                    gateway_profile_id = _int_or_none(record.get("gateway_profile_id"))
+                    if isinstance(api_token_hash, str) and api_token_hash and gateway_profile_id is not None:
+                        mapping[api_token_hash] = gateway_profile_id
+
+        if self._has_source_json("agent-output-throughput/agent-output-throughput.json"):
+            source_payload = self._load_source_json(
+                "agent-output-throughput/agent-output-throughput.json"
+            )
+            if isinstance(source_payload, dict):
+                raw_agents = source_payload.get("agents")
+                if isinstance(raw_agents, list):
+                    for agent in raw_agents:
+                        if not isinstance(agent, dict):
+                            continue
+                        api_token_hash = agent.get("api_token_hash")
+                        gateway_profile_id = _int_or_none(agent.get("gateway_profile_id"))
+                        if (
+                            isinstance(api_token_hash, str)
+                            and api_token_hash
+                            and gateway_profile_id is not None
+                        ):
+                            mapping[api_token_hash] = gateway_profile_id
+
+        return mapping
+
+    def _selected_trial_records_by_profile(
+        self,
+        source_payload: dict[str, Any],
+    ) -> tuple[list[int], dict[int, list[dict[str, Any]]]]:
+        declared_port_profile_ids = self._declared_port_profile_ids(source_payload)
+        fallback_profile_id = (
+            declared_port_profile_ids[0] if len(declared_port_profile_ids) == 1 else None
+        )
+        profile_id_by_api_token_hash = self._source_api_token_hash_to_gateway_profile_id()
+
+        profile_ids = set(declared_port_profile_ids)
+        trials_by_profile: dict[int, list[dict[str, Any]]] = {
+            profile_id: [] for profile_id in declared_port_profile_ids
+        }
+        for trial in self._selected_trial_records():
+            gateway_profile_id = _int_or_none(trial.get("gateway_profile_id"))
+            if gateway_profile_id is None:
+                api_token_hash = trial.get("api_token_hash")
+                if isinstance(api_token_hash, str) and api_token_hash:
+                    gateway_profile_id = profile_id_by_api_token_hash.get(api_token_hash)
+            if gateway_profile_id is None:
+                gateway_profile_id = fallback_profile_id
+            if gateway_profile_id is None:
+                continue
+            profile_ids.add(gateway_profile_id)
+            trials_by_profile.setdefault(gateway_profile_id, []).append(trial)
+
+        return sorted(profile_ids), trials_by_profile
+
+    def _source_agent_metadata_by_run_id(self) -> dict[str, dict[str, Any]]:
+        metadata_by_run_id: dict[str, dict[str, Any]] = {}
+        if not self._has_source_json("agent-output-throughput/agent-output-throughput.json"):
+            return metadata_by_run_id
+
+        source_payload = self._load_source_json("agent-output-throughput/agent-output-throughput.json")
+        if not isinstance(source_payload, dict):
+            return metadata_by_run_id
+
+        raw_agents = source_payload.get("agents")
+        if not isinstance(raw_agents, list):
+            return metadata_by_run_id
+        for agent in raw_agents:
+            if not isinstance(agent, dict):
+                continue
+            gateway_run_id = agent.get("gateway_run_id")
+            if not isinstance(gateway_run_id, str) or not gateway_run_id:
+                continue
+            metadata_by_run_id[gateway_run_id] = copy.deepcopy(agent)
+        return metadata_by_run_id
+
     def build_global_progress_payload(self) -> dict[str, Any]:
         source_payload = self._load_source_json("global-progress/replay-progress-summary.json")
         if not isinstance(source_payload, dict):
@@ -976,7 +1197,9 @@ class Selector:
             window_size_s=window_size_s,
         )
 
-        return {
+        port_profile_ids, trials_by_profile = self._selected_trial_records_by_profile(source_payload)
+        series_by_profile: dict[str, dict[str, Any]] = {}
+        common = {
             "source_run_dir": source_payload.get("source_run_dir"),
             "source_type": source_payload.get("source_type"),
             "experiment_started_at": self.window.selected_started_at,
@@ -986,6 +1209,52 @@ class Selector:
                 source_payload.get("service_failure_detected", False)
             ),
             "service_failure_cutoff_time_utc": source_payload.get("service_failure_cutoff_time_utc"),
+            "total_duration_s": self.window.selected_duration_s,
+            "timepoint_frequency_hz": timepoint_frequency_hz,
+            "timepoint_interval_s": _round_s(1.0 / timepoint_frequency_hz),
+            "window_size_s": window_size_s,
+            "window_width_s": _round_s(window_size_s * 2.0),
+        }
+        for gateway_profile_id in port_profile_ids:
+            profile_trials = trials_by_profile.get(gateway_profile_id, [])
+            profile_completion_offsets_s = [
+                float(end_offset_s)
+                for item in profile_trials
+                if (end_offset_s := _float_or_none(item.get("end_offset_s"))) is not None
+            ]
+            profile_completion_offsets_s_excluding_cancelled = [
+                float(end_offset_s)
+                for item in profile_trials
+                if (end_offset_s := _float_or_none(item.get("end_offset_s"))) is not None
+                and not _is_cancelled_status(item.get("status"))
+            ]
+            series_by_profile[_profile_label(gateway_profile_id)] = {
+                **common,
+                "gateway_profile_id": gateway_profile_id,
+                "replay_count": len(profile_trials),
+                "finished_replay_count": len(profile_completion_offsets_s),
+                "finished_replay_count_excluding_cancelled": len(
+                    profile_completion_offsets_s_excluding_cancelled
+                ),
+                "cancelled_finished_replay_count": len(profile_completion_offsets_s)
+                - len(profile_completion_offsets_s_excluding_cancelled),
+                "sample_count": len(throughput_points),
+                "throughput_points": helper._build_throughput_points(
+                    completion_offsets_s=profile_completion_offsets_s,
+                    total_duration_s=self.window.selected_duration_s,
+                    timepoint_freq_hz=timepoint_frequency_hz,
+                    window_size_s=window_size_s,
+                ),
+                "throughput_points_excluding_cancelled": helper._build_throughput_points(
+                    completion_offsets_s=profile_completion_offsets_s_excluding_cancelled,
+                    total_duration_s=self.window.selected_duration_s,
+                    timepoint_freq_hz=timepoint_frequency_hz,
+                    window_size_s=window_size_s,
+                ),
+            }
+
+        return {
+            **common,
             "replay_count": len(selected_trials),
             "finished_replay_count": len(completion_offsets_s),
             "finished_replay_count_excluding_cancelled": len(
@@ -993,11 +1262,10 @@ class Selector:
             ),
             "cancelled_finished_replay_count": len(completion_offsets_s)
             - len(completion_offsets_s_excluding_cancelled),
-            "total_duration_s": self.window.selected_duration_s,
-            "timepoint_frequency_hz": timepoint_frequency_hz,
-            "timepoint_interval_s": _round_s(1.0 / timepoint_frequency_hz),
-            "window_size_s": window_size_s,
-            "window_width_s": _round_s(window_size_s * 2.0),
+            "multi_profile": len(port_profile_ids) > 1,
+            "port_profile_ids": port_profile_ids,
+            "series_keys": list(series_by_profile.keys()),
+            "series_by_profile": series_by_profile,
             "sample_count": len(throughput_points),
             "throughput_points": throughput_points,
             "throughput_points_excluding_cancelled": throughput_points_excluding_cancelled,
@@ -1036,7 +1304,8 @@ class Selector:
             else 0.0
         )
 
-        return {
+        port_profile_ids, trials_by_profile = self._selected_trial_records_by_profile(source_payload)
+        common = {
             "source_run_dir": source_payload.get("source_run_dir"),
             "source_type": source_payload.get("source_type"),
             "experiment_started_at": self.window.selected_started_at,
@@ -1046,9 +1315,55 @@ class Selector:
                 source_payload.get("service_failure_detected", False)
             ),
             "service_failure_cutoff_time_utc": source_payload.get("service_failure_cutoff_time_utc"),
+            "total_duration_s": self.window.selected_duration_s,
+        }
+        series_by_profile: dict[str, dict[str, Any]] = {}
+        for gateway_profile_id in port_profile_ids:
+            profile_intervals = [
+                {
+                    "job_id": item.get("trial_id") or item.get("worker_id"),
+                    "status": item.get("status"),
+                    "start_offset_s": item.get("start_offset_s"),
+                    "end_offset_s": item.get("end_offset_s"),
+                    "duration_s": item.get("duration_s"),
+                }
+                for item in trials_by_profile.get(gateway_profile_id, [])
+            ]
+            profile_concurrency_points = helper._build_concurrency_points(
+                job_intervals=profile_intervals,
+                total_duration_s=self.window.selected_duration_s,
+            )
+            profile_max_concurrency = max(
+                (point["concurrency"] for point in profile_concurrency_points),
+                default=0,
+            )
+            profile_avg_concurrency = (
+                _round_value(
+                    sum(point["concurrency"] for point in profile_concurrency_points)
+                    / len(profile_concurrency_points)
+                )
+                if profile_concurrency_points
+                else 0.0
+            )
+            series_by_profile[_profile_label(gateway_profile_id)] = {
+                **common,
+                "gateway_profile_id": gateway_profile_id,
+                "replay_count": len(profile_intervals),
+                "jobs_with_valid_range_count": len(profile_intervals),
+                "sample_count": len(profile_concurrency_points),
+                "max_concurrency": profile_max_concurrency,
+                "avg_concurrency": profile_avg_concurrency,
+                "concurrency_points": profile_concurrency_points,
+            }
+
+        return {
+            **common,
             "replay_count": len(intervals),
             "jobs_with_valid_range_count": len(intervals),
-            "total_duration_s": self.window.selected_duration_s,
+            "multi_profile": len(port_profile_ids) > 1,
+            "port_profile_ids": port_profile_ids,
+            "series_keys": list(series_by_profile.keys()),
+            "series_by_profile": series_by_profile,
             "sample_count": len(concurrency_points),
             "max_concurrency": max_concurrency,
             "avg_concurrency": avg_concurrency,
@@ -1069,20 +1384,7 @@ class Selector:
             "post-process/agent-output-throughput/extract_run.py",
         )
 
-        api_token_hash_by_run_id: dict[str, Any] = {}
-        gateway_profile_id_by_run_id: dict[str, Any] = {}
-        raw_agents = source_payload.get("agents")
-        if isinstance(raw_agents, list):
-            for agent in raw_agents:
-                if not isinstance(agent, dict):
-                    continue
-                gateway_run_id = agent.get("gateway_run_id")
-                if not isinstance(gateway_run_id, str) or not gateway_run_id:
-                    continue
-                api_token_hash_by_run_id[gateway_run_id] = agent.get("api_token_hash")
-                gateway_profile_id_by_run_id[gateway_run_id] = agent.get(
-                    "gateway_profile_id"
-                )
+        source_agent_metadata_by_run_id = self._source_agent_metadata_by_run_id()
 
         run_accumulator = helper._new_throughput_accumulator()
         agent_accumulators: dict[str, dict[str, Any]] = {}
@@ -1104,15 +1406,16 @@ class Selector:
 
             agent_payload = agent_accumulators.get(gateway_run_id)
             if agent_payload is None:
+                source_agent_metadata = source_agent_metadata_by_run_id.get(gateway_run_id, {})
                 gateway_profile_id = record.get("gateway_profile_id")
                 if gateway_profile_id is None:
-                    gateway_profile_id = gateway_profile_id_by_run_id.get(
-                        gateway_run_id
-                    )
+                    gateway_profile_id = source_agent_metadata.get("gateway_profile_id")
                 agent_payload = {
                     "gateway_run_id": gateway_run_id,
                     "gateway_profile_id": gateway_profile_id,
-                    "api_token_hash": api_token_hash_by_run_id.get(gateway_run_id),
+                    "api_token_hash": source_agent_metadata.get("api_token_hash"),
+                    "replay_worker_status": source_agent_metadata.get("replay_worker_status"),
+                    "replay_completed": source_agent_metadata.get("replay_completed"),
                     "_throughput_accumulator": helper._new_throughput_accumulator(),
                 }
                 agent_accumulators[gateway_run_id] = agent_payload
@@ -1124,47 +1427,94 @@ class Selector:
             )
 
         agents: list[dict[str, Any]] = []
+        accumulator_by_run_id: dict[str, dict[str, int | float]] = {}
         for gateway_run_id in sorted(agent_accumulators):
             agent_payload = agent_accumulators[gateway_run_id]
-            throughput_payload = helper._payload_from_accumulator(
-                agent_payload.pop("_throughput_accumulator")
-            )
+            throughput_accumulator = agent_payload.get("_throughput_accumulator")
+            if not isinstance(throughput_accumulator, dict):
+                throughput_accumulator = helper._new_throughput_accumulator()
+            accumulator_by_run_id[gateway_run_id] = copy.deepcopy(throughput_accumulator)
+            throughput_payload = helper._payload_from_accumulator(throughput_accumulator)
             throughput_payload.update(
                 {
                     "gateway_run_id": agent_payload["gateway_run_id"],
                     "gateway_profile_id": agent_payload.get("gateway_profile_id"),
                     "api_token_hash": agent_payload.get("api_token_hash"),
+                    "replay_worker_status": agent_payload.get("replay_worker_status"),
+                    "replay_completed": agent_payload.get("replay_completed"),
                 }
             )
             agents.append(throughput_payload)
 
-        throughput_values = [
-            float(agent["output_throughput_tokens_per_s"])
-            for agent in agents
-            if isinstance(agent.get("output_throughput_tokens_per_s"), (int, float))
-        ]
+        def build_result_payload(
+            agent_payloads: list[dict[str, Any]],
+            *,
+            accumulator: dict[str, int | float],
+            gateway_profile_id: int | None = None,
+        ) -> dict[str, Any]:
+            throughput_values = [
+                float(agent["output_throughput_tokens_per_s"])
+                for agent in agent_payloads
+                if isinstance(agent.get("output_throughput_tokens_per_s"), (int, float))
+            ]
+            result = helper._payload_from_accumulator(accumulator)
+            result.update(
+                {
+                    "source_run_dir": source_payload.get("source_run_dir"),
+                    "source_gateway_output_dir": source_payload.get(
+                        "source_gateway_output_dir"
+                    ),
+                    "service_failure_detected": bool(
+                        source_payload.get("service_failure_detected", False)
+                    ),
+                    "service_failure_cutoff_time_utc": source_payload.get(
+                        "service_failure_cutoff_time_utc"
+                    ),
+                    "agent_count": len(agent_payloads),
+                    "agent_output_throughput_tokens_per_s_summary": helper._summarize_values(
+                        throughput_values
+                    ),
+                    "agent_output_throughput_tokens_per_s_histogram": (
+                        helper.build_agent_output_throughput_histogram(throughput_values)
+                    ),
+                    "agents": agent_payloads,
+                }
+            )
+            if gateway_profile_id is not None:
+                result["gateway_profile_id"] = gateway_profile_id
+            return result
 
-        result = helper._payload_from_accumulator(run_accumulator)
+        agents_by_profile: dict[int, list[dict[str, Any]]] = {}
+        accumulators_by_profile: dict[int, dict[str, int | float]] = {}
+        for agent in agents:
+            gateway_profile_id = _int_or_none(agent.get("gateway_profile_id"))
+            if gateway_profile_id is None:
+                continue
+            agents_by_profile.setdefault(gateway_profile_id, []).append(agent)
+            profile_accumulator = accumulators_by_profile.setdefault(
+                gateway_profile_id,
+                helper._new_throughput_accumulator(),
+            )
+            for key in profile_accumulator:
+                profile_accumulator[key] += accumulator_by_run_id[agent["gateway_run_id"]][key]
+
+        port_profile_ids = sorted(agents_by_profile)
+        series_by_profile = {
+            _profile_label(gateway_profile_id): build_result_payload(
+                agents_by_profile[gateway_profile_id],
+                accumulator=accumulators_by_profile[gateway_profile_id],
+                gateway_profile_id=gateway_profile_id,
+            )
+            for gateway_profile_id in port_profile_ids
+        }
+
+        result = build_result_payload(agents, accumulator=run_accumulator)
         result.update(
             {
-                "source_run_dir": source_payload.get("source_run_dir"),
-                "source_gateway_output_dir": source_payload.get(
-                    "source_gateway_output_dir"
-                ),
-                "service_failure_detected": bool(
-                    source_payload.get("service_failure_detected", False)
-                ),
-                "service_failure_cutoff_time_utc": source_payload.get(
-                    "service_failure_cutoff_time_utc"
-                ),
-                "agent_count": len(agents),
-                "agent_output_throughput_tokens_per_s_summary": helper._summarize_values(
-                    throughput_values
-                ),
-                "agent_output_throughput_tokens_per_s_histogram": (
-                    helper.build_agent_output_throughput_histogram(throughput_values)
-                ),
-                "agents": agents,
+                "multi_profile": len(port_profile_ids) > 1,
+                "port_profile_ids": port_profile_ids,
+                "series_keys": list(series_by_profile.keys()),
+                "series_by_profile": series_by_profile,
             }
         )
         return result
@@ -1229,6 +1579,7 @@ class Selector:
             )
         )
 
+        port_profile_ids = self._declared_port_profile_ids(source_payload)
         self._selected_requests_payload = {
             "source_run_dir": source_payload.get("source_run_dir"),
             "source_gateway_output_dir": source_payload.get("source_gateway_output_dir"),
@@ -1236,6 +1587,10 @@ class Selector:
                 source_payload.get("service_failure_detected", False)
             ),
             "service_failure_cutoff_time_utc": source_payload.get("service_failure_cutoff_time_utc"),
+            "multi_profile": bool(
+                source_payload.get("multi_profile", len(port_profile_ids) > 1)
+            ),
+            "port_profile_ids": port_profile_ids,
             "request_count": len(selected_requests),
             "requests": selected_requests,
         }
@@ -1338,6 +1693,98 @@ class Selector:
             }
         return payloads
 
+    def build_request_throughput_payload(self) -> dict[str, Any]:
+        source_payload = self._load_source_json(
+            "request-throughput/request-throughput-timeseries.json"
+        )
+        if not isinstance(source_payload, dict):
+            raise ValueError(
+                "request-throughput/request-throughput-timeseries.json must be a JSON object"
+            )
+
+        helper = _load_helper_module(
+            "request_throughput_extract",
+            "post-process/request-throughput/extract_run.py",
+        )
+        selected_records = self._selected_request_records()
+        observed_offsets_s: list[float] = []
+        for record in selected_records:
+            request_start_offset_s = _float_or_none(record.get("request_start_offset_s"))
+            request_end_offset_s = _float_or_none(record.get("request_end_offset_s"))
+            if request_start_offset_s is not None and request_start_offset_s >= 0.0:
+                observed_offsets_s.append(request_start_offset_s)
+            if request_end_offset_s is not None and request_end_offset_s >= 0.0:
+                observed_offsets_s.append(request_end_offset_s)
+
+        timepoint_frequency_hz = _float_or_none(source_payload.get("timepoint_frequency_hz"))
+        if timepoint_frequency_hz is None or timepoint_frequency_hz <= 0:
+            timepoint_frequency_hz = DEFAULT_TIMEPOINT_FREQUENCY_HZ
+        window_size_s = _float_or_none(source_payload.get("window_size_s"))
+        if window_size_s is None or window_size_s <= 0:
+            window_size_s = DEFAULT_WINDOW_SIZE_S
+        total_duration_s = helper._sampled_total_duration_s(
+            observed_offsets_s,
+            timepoint_freq_hz=timepoint_frequency_hz,
+        )
+
+        common = {
+            "source_run_dir": source_payload.get("source_run_dir"),
+            "source_llm_requests_path": self._derived_llm_requests_path(),
+            "source_gateway_output_dir": source_payload.get("source_gateway_output_dir"),
+            "service_failure_detected": bool(
+                source_payload.get("service_failure_detected", False)
+            ),
+            "service_failure_cutoff_time_utc": source_payload.get("service_failure_cutoff_time_utc"),
+            "total_duration_s": total_duration_s,
+            "timepoint_frequency_hz": timepoint_frequency_hz,
+            "timepoint_interval_s": _round_s(1.0 / timepoint_frequency_hz),
+            "window_size_s": window_size_s,
+            "window_width_s": _round_s(window_size_s * 2.0),
+        }
+
+        aggregate_summary = helper._summarize_request_records(
+            selected_records,
+            total_duration_s=total_duration_s,
+            timepoint_freq_hz=timepoint_frequency_hz,
+            window_size_s=window_size_s,
+        )
+        port_profile_ids = sorted(
+            set(self._declared_port_profile_ids(source_payload))
+            | {
+                gateway_profile_id
+                for gateway_profile_id in (
+                    _int_or_none(record.get("gateway_profile_id")) for record in selected_records
+                )
+                if gateway_profile_id is not None
+            }
+        )
+        series_by_profile: dict[str, dict[str, Any]] = {}
+        for gateway_profile_id in port_profile_ids:
+            profile_records = [
+                record
+                for record in selected_records
+                if _int_or_none(record.get("gateway_profile_id")) == gateway_profile_id
+            ]
+            series_by_profile[_profile_label(gateway_profile_id)] = {
+                **common,
+                "gateway_profile_id": gateway_profile_id,
+                **helper._summarize_request_records(
+                    profile_records,
+                    total_duration_s=total_duration_s,
+                    timepoint_freq_hz=timepoint_frequency_hz,
+                    window_size_s=window_size_s,
+                ),
+            }
+
+        return {
+            **common,
+            **aggregate_summary,
+            "multi_profile": len(port_profile_ids) > 1,
+            "port_profile_ids": port_profile_ids,
+            "series_keys": list(series_by_profile.keys()),
+            "series_by_profile": series_by_profile,
+        }
+
     def build_usage_summary_payload(self) -> dict[str, Any]:
         source_payload = self._load_source_json("gateway/usage/usage-summary.json")
         if not isinstance(source_payload, dict):
@@ -1423,6 +1870,10 @@ class Selector:
         return {
             "source_run_dir": source_payload.get("source_run_dir"),
             "source_gateway_output_dir": source_payload.get("source_gateway_output_dir"),
+            "service_failure_detected": bool(
+                source_payload.get("service_failure_detected", False)
+            ),
+            "service_failure_cutoff_time_utc": source_payload.get("service_failure_cutoff_time_utc"),
             "agent_count": len(agents),
             "request_count": len(self._selected_request_records()),
             "usage": run_usage,
@@ -1434,6 +1885,18 @@ class Selector:
             return self._selected_prefill_payloads
 
         source_payload = self._load_source_requests_payload()
+        source_activity_payload = self._load_source_json(
+            "prefill-concurrency/prefill-activities.json"
+        )
+        if not isinstance(source_activity_payload, dict):
+            raise ValueError("prefill-concurrency/prefill-activities.json must be a JSON object")
+        source_timeseries_payload = self._load_source_json(
+            "prefill-concurrency/prefill-concurrency-timeseries.json"
+        )
+        if not isinstance(source_timeseries_payload, dict):
+            raise ValueError(
+                "prefill-concurrency/prefill-concurrency-timeseries.json must be a JSON object"
+            )
         prefill_helper = _load_helper_module(
             "prefill_concurrency_extract",
             "post-process/prefill-concurrency/extract_run.py",
@@ -1478,14 +1941,9 @@ class Selector:
             selected_activities.append(updated)
 
         tick_ms = DEFAULT_PREFILL_TICK_MS
-        if self._has_source_json("prefill-concurrency/prefill-concurrency-timeseries.json"):
-            source_timeseries = self._load_source_json(
-                "prefill-concurrency/prefill-concurrency-timeseries.json"
-            )
-            if isinstance(source_timeseries, dict):
-                parsed_tick_ms = _int_or_none(source_timeseries.get("tick_ms"))
-                if parsed_tick_ms is not None and parsed_tick_ms > 0:
-                    tick_ms = parsed_tick_ms
+        parsed_tick_ms = _int_or_none(source_timeseries_payload.get("tick_ms"))
+        if parsed_tick_ms is not None and parsed_tick_ms > 0:
+            tick_ms = parsed_tick_ms
         tick_s = _round_s(tick_ms / 1000.0)
 
         selected_activities.sort(
@@ -1497,20 +1955,38 @@ class Selector:
             )
         )
 
-        concurrency_points = prefill_helper._build_prefill_concurrency_points(
+        selected_request_records = self._selected_request_records()
+        total_duration_s = prefill_helper._resolve_total_duration_s(
+            selected_request_records,
             selected_activities,
-            total_duration_s=self.window.selected_duration_s,
-            tick_s=tick_s,
         )
-        min_concurrency = min((point["concurrency"] for point in concurrency_points), default=0)
-        max_concurrency = max((point["concurrency"] for point in concurrency_points), default=0)
-        avg_concurrency = (
-            _round_value(
-                sum(point["concurrency"] for point in concurrency_points)
-                / len(concurrency_points)
+        aggregate_timeseries_payload, aggregate_stats_payload = (
+            prefill_helper._build_prefill_timeseries_and_stats_payloads(
+                selected_request_records,
+                selected_activities,
+                total_duration_s=total_duration_s,
+                tick_ms=tick_ms,
+                tick_s=tick_s,
             )
-            if concurrency_points
-            else 0.0
+        )
+        port_profile_ids = sorted(
+            set(self._declared_port_profile_ids(source_activity_payload))
+            | {
+                gateway_profile_id
+                for gateway_profile_id in (
+                    _int_or_none(record.get("gateway_profile_id"))
+                    for record in selected_request_records
+                )
+                if gateway_profile_id is not None
+            }
+            | {
+                gateway_profile_id
+                for gateway_profile_id in (
+                    _int_or_none(activity.get("gateway_profile_id"))
+                    for activity in selected_activities
+                )
+                if gateway_profile_id is not None
+            }
         )
 
         base = {
@@ -1521,29 +1997,71 @@ class Selector:
                 source_payload.get("service_failure_detected", False)
             ),
             "service_failure_cutoff_time_utc": source_payload.get("service_failure_cutoff_time_utc"),
-            "request_count": len(self._selected_request_records()),
+            "multi_profile": len(port_profile_ids) > 1,
+            "port_profile_ids": port_profile_ids,
+            "series_keys": [_profile_label(profile_id) for profile_id in port_profile_ids],
+            "request_count": len(selected_request_records),
             "prefill_activity_count": len(selected_activities),
-            "total_duration_s": self.window.selected_duration_s,
+            "total_duration_s": total_duration_s,
             "tick_ms": tick_ms,
             "tick_s": tick_s,
         }
 
+        activities_by_profile: dict[str, dict[str, Any]] = {}
+        timeseries_by_profile: dict[str, dict[str, Any]] = {}
+        stats_by_profile: dict[str, dict[str, Any]] = {}
+        for gateway_profile_id in port_profile_ids:
+            series_key = _profile_label(gateway_profile_id)
+            profile_request_records = [
+                record
+                for record in selected_request_records
+                if _int_or_none(record.get("gateway_profile_id")) == gateway_profile_id
+            ]
+            profile_prefill_activities = [
+                activity
+                for activity in selected_activities
+                if _int_or_none(activity.get("gateway_profile_id")) == gateway_profile_id
+            ]
+            profile_timeseries_payload, profile_stats_payload = (
+                prefill_helper._build_prefill_timeseries_and_stats_payloads(
+                    profile_request_records,
+                    profile_prefill_activities,
+                    total_duration_s=total_duration_s,
+                    tick_ms=tick_ms,
+                    tick_s=tick_s,
+                    gateway_profile_id=gateway_profile_id,
+                )
+            )
+            activities_by_profile[series_key] = {
+                "gateway_profile_id": gateway_profile_id,
+                "request_count": len(profile_request_records),
+                "prefill_activity_count": len(profile_prefill_activities),
+                "activities": profile_prefill_activities,
+            }
+            timeseries_by_profile[series_key] = {
+                **base,
+                **profile_timeseries_payload,
+            }
+            stats_by_profile[series_key] = {
+                **base,
+                **profile_stats_payload,
+            }
+
         self._selected_prefill_payloads = {
             "prefill-concurrency/prefill-activities.json": {
                 **base,
+                "activities_by_profile": activities_by_profile,
                 "activities": selected_activities,
             },
             "prefill-concurrency/prefill-concurrency-timeseries.json": {
                 **base,
-                "sample_count": len(concurrency_points),
-                "concurrency_points": concurrency_points,
+                **aggregate_timeseries_payload,
+                "series_by_profile": timeseries_by_profile,
             },
             "prefill-concurrency/prefill-concurrency-stats.json": {
                 **base,
-                "sample_count": len(concurrency_points),
-                "min_concurrency": min_concurrency,
-                "max_concurrency": max_concurrency,
-                "avg_concurrency": avg_concurrency,
+                **aggregate_stats_payload,
+                "series_by_profile": stats_by_profile,
             },
         }
         return self._selected_prefill_payloads
@@ -1972,6 +2490,34 @@ class Selector:
                     sort_key=sort_key,
                     input_request_count=selected_requests_count,
                 )
+                selected_entries = selected_ranges.get("entries")
+                if not isinstance(selected_entries, list):
+                    selected_entries = []
+                port_profile_ids = sorted(
+                    set(self._declared_port_profile_ids(source_payload))
+                    | {
+                        gateway_profile_id
+                        for gateway_profile_id in (
+                            _int_or_none(entry.get("gateway_profile_id"))
+                            for entry in selected_entries
+                            if isinstance(entry, dict)
+                        )
+                        if gateway_profile_id is not None
+                    }
+                )
+                entries_by_profile = {
+                    _profile_label(gateway_profile_id): [
+                        entry
+                        for entry in selected_entries
+                        if isinstance(entry, dict)
+                        and _int_or_none(entry.get("gateway_profile_id")) == gateway_profile_id
+                    ]
+                    for gateway_profile_id in port_profile_ids
+                }
+                selected_ranges["multi_profile"] = len(port_profile_ids) > 1
+                selected_ranges["port_profile_ids"] = port_profile_ids
+                selected_ranges["series_keys"] = list(entries_by_profile.keys())
+                selected_ranges["entries_by_profile"] = entries_by_profile
                 payloads[relative_path] = selected_ranges
 
                 histogram_filename = filename.replace("-ranges.json", "-stacked-histogram.json")
@@ -1980,7 +2526,37 @@ class Selector:
                     histogram_source_payload = self._load_source_json(histogram_relative_path)
                     if not isinstance(histogram_source_payload, dict):
                         raise ValueError(f"{histogram_relative_path} must be a JSON object")
-                    points = helper.build_stacked_histogram(selected_ranges.get("entries", []))
+                    points = helper.build_stacked_histogram(selected_entries)
+                    series_by_profile = {
+                        _profile_label(gateway_profile_id): {
+                            "source_run_dir": histogram_source_payload.get("source_run_dir"),
+                            "source_gateway_output_dir": histogram_source_payload.get(
+                                "source_gateway_output_dir"
+                            ),
+                            "source_llm_requests_path": self._derived_llm_requests_path(),
+                            "service_failure_detected": bool(
+                                histogram_source_payload.get("service_failure_detected", False)
+                            ),
+                            "service_failure_cutoff_time_utc": histogram_source_payload.get(
+                                "service_failure_cutoff_time_utc"
+                            ),
+                            "input_request_count": selected_requests_count,
+                            "metric": histogram_source_payload.get("metric"),
+                            "phase": histogram_source_payload.get("phase"),
+                            "gateway_profile_id": gateway_profile_id,
+                            "entry_count": len(entries_by_profile[_profile_label(gateway_profile_id)]),
+                            "bucket_width_s": histogram_source_payload.get("bucket_width_s", 1),
+                            "point_count": len(
+                                helper.build_stacked_histogram(
+                                    entries_by_profile[_profile_label(gateway_profile_id)]
+                                )
+                            ),
+                            "points": helper.build_stacked_histogram(
+                                entries_by_profile[_profile_label(gateway_profile_id)]
+                            ),
+                        }
+                        for gateway_profile_id in port_profile_ids
+                    }
                     payloads[histogram_relative_path] = {
                         "source_run_dir": histogram_source_payload.get("source_run_dir"),
                         "source_gateway_output_dir": histogram_source_payload.get(
@@ -1995,13 +2571,467 @@ class Selector:
                         ),
                         "input_request_count": selected_requests_count,
                         "metric": histogram_source_payload.get("metric"),
+                        "phase": histogram_source_payload.get("phase"),
+                        "multi_profile": len(port_profile_ids) > 1,
+                        "port_profile_ids": port_profile_ids,
+                        "series_keys": list(series_by_profile.keys()),
                         "bucket_width_s": histogram_source_payload.get("bucket_width_s", 1),
                         "point_count": len(points),
                         "points": points,
+                        "series_by_profile": series_by_profile,
                     }
             elif filename.endswith("-stacked-histogram.json"):
                 continue
         return payloads
+
+    def build_ctx_aware_payload(self) -> dict[str, Any]:
+        source_payload = self._load_source_json("gateway/ctx-aware-log/ctx-aware-timeseries.json")
+        if not isinstance(source_payload, dict):
+            raise ValueError("gateway/ctx-aware-log/ctx-aware-timeseries.json must be a JSON object")
+
+        helper = _load_helper_module(
+            "gateway_ctx_aware_extract",
+            "post-process/gateway/ctx-aware-log/extract_run.py",
+        )
+        raw_samples = source_payload.get("samples")
+        selected_samples: list[dict[str, Any]] = []
+        if isinstance(raw_samples, list):
+            for sample in raw_samples:
+                if not isinstance(sample, dict):
+                    continue
+                timestamp_utc = _parse_iso8601_utc(sample.get("timestamp"))
+                if timestamp_utc is None:
+                    continue
+                if timestamp_utc < self.window.selected_start_utc:
+                    continue
+                if timestamp_utc > self.window.selected_end_utc:
+                    continue
+                updated = copy.deepcopy(sample)
+                updated["second"] = _round_s(
+                    (timestamp_utc - self.window.selected_start_utc).total_seconds()
+                )
+                selected_samples.append(updated)
+        selected_samples.sort(
+            key=lambda sample: (
+                _float_or_none(sample.get("second"))
+                if _float_or_none(sample.get("second")) is not None
+                else float("inf"),
+                str(sample.get("timestamp") or ""),
+            )
+        )
+
+        avg_sample_interval_s: float | None = None
+        if len(selected_samples) > 1:
+            intervals = [
+                float(selected_samples[index]["second"])
+                - float(selected_samples[index - 1]["second"])
+                for index in range(1, len(selected_samples))
+            ]
+            if intervals:
+                avg_sample_interval_s = _round_s(sum(intervals) / len(intervals))
+
+        metric_summaries = {
+            field_name: helper._metric_summary(selected_samples, field_name)
+            for field_name in getattr(helper, "METRIC_FIELDS", ())
+        }
+        return {
+            "source_run_dir": source_payload.get("source_run_dir"),
+            "source_ctx_aware_log_path": source_payload.get("source_ctx_aware_log_path"),
+            "selected_ctx_aware_log_file_name": source_payload.get(
+                "selected_ctx_aware_log_file_name"
+            ),
+            "ctx_aware_log_candidate_count": source_payload.get("ctx_aware_log_candidate_count"),
+            "ctx_aware_log_candidates": source_payload.get("ctx_aware_log_candidates"),
+            "started_at": self.window.selected_started_at,
+            "ended_at": self.window.selected_finished_at,
+            "sample_count": len(selected_samples),
+            "duration_s": self.window.selected_duration_s,
+            "avg_sample_interval_s": avg_sample_interval_s,
+            "metric_summaries": metric_summaries,
+            "samples": selected_samples,
+        }
+
+    def build_slo_aware_payload(self) -> dict[str, Any]:
+        source_payload = self._load_source_json("gateway/slo-aware-log/slo-aware-events.json")
+        if not isinstance(source_payload, dict):
+            raise ValueError("gateway/slo-aware-log/slo-aware-events.json must be a JSON object")
+
+        helper = _load_helper_module(
+            "gateway_slo_aware_extract",
+            "post-process/gateway/slo-aware-log/extract_run.py",
+        )
+        raw_events = source_payload.get("events")
+        selected_events: list[dict[str, Any]] = []
+        if isinstance(raw_events, list):
+            for event in raw_events:
+                if not isinstance(event, dict):
+                    continue
+                time_offset_s = _float_or_none(event.get("time_offset_s"))
+                if time_offset_s is None:
+                    continue
+                rebased_offset_s = _rebase_point_offset(time_offset_s, window=self.window)
+                if rebased_offset_s is None:
+                    continue
+                updated = copy.deepcopy(event)
+                updated["time_offset_s"] = rebased_offset_s
+                selected_events.append(updated)
+        selected_events.sort(
+            key=lambda event: (
+                _float_or_none(event.get("time_offset_s"))
+                if _float_or_none(event.get("time_offset_s")) is not None
+                else float("inf"),
+                str(event.get("timestamp_utc") or ""),
+                str(event.get("event_type") or ""),
+                str(event.get("api_token_hash") or ""),
+                str(event.get("trace_id") or ""),
+            )
+        )
+
+        unique_api_token_hashes = sorted(
+            {
+                api_token_hash
+                for api_token_hash in (
+                    helper._non_empty_str_or_none(event.get("api_token_hash"))
+                    for event in selected_events
+                )
+                if api_token_hash is not None
+            }
+        )
+        return {
+            "source_run_dir": source_payload.get("source_run_dir"),
+            "source_type": source_payload.get("source_type"),
+            "source_slo_aware_log_paths": source_payload.get("source_slo_aware_log_paths"),
+            "experiment_started_at": self.window.selected_started_at,
+            "experiment_finished_at": self.window.selected_finished_at,
+            "time_constraint_s": self.window.selected_duration_s,
+            "analysis_window_start_utc": self.window.selected_started_at,
+            "analysis_window_end_utc": self.window.selected_finished_at,
+            "service_failure_detected": bool(
+                source_payload.get("service_failure_detected", False)
+            ),
+            "service_failure_cutoff_time_utc": source_payload.get("service_failure_cutoff_time_utc"),
+            "slo_aware_log_found": bool(source_payload.get("slo_aware_log_found", False)),
+            "slo_aware_event_count": len(selected_events),
+            "unique_agent_count": len(unique_api_token_hashes),
+            "unique_api_token_hashes": unique_api_token_hashes,
+            "first_slo_aware_event_time_offset_s": helper._first_non_none(
+                _float_or_none(event.get("time_offset_s")) for event in selected_events
+            ),
+            "target_output_throughput_tokens_per_s": helper._first_non_none(
+                _float_or_none(event.get("slo_target_tokens_per_s")) for event in selected_events
+            ),
+            "event_type_counts": helper._counts_by_value(
+                helper._non_empty_str_or_none(event.get("event_type"))
+                for event in selected_events
+            ),
+            "wake_reason_counts": helper._counts_by_value(
+                helper._non_empty_str_or_none(event.get("wake_reason"))
+                for event in selected_events
+            ),
+            "resume_disposition_counts": helper._counts_by_value(
+                helper._non_empty_str_or_none(event.get("resume_disposition"))
+                for event in selected_events
+            ),
+            "min_output_tokens_per_s_at_events": helper._min_or_none(
+                _float_or_none(event.get("output_tokens_per_s")) for event in selected_events
+            ),
+            "max_output_tokens_per_s_at_events": helper._max_or_none(
+                _float_or_none(event.get("output_tokens_per_s")) for event in selected_events
+            ),
+            "min_slo_slack_s": helper._min_or_none(
+                _float_or_none(event.get("slo_slack_s")) for event in selected_events
+            ),
+            "max_slo_slack_s": helper._max_or_none(
+                _float_or_none(event.get("slo_slack_s")) for event in selected_events
+            ),
+            "min_ralexation_duration_s": helper._min_or_none(
+                _float_or_none(event.get("ralexation_duration_s")) for event in selected_events
+            ),
+            "max_ralexation_duration_s": helper._max_or_none(
+                _float_or_none(event.get("ralexation_duration_s")) for event in selected_events
+            ),
+            "min_observed_min_output_tokens_per_s": helper._min_or_none(
+                _float_or_none(event.get("min_output_tokens_per_s")) for event in selected_events
+            ),
+            "max_observed_min_output_tokens_per_s": helper._max_or_none(
+                _float_or_none(event.get("min_output_tokens_per_s")) for event in selected_events
+            ),
+            "min_observed_avg_output_tokens_per_s": helper._min_or_none(
+                _float_or_none(event.get("avg_output_tokens_per_s")) for event in selected_events
+            ),
+            "max_observed_avg_output_tokens_per_s": helper._max_or_none(
+                _float_or_none(event.get("avg_output_tokens_per_s")) for event in selected_events
+            ),
+            "events": selected_events,
+        }
+
+    def build_slo_decision_payload(self) -> dict[str, Any]:
+        source_payload = self._load_source_json("slo-decision/slo-decision-summary.json")
+        if not isinstance(source_payload, dict):
+            raise ValueError("slo-decision/slo-decision-summary.json must be a JSON object")
+
+        helper = _load_helper_module(
+            "slo_decision_extract",
+            "post-process/slo-decision/extract_run.py",
+        )
+        raw_points = source_payload.get("decision_points")
+        selected_points: list[dict[str, Any]] = []
+        if isinstance(raw_points, list):
+            for point in raw_points:
+                if not isinstance(point, dict):
+                    continue
+                time_offset_s = _float_or_none(point.get("time_offset_s"))
+                if time_offset_s is None:
+                    continue
+                rebased_offset_s = _rebase_point_offset(time_offset_s, window=self.window)
+                if rebased_offset_s is None:
+                    continue
+                updated = copy.deepcopy(point)
+                updated["time_offset_s"] = rebased_offset_s
+                selected_points.append(updated)
+        selected_points.sort(
+            key=lambda point: (
+                _float_or_none(point.get("time_offset_s"))
+                if _float_or_none(point.get("time_offset_s")) is not None
+                else float("inf"),
+                str(point.get("timestamp_utc") or ""),
+            )
+        )
+
+        return {
+            "source_run_dir": source_payload.get("source_run_dir"),
+            "source_type": source_payload.get("source_type"),
+            "source_slo_decision_log_dir_name": source_payload.get(
+                "source_slo_decision_log_dir_name"
+            ),
+            "source_slo_decision_log_paths": source_payload.get("source_slo_decision_log_paths"),
+            "experiment_started_at": self.window.selected_started_at,
+            "experiment_finished_at": self.window.selected_finished_at,
+            "time_constraint_s": self.window.selected_duration_s,
+            "analysis_window_start_utc": self.window.selected_started_at,
+            "analysis_window_end_utc": self.window.selected_finished_at,
+            "service_failure_detected": bool(
+                source_payload.get("service_failure_detected", False)
+            ),
+            "service_failure_cutoff_time_utc": source_payload.get("service_failure_cutoff_time_utc"),
+            "slo_decision_log_found": bool(source_payload.get("slo_decision_log_found", False)),
+            "slo_decision_point_count": len(selected_points),
+            "slo_decision_change_count": sum(
+                1 for point in selected_points if point.get("changed") is True
+            ),
+            "first_slo_decision_time_offset_s": helper._first_non_none(
+                _float_or_none(point.get("time_offset_s")) for point in selected_points
+            ),
+            "target_output_throughput_tokens_per_s": helper._first_non_none(
+                point.get("target_output_throughput_tokens_per_s")
+                for point in selected_points
+            ),
+            "min_window_min_output_tokens_per_s": helper._min_or_none(
+                _float_or_none(point.get("window_min_output_tokens_per_s"))
+                for point in selected_points
+            ),
+            "max_window_min_output_tokens_per_s": helper._max_or_none(
+                _float_or_none(point.get("window_min_output_tokens_per_s"))
+                for point in selected_points
+            ),
+            "min_frequency_mhz": helper._min_or_none(
+                value
+                for point in selected_points
+                for value in (
+                    _int_or_none(point.get("current_frequency_mhz")),
+                    _int_or_none(point.get("target_frequency_mhz")),
+                )
+            ),
+            "max_frequency_mhz": helper._max_or_none(
+                value
+                for point in selected_points
+                for value in (
+                    _int_or_none(point.get("current_frequency_mhz")),
+                    _int_or_none(point.get("target_frequency_mhz")),
+                )
+            ),
+            "decision_points": selected_points,
+        }
+
+    def _freq_control_summary_relative_path(self) -> str | None:
+        for dir_name in FREQ_CONTROL_SUMMARY_DIR_CANDIDATES:
+            relative_path = f"{dir_name}/freq-control-summary.json"
+            if relative_path in self.source_json_paths:
+                return relative_path
+        return None
+
+    def build_freq_control_payload(self, relative_path: str) -> dict[str, Any]:
+        source_payload = self._load_source_json(relative_path)
+        if not isinstance(source_payload, dict):
+            raise ValueError(f"{relative_path} must be a JSON object")
+
+        helper = _load_helper_module(
+            "freq_control_extract",
+            "post-process/freq-control/extract_run.py",
+        )
+
+        def select_points(key: str) -> list[dict[str, Any]]:
+            raw_points = source_payload.get(key)
+            selected_points: list[dict[str, Any]] = []
+            if isinstance(raw_points, list):
+                for point in raw_points:
+                    if not isinstance(point, dict):
+                        continue
+                    time_offset_s = _float_or_none(point.get("time_offset_s"))
+                    if time_offset_s is None:
+                        continue
+                    rebased_offset_s = _rebase_point_offset(time_offset_s, window=self.window)
+                    if rebased_offset_s is None:
+                        continue
+                    updated = copy.deepcopy(point)
+                    updated["time_offset_s"] = rebased_offset_s
+                    selected_points.append(updated)
+            selected_points.sort(
+                key=lambda point: (
+                    _float_or_none(point.get("time_offset_s"))
+                    if _float_or_none(point.get("time_offset_s")) is not None
+                    else float("inf"),
+                    str(point.get("timestamp_utc") or ""),
+                )
+            )
+            return selected_points
+
+        query_points = select_points("query_points")
+        decision_points = select_points("decision_points")
+        control_error_points = select_points("control_error_points")
+        port_profile_ids = sorted(
+            set(self._declared_port_profile_ids(source_payload))
+            | {
+                port_profile_id
+                for port_profile_id in (
+                    _int_or_none(point.get("port_profile_id"))
+                    for point in (query_points + decision_points + control_error_points)
+                )
+                if port_profile_id is not None
+            }
+        )
+
+        return {
+            "source_run_dir": source_payload.get("source_run_dir"),
+            "source_type": source_payload.get("source_type"),
+            "source_freq_control_log_dir_name": source_payload.get(
+                "source_freq_control_log_dir_name"
+            ),
+            "source_query_log_paths": source_payload.get("source_query_log_paths"),
+            "source_decision_log_paths": source_payload.get("source_decision_log_paths"),
+            "source_control_error_log_paths": source_payload.get("source_control_error_log_paths"),
+            "experiment_started_at": self.window.selected_started_at,
+            "experiment_finished_at": self.window.selected_finished_at,
+            "time_constraint_s": self.window.selected_duration_s,
+            "analysis_window_start_utc": self.window.selected_started_at,
+            "analysis_window_end_utc": self.window.selected_finished_at,
+            "service_failure_detected": bool(
+                source_payload.get("service_failure_detected", False)
+            ),
+            "service_failure_cutoff_time_utc": source_payload.get("service_failure_cutoff_time_utc"),
+            "freq_control_log_found": bool(source_payload.get("freq_control_log_found", False)),
+            "query_log_found": bool(source_payload.get("query_log_found", False)),
+            "decision_log_found": bool(source_payload.get("decision_log_found", False)),
+            "control_error_log_found": bool(
+                source_payload.get("control_error_log_found", False)
+            ),
+            "multi_profile": len(port_profile_ids) > 1,
+            "port_profile_ids": port_profile_ids,
+            "series_keys": [_profile_label(profile_id) for profile_id in port_profile_ids],
+            "query_point_count": len(query_points),
+            "pending_query_point_count": sum(
+                1 for point in query_points if point.get("phase") == "pending"
+            ),
+            "active_query_point_count": sum(
+                1 for point in query_points if point.get("phase") == "active"
+            ),
+            "query_error_count": sum(1 for point in query_points if point.get("error") is not None),
+            "control_error_point_count": len(control_error_points),
+            "decision_point_count": len(decision_points),
+            "decision_change_count": sum(
+                1 for point in decision_points if point.get("changed") is True
+            ),
+            "first_job_active_time_offset_s": helper._first_non_none(
+                _float_or_none(point.get("time_offset_s"))
+                for point in query_points
+                if point.get("job_active") is True
+            ),
+            "first_control_error_time_offset_s": helper._first_non_none(
+                _float_or_none(point.get("time_offset_s")) for point in control_error_points
+            ),
+            "lower_bound": helper._first_non_none(
+                point.get("lower_bound") for point in decision_points
+            ),
+            "upper_bound": helper._first_non_none(
+                point.get("upper_bound") for point in decision_points
+            ),
+            "linespace_policy_detected": bool(
+                source_payload.get("linespace_policy_detected", False)
+            ),
+            "target_context_usage_threshold": helper._first_non_none(
+                point.get("target_context_usage_threshold") for point in decision_points
+            ),
+            "segment_count": helper._first_non_none(
+                point.get("segment_count") for point in decision_points
+            ),
+            "segment_width_context_usage": helper._first_non_none(
+                point.get("segment_width_context_usage") for point in decision_points
+            ),
+            "segmented_policy_detected": bool(
+                source_payload.get("segmented_policy_detected", False)
+            ),
+            "low_freq_threshold": helper._first_non_none(
+                point.get("low_freq_threshold") for point in decision_points
+            ),
+            "low_freq_cap_mhz": helper._first_non_none(
+                point.get("low_freq_cap_mhz") for point in decision_points
+            ),
+            "min_effective_min_frequency_mhz": helper._min_or_none(
+                _int_or_none(point.get("effective_min_frequency_mhz"))
+                for point in decision_points
+            ),
+            "max_effective_min_frequency_mhz": helper._max_int_or_none(
+                _int_or_none(point.get("effective_min_frequency_mhz"))
+                for point in decision_points
+            ),
+            "max_context_usage": helper._max_or_none(
+                _float_or_none(point.get("context_usage")) for point in query_points
+            ),
+            "max_window_context_usage": helper._max_or_none(
+                _float_or_none(point.get("window_context_usage")) for point in decision_points
+            ),
+            "min_frequency_mhz": helper._min_or_none(
+                value
+                for point in decision_points
+                for value in (
+                    _int_or_none(point.get("current_frequency_mhz")),
+                    _int_or_none(point.get("target_frequency_mhz")),
+                )
+            ),
+            "max_frequency_mhz": helper._max_int_or_none(
+                value
+                for point in decision_points
+                for value in (
+                    _int_or_none(point.get("current_frequency_mhz")),
+                    _int_or_none(point.get("target_frequency_mhz")),
+                )
+            ),
+            "query_points": query_points,
+            "decision_points": decision_points,
+            "control_error_points": control_error_points,
+        }
+
+    def build_key_stats_payload(self) -> dict[str, Any]:
+        helper = _load_helper_module(
+            "key_stats_extract",
+            "post-process/key-stats/extract_run.py",
+        )
+        payload = helper.build_key_stats_payload(self.output_dir)
+        if not isinstance(payload, dict):
+            raise ValueError("key-stats payload builder must return a JSON object")
+        payload["source_run_dir"] = str(self.source_run_dir)
+        payload["source_post_processed_dir"] = str(self.output_dir)
+        return payload
 
     def build_service_failure_payload(self) -> dict[str, Any]:
         source_payload = self._load_source_json("service-failure/service-failure.json")
@@ -2046,6 +3076,14 @@ class Selector:
             for relative_path, payload in sorted(llm_payloads.items()):
                 if relative_path in self.source_json_paths:
                     self._write_output(relative_path, payload)
+
+        if self._has_source_json(
+            "request-throughput/request-throughput-timeseries.json"
+        ) and self._has_source_json("gateway/llm-requests/llm-requests.json"):
+            self._write_output(
+                "request-throughput/request-throughput-timeseries.json",
+                self.build_request_throughput_payload(),
+            )
 
         if self._has_source_json(
             "agent-output-throughput/agent-output-throughput.json"
@@ -2108,6 +3146,37 @@ class Selector:
                 for relative_path, payload in sorted(self.build_stack_payloads(base_dir).items()):
                     if relative_path in self.source_json_paths:
                         self._write_output(relative_path, payload)
+
+        if self._has_source_json("gateway/ctx-aware-log/ctx-aware-timeseries.json"):
+            self._write_output(
+                "gateway/ctx-aware-log/ctx-aware-timeseries.json",
+                self.build_ctx_aware_payload(),
+            )
+
+        if self._has_source_json("gateway/slo-aware-log/slo-aware-events.json"):
+            self._write_output(
+                "gateway/slo-aware-log/slo-aware-events.json",
+                self.build_slo_aware_payload(),
+            )
+
+        freq_control_relative_path = self._freq_control_summary_relative_path()
+        if freq_control_relative_path is not None:
+            self._write_output(
+                freq_control_relative_path,
+                self.build_freq_control_payload(freq_control_relative_path),
+            )
+
+        if self._has_source_json("slo-decision/slo-decision-summary.json"):
+            self._write_output(
+                "slo-decision/slo-decision-summary.json",
+                self.build_slo_decision_payload(),
+            )
+
+        if self._has_source_json("key-stats/key-stats.json"):
+            self._write_output(
+                "key-stats/key-stats.json",
+                self.build_key_stats_payload(),
+            )
 
         self.generate_visualization_outputs()
 

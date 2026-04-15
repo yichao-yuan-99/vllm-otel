@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot frequency vs energy, throughput, and average LLM time."""
+"""Plot frequency vs energy, power, throughput, and average LLM time."""
 
 from __future__ import annotations
 
@@ -121,13 +121,14 @@ def main() -> int:
     )
 
     rows = _load_rows(input_path)
-    parsed_rows: list[tuple[float, float, float | None, float | None]] = []
+    parsed_rows: list[tuple[float, float, float | None, float | None, float | None]] = []
     for row in rows:
         frequency_mhz = _float_or_none(row.get("frequency_mhz", ""))
         throughput_jobs_per_s = _float_or_none(row.get("average_throughput_jobs_per_s", ""))
         energy_per_finished_j = _float_or_none(
             row.get("average_energy_per_finished_replay_j", "")
         )
+        average_power_w = _float_or_none(row.get("window_avg_power_w", ""))
         average_request_time_in_llm_s = _float_or_none(
             row.get("average_request_time_in_llm_s", "")
         )
@@ -142,6 +143,7 @@ def main() -> int:
                 throughput_jobs_per_s,
                 energy_per_finished_kj,
                 average_request_time_in_llm_s,
+                average_power_w,
             )
         )
 
@@ -159,6 +161,10 @@ def main() -> int:
         (float("nan") if item[3] is None else item[3])
         for item in parsed_rows
     ]
+    power_values = [
+        (float("nan") if item[4] is None else item[4])
+        for item in parsed_rows
+    ]
 
     plt = _import_matplotlib_pyplot()
     fig, axes = plt.subplots(
@@ -170,9 +176,11 @@ def main() -> int:
     )
     energy_axis = axes[0]
     throughput_axis = axes[1]
+    power_axis = energy_axis.twinx()
     llm_axis = throughput_axis.twinx()
 
     energy_color = "#d97706"
+    power_color = "#b91c1c"
     throughput_color = "#2563eb"
     llm_color = "#0f766e"
 
@@ -184,6 +192,16 @@ def main() -> int:
         marker="o",
         markersize=6.5,
         label="Avg energy / finished replay",
+    )
+    power_axis.plot(
+        x_values,
+        power_values,
+        color=power_color,
+        linewidth=2.0,
+        linestyle="--",
+        marker="D",
+        markersize=5.6,
+        label="Avg power",
     )
     throughput_axis.plot(
         x_values,
@@ -207,17 +225,20 @@ def main() -> int:
     )
 
     energy_axis.set_ylabel("Average energy per finished replay (kJ)", color=energy_color)
+    power_axis.set_ylabel("Average power (W)", color=power_color)
     throughput_axis.set_xlabel("Frequency (MHz)")
     throughput_axis.set_ylabel("Average throughput (jobs/s)", color=throughput_color)
     llm_axis.set_ylabel("Average time spent in LLM (s)", color=llm_color)
     energy_axis.tick_params(axis="y", colors=energy_color)
+    power_axis.tick_params(axis="y", colors=power_color)
     throughput_axis.tick_params(axis="y", colors=throughput_color)
     llm_axis.tick_params(axis="y", colors=llm_color)
     energy_axis.grid(True, axis="both", alpha=0.25, linestyle=":")
     throughput_axis.grid(True, axis="both", alpha=0.25, linestyle=":")
     energy_axis.set_axisbelow(True)
     throughput_axis.set_axisbelow(True)
-    energy_axis.set_title("Energy", loc="left", fontsize=11.5)
+    throughput_axis.set_xlim(max(x_values), min(x_values))
+    energy_axis.set_title("Energy and Average Power", loc="left", fontsize=11.5)
     throughput_axis.set_title("Throughput and Average LLM Time", loc="left", fontsize=11.5)
 
     title_lines = [args.title]
@@ -227,11 +248,12 @@ def main() -> int:
     fig.suptitle("\n".join(title_lines))
 
     energy_handles, energy_labels = energy_axis.get_legend_handles_labels()
+    power_handles, power_labels = power_axis.get_legend_handles_labels()
     throughput_handles, throughput_labels = throughput_axis.get_legend_handles_labels()
     llm_handles, llm_labels = llm_axis.get_legend_handles_labels()
     energy_axis.legend(
-        energy_handles,
-        energy_labels,
+        energy_handles + power_handles,
+        energy_labels + power_labels,
         loc="upper left",
         frameon=False,
     )

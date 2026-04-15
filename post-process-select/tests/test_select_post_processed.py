@@ -118,6 +118,15 @@ def install_fake_visualization_modules(module: object) -> callable:
             function_name="generate_figure_for_run_dir",
             input_arg_name="timeseries_input_path",
         ),
+        "post-process/visualization/request-throughput/generate_all_figures.py": _FakeVisualizationModule(
+            manifest_name="figures-manifest.json",
+            figure_file_names=[
+                "request-throughput.png",
+                "request-throughput-status-200.png",
+            ],
+            function_name="generate_figure_for_run_dir",
+            input_arg_name="timeseries_input_path",
+        ),
         "post-process/visualization/agent-output-throughput/generate_all_figures.py": _FakeVisualizationModule(
             manifest_name="figures-manifest.json",
             figure_file_names=[
@@ -165,6 +174,34 @@ def install_fake_visualization_modules(module: object) -> callable:
             function_name="generate_figures_for_run_dir",
             input_arg_name="stack_kv_input_dir",
         ),
+        "post-process/visualization/gateway-ctx-aware/generate_all_figures.py": _FakeVisualizationModule(
+            manifest_name="figures-manifest.json",
+            figure_file_names=["ctx-aware-over-time.png"],
+            function_name="generate_figure_for_run_dir",
+            input_arg_name="timeseries_input_path",
+        ),
+        "post-process/visualization/gateway-slo-aware/generate_all_figures.py": _FakeVisualizationModule(
+            manifest_name="figures-manifest.json",
+            figure_file_names=[
+                "slo-aware-over-time.png",
+                "slo-aware-stored-throughput.png",
+            ],
+            function_name="generate_figure_for_run_dir",
+            input_arg_name="slo_aware_input_path",
+        ),
+        "post-process/visualization/freq-control/generate_all_figures.py": _FakeVisualizationModule(
+            manifest_name="figures-manifest.json",
+            figure_file_names=["freq-control-over-time.png"],
+            function_name="generate_figure_for_run_dir",
+            input_arg_name="freq_control_input_path",
+        ),
+        "post-process/visualization/slo-decision/generate_all_figures.py": _FakeVisualizationModule(
+            manifest_name="figures-manifest.json",
+            figure_file_names=["slo-decision-over-time.png"],
+            function_name="generate_figure_for_run_dir",
+            input_arg_name="slo_decision_input_path",
+        ),
+        "post-process/visualization/stacked-per-agent/generate_all_figures.py": _build_fake_stacked_per_agent_module(),
     }
 
     def fake_loader(cache_key: str, relative_path: str) -> object:
@@ -195,6 +232,73 @@ def _build_fake_gateway_stack_module() -> object:
         {"input_name": "compute-prompt-plus-completion-tokens-stacked-histogram.json"},
     ]
     return module
+
+
+def _build_fake_stacked_per_agent_module() -> object:
+    class _FakeStackedPerAgentModule:
+        DEFAULT_MANIFEST_NAME = "figures-manifest.json"
+
+        def generate_figures_for_run_dir(
+            self,
+            run_dir: Path,
+            *,
+            output_dir: Path | None = None,
+            image_format: str = "png",
+            dpi: int = 220,
+            **kwargs: object,
+        ) -> Path:
+            resolved_run_dir = Path(run_dir).expanduser().resolve()
+            if output_dir is None:
+                raise AssertionError("fake stacked-per-agent generator requires output_dir")
+            resolved_output_dir = Path(output_dir).expanduser().resolve()
+            resolved_output_dir.mkdir(parents=True, exist_ok=True)
+
+            materialized_path = (
+                resolved_output_dir / "stacked-per-agent.window-120s.start-0.end-full.json"
+            )
+            materialized_path.write_text(
+                json.dumps(
+                    {
+                        "source_run_dir": str(resolved_run_dir),
+                        "window_size_s": 120.0,
+                        "analysis_window_start_s": 0.0,
+                        "analysis_window_end_s": None,
+                    },
+                    indent=2,
+                    ensure_ascii=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            figure_path = (
+                resolved_output_dir / "stacked-per-agent.window-120s.start-0.end-full.png"
+            )
+            figure_path.write_bytes(b"fake-image")
+
+            manifest_path = resolved_output_dir / self.DEFAULT_MANIFEST_NAME
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "source_run_dir": str(resolved_run_dir),
+                        "output_dir": str(resolved_output_dir),
+                        "image_format": image_format,
+                        "dpi": dpi,
+                        "figure_generated": True,
+                        "figure_file_name": figure_path.name,
+                        "figure_path": str(figure_path.resolve()),
+                        "materialized_file_name": materialized_path.name,
+                        "materialized_data_path": str(materialized_path.resolve()),
+                    },
+                    indent=2,
+                    ensure_ascii=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return manifest_path
+
+    return _FakeStackedPerAgentModule()
 
 
 def build_sample_run(tmp_path: Path) -> Path:
@@ -333,6 +437,21 @@ def build_sample_run(tmp_path: Path) -> Path:
             "sample_count": 10,
             "throughput_points": [],
             "throughput_points_excluding_cancelled": [],
+            "multi_profile": False,
+            "port_profile_ids": [0],
+            "series_keys": ["profile-0"],
+            "series_by_profile": {
+                "profile-0": {
+                    "gateway_profile_id": 0,
+                    "replay_count": 3,
+                    "finished_replay_count": 3,
+                    "finished_replay_count_excluding_cancelled": 3,
+                    "cancelled_finished_replay_count": 0,
+                    "sample_count": 10,
+                    "throughput_points": [],
+                    "throughput_points_excluding_cancelled": [],
+                }
+            },
         },
     )
 
@@ -353,6 +472,20 @@ def build_sample_run(tmp_path: Path) -> Path:
             "max_concurrency": 1,
             "avg_concurrency": 0.7,
             "concurrency_points": [],
+            "multi_profile": False,
+            "port_profile_ids": [0],
+            "series_keys": ["profile-0"],
+            "series_by_profile": {
+                "profile-0": {
+                    "gateway_profile_id": 0,
+                    "replay_count": 3,
+                    "jobs_with_valid_range_count": 3,
+                    "sample_count": 10,
+                    "max_concurrency": 1,
+                    "avg_concurrency": 0.7,
+                    "concurrency_points": [],
+                }
+            },
         },
     )
 
@@ -396,8 +529,10 @@ def build_sample_run(tmp_path: Path) -> Path:
             "agents": [
                 {
                     "gateway_run_id": "run-a",
-                    "gateway_profile_id": None,
+                    "gateway_profile_id": 0,
                     "api_token_hash": "hash-a",
+                    "replay_worker_status": "completed",
+                    "replay_completed": True,
                     "request_count": 1,
                     "requests_with_output_tokens": 1,
                     "requests_with_llm_request_duration": 1,
@@ -409,8 +544,10 @@ def build_sample_run(tmp_path: Path) -> Path:
                 },
                 {
                     "gateway_run_id": "run-b",
-                    "gateway_profile_id": None,
+                    "gateway_profile_id": 0,
                     "api_token_hash": "hash-b",
+                    "replay_worker_status": "completed",
+                    "replay_completed": True,
                     "request_count": 1,
                     "requests_with_output_tokens": 1,
                     "requests_with_llm_request_duration": 1,
@@ -422,8 +559,10 @@ def build_sample_run(tmp_path: Path) -> Path:
                 },
                 {
                     "gateway_run_id": "run-c",
-                    "gateway_profile_id": None,
+                    "gateway_profile_id": 0,
                     "api_token_hash": "hash-c",
+                    "replay_worker_status": "failed",
+                    "replay_completed": False,
                     "request_count": 1,
                     "requests_with_output_tokens": 1,
                     "requests_with_llm_request_duration": 1,
@@ -434,6 +573,16 @@ def build_sample_run(tmp_path: Path) -> Path:
                     "output_throughput_tokens_per_s": 7.5,
                 },
             ],
+            "multi_profile": False,
+            "port_profile_ids": [0],
+            "series_keys": ["profile-0"],
+            "series_by_profile": {
+                "profile-0": {
+                    "gateway_profile_id": 0,
+                    "agent_count": 3,
+                    "agents": [],
+                }
+            },
         },
     )
 
@@ -446,7 +595,8 @@ def build_sample_run(tmp_path: Path) -> Path:
         "requests": [
             {
                 "gateway_run_id": "run-a",
-                "gateway_profile_id": None,
+                "gateway_profile_id": 0,
+                "api_token_hash": "hash-a",
                 "trace_id": "trace-a",
                 "request_id": "req-a",
                 "request_start_time": "2026-01-01T00:00:01Z",
@@ -469,7 +619,8 @@ def build_sample_run(tmp_path: Path) -> Path:
             },
             {
                 "gateway_run_id": "run-b",
-                "gateway_profile_id": None,
+                "gateway_profile_id": 0,
+                "api_token_hash": "hash-b",
                 "trace_id": "trace-b",
                 "request_id": "req-b",
                 "request_start_time": "2026-01-01T00:00:04Z",
@@ -492,7 +643,8 @@ def build_sample_run(tmp_path: Path) -> Path:
             },
             {
                 "gateway_run_id": "run-c",
-                "gateway_profile_id": None,
+                "gateway_profile_id": 0,
+                "api_token_hash": "hash-c",
                 "trace_id": "trace-c",
                 "request_id": "req-c",
                 "request_start_time": "2026-01-01T00:00:07Z",
@@ -514,6 +666,8 @@ def build_sample_run(tmp_path: Path) -> Path:
                 "gen_ai.latency.time_to_first_token": 0.5,
             },
         ],
+        "multi_profile": False,
+        "port_profile_ids": [0],
     }
     write_json(
         post_processed_dir / "gateway" / "llm-requests" / "llm-requests.json",
@@ -543,33 +697,74 @@ def build_sample_run(tmp_path: Path) -> Path:
         post_processed_dir / "gateway" / "llm-requests" / "llm-requests-stats.499.json",
         {"placeholder": True},
     )
+    write_json(
+        post_processed_dir / "request-throughput" / "request-throughput-timeseries.json",
+        {
+            "source_run_dir": str(run_dir),
+            "source_llm_requests_path": str(
+                post_processed_dir / "gateway" / "llm-requests" / "llm-requests.json"
+            ),
+            "source_gateway_output_dir": str(run_dir / "gateway-output"),
+            "service_failure_detected": False,
+            "service_failure_cutoff_time_utc": None,
+            "total_duration_s": 10.0,
+            "timepoint_frequency_hz": 1.0,
+            "timepoint_interval_s": 1.0,
+            "window_size_s": 1.0,
+            "window_width_s": 2.0,
+            "request_count": 3,
+            "finished_request_count": 3,
+            "finished_request_count_status_200": 2,
+            "non_200_finished_request_count": 1,
+            "sample_count": 10,
+            "throughput_points": [],
+            "throughput_points_status_200": [],
+            "multi_profile": False,
+            "port_profile_ids": [0],
+            "series_keys": ["profile-0"],
+            "series_by_profile": {
+                "profile-0": {
+                    "gateway_profile_id": 0,
+                    "request_count": 3,
+                    "finished_request_count": 3,
+                    "finished_request_count_status_200": 2,
+                    "non_200_finished_request_count": 1,
+                    "sample_count": 10,
+                    "throughput_points": [],
+                    "throughput_points_status_200": [],
+                }
+            },
+        },
+    )
 
     write_json(
         post_processed_dir / "gateway" / "usage" / "usage-summary.json",
         {
             "source_run_dir": str(run_dir),
             "source_gateway_output_dir": str(run_dir / "gateway-output"),
+            "service_failure_detected": False,
+            "service_failure_cutoff_time_utc": None,
             "agent_count": 3,
             "request_count": 3,
             "usage": {},
             "agents": [
                 {
                     "gateway_run_id": "run-a",
-                    "gateway_profile_id": None,
+                    "gateway_profile_id": 0,
                     "api_token_hash": "hash-a",
                     "request_count": 1,
                     "usage": {},
                 },
                 {
                     "gateway_run_id": "run-b",
-                    "gateway_profile_id": None,
+                    "gateway_profile_id": 0,
                     "api_token_hash": "hash-b",
                     "request_count": 1,
                     "usage": {},
                 },
                 {
                     "gateway_run_id": "run-c",
-                    "gateway_profile_id": None,
+                    "gateway_profile_id": 0,
                     "api_token_hash": "hash-c",
                     "request_count": 1,
                     "usage": {},
@@ -580,17 +775,32 @@ def build_sample_run(tmp_path: Path) -> Path:
 
     write_json(
         post_processed_dir / "prefill-concurrency" / "prefill-activities.json",
-        {"placeholder": True},
+        {
+            "multi_profile": False,
+            "port_profile_ids": [0],
+            "series_keys": ["profile-0"],
+            "activities": [],
+            "activities_by_profile": {},
+        },
     )
     write_json(
         post_processed_dir / "prefill-concurrency" / "prefill-concurrency-timeseries.json",
         {
             "tick_ms": 10,
+            "multi_profile": False,
+            "port_profile_ids": [0],
+            "series_keys": ["profile-0"],
+            "series_by_profile": {},
         },
     )
     write_json(
         post_processed_dir / "prefill-concurrency" / "prefill-concurrency-stats.json",
-        {"placeholder": True},
+        {
+            "multi_profile": False,
+            "port_profile_ids": [0],
+            "series_keys": ["profile-0"],
+            "series_by_profile": {},
+        },
     )
 
     write_json(
@@ -706,11 +916,14 @@ def build_sample_run(tmp_path: Path) -> Path:
             "input_request_count": 3,
             "metric": "prompt_tokens",
             "phase": "prefill",
+            "multi_profile": False,
+            "port_profile_ids": [0],
+            "series_keys": ["profile-0"],
             "entry_count": 2,
             "entries": [
                 {
                     "gateway_run_id": "run-b",
-                    "gateway_profile_id": None,
+                    "gateway_profile_id": 0,
                     "request_id": "req-b",
                     "trace_id": "trace-b",
                     "metric": "prompt_tokens",
@@ -723,7 +936,7 @@ def build_sample_run(tmp_path: Path) -> Path:
                 },
                 {
                     "gateway_run_id": "run-c",
-                    "gateway_profile_id": None,
+                    "gateway_profile_id": 0,
                     "request_id": "req-c",
                     "trace_id": "trace-c",
                     "metric": "prompt_tokens",
@@ -735,11 +948,378 @@ def build_sample_run(tmp_path: Path) -> Path:
                     "avg_value_per_s": 20.0,
                 },
             ],
+            "entries_by_profile": {},
         },
     )
     write_json(
         post_processed_dir / "gateway" / "stack" / "prompt-tokens-stacked-histogram.json",
-        {"placeholder": True},
+        {
+            "source_run_dir": str(run_dir),
+            "source_gateway_output_dir": str(run_dir / "gateway-output"),
+            "source_llm_requests_path": str(
+                post_processed_dir / "gateway" / "llm-requests" / "llm-requests.json"
+            ),
+            "service_failure_detected": False,
+            "service_failure_cutoff_time_utc": None,
+            "input_request_count": 3,
+            "metric": "prompt_tokens",
+            "phase": "prefill",
+            "multi_profile": False,
+            "port_profile_ids": [0],
+            "series_keys": ["profile-0"],
+            "bucket_width_s": 1,
+            "point_count": 0,
+            "points": [],
+            "series_by_profile": {},
+        },
+    )
+    write_json(
+        post_processed_dir / "gateway" / "stack-context" / "context-usage-ranges.json",
+        {
+            "source_run_dir": str(run_dir),
+            "source_gateway_output_dir": str(run_dir / "gateway-output"),
+            "source_llm_requests_path": str(
+                post_processed_dir / "gateway" / "llm-requests" / "llm-requests.json"
+            ),
+            "service_failure_detected": False,
+            "service_failure_cutoff_time_utc": None,
+            "input_request_count": 3,
+            "metric": "context_usage_tokens",
+            "phase": "context",
+            "multi_profile": False,
+            "port_profile_ids": [0],
+            "series_keys": ["profile-0"],
+            "entry_count": 2,
+            "entries": [
+                {
+                    "gateway_run_id": "run-b",
+                    "gateway_profile_id": 0,
+                    "agent_key": "hash-b",
+                    "request_id": "req-b",
+                    "range_start_s": 4.5,
+                    "range_end_s": 5.5,
+                    "range_duration_s": 1.0,
+                    "total_value": 300.0,
+                    "avg_value_per_s": 300.0,
+                },
+                {
+                    "gateway_run_id": "run-c",
+                    "gateway_profile_id": 0,
+                    "agent_key": "hash-c",
+                    "request_id": "req-c",
+                    "range_start_s": 7.0,
+                    "range_end_s": 8.0,
+                    "range_duration_s": 1.0,
+                    "total_value": 180.0,
+                    "avg_value_per_s": 180.0,
+                },
+            ],
+            "entries_by_profile": {},
+        },
+    )
+    write_json(
+        post_processed_dir / "gateway" / "stack-context" / "context-usage-stacked-histogram.json",
+        {
+            "source_run_dir": str(run_dir),
+            "source_gateway_output_dir": str(run_dir / "gateway-output"),
+            "source_llm_requests_path": str(
+                post_processed_dir / "gateway" / "llm-requests" / "llm-requests.json"
+            ),
+            "service_failure_detected": False,
+            "service_failure_cutoff_time_utc": None,
+            "input_request_count": 3,
+            "metric": "context_usage_tokens",
+            "phase": "context",
+            "multi_profile": False,
+            "port_profile_ids": [0],
+            "series_keys": ["profile-0"],
+            "bucket_width_s": 1,
+            "point_count": 0,
+            "points": [],
+            "series_by_profile": {},
+        },
+    )
+    write_json(
+        post_processed_dir / "gateway" / "stack-kv" / "kv-usage-ranges.json",
+        {
+            "source_run_dir": str(run_dir),
+            "source_gateway_output_dir": str(run_dir / "gateway-output"),
+            "source_llm_requests_path": str(
+                post_processed_dir / "gateway" / "llm-requests" / "llm-requests.json"
+            ),
+            "service_failure_detected": False,
+            "service_failure_cutoff_time_utc": None,
+            "input_request_count": 3,
+            "metric": "kv_usage_tokens",
+            "phase": "request_lifetime",
+            "multi_profile": False,
+            "port_profile_ids": [0],
+            "series_keys": ["profile-0"],
+            "entry_count": 2,
+            "entries": [
+                {
+                    "gateway_run_id": "run-b",
+                    "gateway_profile_id": 0,
+                    "request_id": "req-b",
+                    "range_start_s": 4.0,
+                    "range_end_s": 6.0,
+                    "range_duration_s": 2.0,
+                    "total_value": 200.0,
+                    "avg_value_per_s": 100.0,
+                },
+                {
+                    "gateway_run_id": "run-c",
+                    "gateway_profile_id": 0,
+                    "request_id": "req-c",
+                    "range_start_s": 7.0,
+                    "range_end_s": 9.0,
+                    "range_duration_s": 2.0,
+                    "total_value": 160.0,
+                    "avg_value_per_s": 80.0,
+                },
+            ],
+            "entries_by_profile": {},
+        },
+    )
+    write_json(
+        post_processed_dir / "gateway" / "stack-kv" / "kv-usage-stacked-histogram.json",
+        {
+            "source_run_dir": str(run_dir),
+            "source_gateway_output_dir": str(run_dir / "gateway-output"),
+            "source_llm_requests_path": str(
+                post_processed_dir / "gateway" / "llm-requests" / "llm-requests.json"
+            ),
+            "service_failure_detected": False,
+            "service_failure_cutoff_time_utc": None,
+            "input_request_count": 3,
+            "metric": "kv_usage_tokens",
+            "phase": "request_lifetime",
+            "multi_profile": False,
+            "port_profile_ids": [0],
+            "series_keys": ["profile-0"],
+            "bucket_width_s": 1,
+            "point_count": 0,
+            "points": [],
+            "series_by_profile": {},
+        },
+    )
+    write_json(
+        post_processed_dir / "gateway" / "ctx-aware-log" / "ctx-aware-timeseries.json",
+        {
+            "source_run_dir": str(run_dir),
+            "source_ctx_aware_log_path": str(run_dir / "gateway-output" / "job" / "ctx_aware_x.jsonl"),
+            "selected_ctx_aware_log_file_name": "ctx_aware_x.jsonl",
+            "ctx_aware_log_candidate_count": 1,
+            "ctx_aware_log_candidates": [
+                str(run_dir / "gateway-output" / "job" / "ctx_aware_x.jsonl")
+            ],
+            "started_at": "2026-01-01T00:00:04Z",
+            "ended_at": "2026-01-01T00:00:08Z",
+            "sample_count": 3,
+            "duration_s": 4.0,
+            "avg_sample_interval_s": 2.0,
+            "metric_summaries": {},
+            "samples": [
+                {
+                    "timestamp": "2026-01-01T00:00:04Z",
+                    "second": 0.0,
+                    "ongoing_agent_count": 1,
+                    "pending_agent_count": 0,
+                    "ongoing_effective_context_tokens": 10,
+                    "pending_effective_context_tokens": 0,
+                    "agents_turned_pending_due_to_context_threshold": 0,
+                    "agents_turned_ongoing": 1,
+                    "new_agents_added_as_pending": 0,
+                    "new_agents_added_as_ongoing": 1,
+                },
+                {
+                    "timestamp": "2026-01-01T00:00:06Z",
+                    "second": 2.0,
+                    "ongoing_agent_count": 1,
+                    "pending_agent_count": 1,
+                    "ongoing_effective_context_tokens": 20,
+                    "pending_effective_context_tokens": 5,
+                    "agents_turned_pending_due_to_context_threshold": 1,
+                    "agents_turned_ongoing": 0,
+                    "new_agents_added_as_pending": 0,
+                    "new_agents_added_as_ongoing": 0,
+                },
+                {
+                    "timestamp": "2026-01-01T00:00:08Z",
+                    "second": 4.0,
+                    "ongoing_agent_count": 2,
+                    "pending_agent_count": 0,
+                    "ongoing_effective_context_tokens": 30,
+                    "pending_effective_context_tokens": 0,
+                    "agents_turned_pending_due_to_context_threshold": 0,
+                    "agents_turned_ongoing": 1,
+                    "new_agents_added_as_pending": 0,
+                    "new_agents_added_as_ongoing": 1,
+                },
+            ],
+        },
+    )
+    write_json(
+        post_processed_dir / "gateway" / "slo-aware-log" / "slo-aware-events.json",
+        {
+            "source_run_dir": str(run_dir),
+            "source_type": "replay",
+            "source_slo_aware_log_paths": [str(run_dir / "gateway-output" / "job" / "slo_aware.jsonl")],
+            "experiment_started_at": "2026-01-01T00:00:00Z",
+            "experiment_finished_at": "2026-01-01T00:00:10Z",
+            "time_constraint_s": 10.0,
+            "analysis_window_start_utc": "2026-01-01T00:00:00Z",
+            "analysis_window_end_utc": "2026-01-01T00:00:10Z",
+            "service_failure_detected": False,
+            "service_failure_cutoff_time_utc": None,
+            "slo_aware_log_found": True,
+            "events": [
+                {
+                    "timestamp_utc": "2026-01-01T00:00:04Z",
+                    "time_offset_s": 4.0,
+                    "event_type": "enter",
+                    "api_token_hash": "hash-b",
+                    "trace_id": "trace-b",
+                    "wake_reason": None,
+                    "resume_disposition": None,
+                    "output_tokens_per_s": 5.0,
+                    "slo_slack_s": 1.0,
+                    "slo_target_tokens_per_s": 8.0,
+                    "min_output_tokens_per_s": 4.0,
+                    "avg_output_tokens_per_s": 5.0,
+                    "ralexation_duration_s": 0.5,
+                    "ralexation_until_utc": "2026-01-01T00:00:04.500000Z",
+                },
+                {
+                    "timestamp_utc": "2026-01-01T00:00:07Z",
+                    "time_offset_s": 7.0,
+                    "event_type": "wake",
+                    "api_token_hash": "hash-c",
+                    "trace_id": "trace-c",
+                    "wake_reason": "slack_recovered",
+                    "resume_disposition": "resume",
+                    "output_tokens_per_s": 7.5,
+                    "slo_slack_s": 2.0,
+                    "slo_target_tokens_per_s": 8.0,
+                    "min_output_tokens_per_s": 6.0,
+                    "avg_output_tokens_per_s": 7.0,
+                    "ralexation_duration_s": 0.2,
+                    "ralexation_until_utc": "2026-01-01T00:00:07.200000Z",
+                },
+            ],
+        },
+    )
+    write_json(
+        post_processed_dir / "freq-control" / "freq-control-summary.json",
+        {
+            "source_run_dir": str(run_dir),
+            "source_type": "replay",
+            "source_freq_control_log_dir_name": "freq-control",
+            "source_query_log_paths": [str(run_dir / "freq-control" / "freq-controller.query.jsonl")],
+            "source_decision_log_paths": [str(run_dir / "freq-control" / "freq-controller.decision.jsonl")],
+            "source_control_error_log_paths": [str(run_dir / "freq-control" / "freq-controller.control-error.jsonl")],
+            "experiment_started_at": "2026-01-01T00:00:00Z",
+            "experiment_finished_at": "2026-01-01T00:00:10Z",
+            "time_constraint_s": 10.0,
+            "analysis_window_start_utc": "2026-01-01T00:00:00Z",
+            "analysis_window_end_utc": "2026-01-01T00:00:10Z",
+            "service_failure_detected": False,
+            "service_failure_cutoff_time_utc": None,
+            "freq_control_log_found": True,
+            "query_log_found": True,
+            "decision_log_found": True,
+            "control_error_log_found": True,
+            "multi_profile": False,
+            "port_profile_ids": [0],
+            "series_keys": ["profile-0"],
+            "linespace_policy_detected": False,
+            "segmented_policy_detected": False,
+            "query_points": [
+                {
+                    "timestamp_utc": "2026-01-01T00:00:04Z",
+                    "time_offset_s": 4.0,
+                    "phase": "active",
+                    "job_active": True,
+                    "context_usage": 0.4,
+                    "error": None,
+                    "port_profile_id": 0,
+                },
+                {
+                    "timestamp_utc": "2026-01-01T00:00:08Z",
+                    "time_offset_s": 8.0,
+                    "phase": "pending",
+                    "job_active": False,
+                    "context_usage": 0.8,
+                    "error": "slow",
+                    "port_profile_id": 0,
+                },
+            ],
+            "decision_points": [
+                {
+                    "timestamp_utc": "2026-01-01T00:00:06Z",
+                    "time_offset_s": 6.0,
+                    "changed": True,
+                    "lower_bound": 0.2,
+                    "upper_bound": 0.9,
+                    "target_context_usage_threshold": 0.7,
+                    "segment_count": 4,
+                    "segment_width_context_usage": 0.1,
+                    "low_freq_threshold": None,
+                    "low_freq_cap_mhz": None,
+                    "effective_min_frequency_mhz": 1000,
+                    "window_context_usage": 0.65,
+                    "current_frequency_mhz": 1200,
+                    "target_frequency_mhz": 1300,
+                    "port_profile_id": 0,
+                }
+            ],
+            "control_error_points": [
+                {
+                    "timestamp_utc": "2026-01-01T00:00:07Z",
+                    "time_offset_s": 7.0,
+                    "port_profile_id": 0,
+                }
+            ],
+        },
+    )
+    write_json(
+        post_processed_dir / "slo-decision" / "slo-decision-summary.json",
+        {
+            "source_run_dir": str(run_dir),
+            "source_type": "replay",
+            "source_slo_decision_log_dir_name": "freq-control-linespace",
+            "source_slo_decision_log_paths": [
+                str(run_dir / "freq-control-linespace" / "freq-controller-ls.slo-decision.jsonl")
+            ],
+            "experiment_started_at": "2026-01-01T00:00:00Z",
+            "experiment_finished_at": "2026-01-01T00:00:10Z",
+            "time_constraint_s": 10.0,
+            "analysis_window_start_utc": "2026-01-01T00:00:00Z",
+            "analysis_window_end_utc": "2026-01-01T00:00:10Z",
+            "service_failure_detected": False,
+            "service_failure_cutoff_time_utc": None,
+            "slo_decision_log_found": True,
+            "decision_points": [
+                {
+                    "timestamp_utc": "2026-01-01T00:00:04Z",
+                    "time_offset_s": 4.0,
+                    "changed": False,
+                    "current_frequency_mhz": 1200,
+                    "target_frequency_mhz": 1200,
+                    "window_min_output_tokens_per_s": 6.0,
+                    "target_output_throughput_tokens_per_s": 8.0,
+                },
+                {
+                    "timestamp_utc": "2026-01-01T00:00:07Z",
+                    "time_offset_s": 7.0,
+                    "changed": True,
+                    "current_frequency_mhz": 1200,
+                    "target_frequency_mhz": 1300,
+                    "window_min_output_tokens_per_s": 7.0,
+                    "target_output_throughput_tokens_per_s": 8.0,
+                },
+            ],
+        },
     )
 
     figures_dir = post_processed_dir / "visualization" / "job-throughput"
@@ -814,12 +1394,21 @@ def test_select_post_processed_rewrites_supported_outputs(tmp_path: Path) -> Non
     assert throughput_payload["finished_replay_count"] == 2
     assert throughput_payload["sample_count"] == 5
     assert throughput_payload["total_duration_s"] == 5.0
+    assert throughput_payload["multi_profile"] is False
+    assert throughput_payload["port_profile_ids"] == [0]
+    assert throughput_payload["series_keys"] == ["profile-0"]
+    assert throughput_payload["series_by_profile"]["profile-0"]["gateway_profile_id"] == 0
+    assert throughput_payload["series_by_profile"]["profile-0"]["sample_count"] == 5
 
     concurrency_payload = read_json(
         output_dir / "job-concurrency" / "job-concurrency-timeseries.json"
     )
     assert concurrency_payload["sample_count"] == 5
     assert concurrency_payload["max_concurrency"] == 1
+    assert concurrency_payload["multi_profile"] is False
+    assert concurrency_payload["port_profile_ids"] == [0]
+    assert concurrency_payload["series_keys"] == ["profile-0"]
+    assert concurrency_payload["series_by_profile"]["profile-0"]["gateway_profile_id"] == 0
     assert concurrency_payload["concurrency_points"][:3] == [
         {"second": 0, "concurrency": 1},
         {"second": 1, "concurrency": 0},
@@ -843,6 +1432,20 @@ def test_select_post_processed_rewrites_supported_outputs(tmp_path: Path) -> Non
         "hash-b",
         "hash-c",
     ]
+    assert [agent["gateway_profile_id"] for agent in agent_output_payload["agents"]] == [0, 0]
+    assert [agent["replay_worker_status"] for agent in agent_output_payload["agents"]] == [
+        "completed",
+        "failed",
+    ]
+    assert [agent["replay_completed"] for agent in agent_output_payload["agents"]] == [
+        True,
+        False,
+    ]
+    assert agent_output_payload["multi_profile"] is False
+    assert agent_output_payload["port_profile_ids"] == [0]
+    assert agent_output_payload["series_keys"] == ["profile-0"]
+    assert agent_output_payload["series_by_profile"]["profile-0"]["gateway_profile_id"] == 0
+    assert agent_output_payload["series_by_profile"]["profile-0"]["agent_count"] == 2
     assert [
         agent["output_throughput_tokens_per_s"]
         for agent in agent_output_payload["agents"]
@@ -876,6 +1479,29 @@ def test_select_post_processed_rewrites_supported_outputs(tmp_path: Path) -> Non
     assert requests_payload["requests"][0]["request_duration_ms"] == 1000.0
     assert requests_payload["requests"][1]["request_start_offset_s"] == 2.0
     assert requests_payload["requests"][1]["request_end_offset_s"] == 4.0
+    assert requests_payload["multi_profile"] is False
+    assert requests_payload["port_profile_ids"] == [0]
+
+    request_throughput_payload = read_json(
+        output_dir / "request-throughput" / "request-throughput-timeseries.json"
+    )
+    assert request_throughput_payload["request_count"] == 2
+    assert request_throughput_payload["finished_request_count"] == 2
+    assert request_throughput_payload["finished_request_count_status_200"] == 1
+    assert request_throughput_payload["non_200_finished_request_count"] == 1
+    assert request_throughput_payload["sample_count"] == 5
+    assert request_throughput_payload["multi_profile"] is False
+    assert request_throughput_payload["port_profile_ids"] == [0]
+    assert request_throughput_payload["series_keys"] == ["profile-0"]
+    assert request_throughput_payload["series_by_profile"]["profile-0"]["gateway_profile_id"] == 0
+    assert request_throughput_payload["throughput_points"][0] == {
+        "time_s": 0.0,
+        "throughput_requests_per_s": 1.0,
+    }
+    assert request_throughput_payload["throughput_points_status_200"][-1] == {
+        "time_s": 4.0,
+        "throughput_requests_per_s": 0.0,
+    }
 
     llm_stats_payload = read_json(
         output_dir / "gateway" / "llm-requests" / "llm-request-stats.json"
@@ -887,6 +1513,8 @@ def test_select_post_processed_rewrites_supported_outputs(tmp_path: Path) -> Non
     usage_payload = read_json(output_dir / "gateway" / "usage" / "usage-summary.json")
     assert usage_payload["request_count"] == 2
     assert usage_payload["agent_count"] == 2
+    assert usage_payload["service_failure_detected"] is False
+    assert usage_payload["service_failure_cutoff_time_utc"] is None
     assert usage_payload["usage"]["prompt_tokens"] == 210
     assert usage_payload["usage"]["completion_tokens"] == 35
     assert [agent["api_token_hash"] for agent in usage_payload["agents"]] == [
@@ -899,6 +1527,10 @@ def test_select_post_processed_rewrites_supported_outputs(tmp_path: Path) -> Non
     )
     assert prefill_activity_payload["request_count"] == 2
     assert prefill_activity_payload["prefill_activity_count"] == 1
+    assert prefill_activity_payload["port_profile_ids"] == [0]
+    assert prefill_activity_payload["series_keys"] == ["profile-0"]
+    assert prefill_activity_payload["activities_by_profile"]["profile-0"]["gateway_profile_id"] == 0
+    assert prefill_activity_payload["activities_by_profile"]["profile-0"]["prefill_activity_count"] == 1
     assert prefill_activity_payload["activities"][0]["request_id"] == "req-c"
     assert prefill_activity_payload["activities"][0]["prefill_start_offset_s"] == 2.2
     assert prefill_activity_payload["activities"][0]["prefill_end_offset_s"] == 2.6
@@ -914,6 +1546,14 @@ def test_select_post_processed_rewrites_supported_outputs(tmp_path: Path) -> Non
     ]
     assert non_zero_points[0]["time_offset_s"] == 2.2
     assert non_zero_points[-1]["time_offset_s"] == 2.59
+    assert prefill_timeseries_payload["series_by_profile"]["profile-0"]["sample_count"] == 500
+
+    prefill_stats_payload = read_json(
+        output_dir / "prefill-concurrency" / "prefill-concurrency-stats.json"
+    )
+    assert prefill_stats_payload["sample_count"] == 500
+    assert prefill_stats_payload["max_concurrency"] == 1
+    assert prefill_stats_payload["series_by_profile"]["profile-0"]["gateway_profile_id"] == 0
 
     split_payload = read_json(output_dir / "split" / "duration" / "duration-split-summary.json")
     assert split_payload["job_count_total"] == 2
@@ -970,6 +1610,9 @@ def test_select_post_processed_rewrites_supported_outputs(tmp_path: Path) -> Non
     )
     assert stack_ranges_payload["input_request_count"] == 2
     assert stack_ranges_payload["entry_count"] == 2
+    assert stack_ranges_payload["multi_profile"] is False
+    assert stack_ranges_payload["port_profile_ids"] == [0]
+    assert stack_ranges_payload["series_keys"] == ["profile-0"]
     assert stack_ranges_payload["entries"][0]["range_start_s"] == 0.0
     assert stack_ranges_payload["entries"][0]["range_end_s"] == 0.5
     assert stack_ranges_payload["entries"][0]["total_value"] == 50.0
@@ -983,6 +1626,81 @@ def test_select_post_processed_rewrites_supported_outputs(tmp_path: Path) -> Non
         {"second": 1, "accumulated_value": 0.0},
         {"second": 2, "accumulated_value": 20.0},
     ]
+
+    stack_context_ranges_payload = read_json(
+        output_dir / "gateway" / "stack-context" / "context-usage-ranges.json"
+    )
+    assert stack_context_ranges_payload["entry_count"] == 2
+    assert stack_context_ranges_payload["entries_by_profile"]["profile-0"][0][
+        "request_id"
+    ] == "req-b"
+    assert stack_context_ranges_payload["entries_by_profile"]["profile-0"][1][
+        "range_start_s"
+    ] == 2.0
+
+    stack_context_hist_payload = read_json(
+        output_dir / "gateway" / "stack-context" / "context-usage-stacked-histogram.json"
+    )
+    assert stack_context_hist_payload["point_count"] == 3
+    assert stack_context_hist_payload["series_by_profile"]["profile-0"]["gateway_profile_id"] == 0
+    assert stack_context_hist_payload["points"] == [
+        {"second": 0, "accumulated_value": 150.0},
+        {"second": 1, "accumulated_value": 0.0},
+        {"second": 2, "accumulated_value": 180.0},
+    ]
+
+    stack_kv_ranges_payload = read_json(
+        output_dir / "gateway" / "stack-kv" / "kv-usage-ranges.json"
+    )
+    assert stack_kv_ranges_payload["entry_count"] == 2
+    assert stack_kv_ranges_payload["entries_by_profile"]["profile-0"][1]["request_id"] == "req-c"
+    assert stack_kv_ranges_payload["entries"][1]["avg_value_per_s"] == 80.0
+
+    stack_kv_hist_payload = read_json(
+        output_dir / "gateway" / "stack-kv" / "kv-usage-stacked-histogram.json"
+    )
+    assert stack_kv_hist_payload["point_count"] == 4
+    assert stack_kv_hist_payload["series_by_profile"]["profile-0"]["gateway_profile_id"] == 0
+    assert stack_kv_hist_payload["points"] == [
+        {"second": 0, "accumulated_value": 100.0},
+        {"second": 1, "accumulated_value": 0.0},
+        {"second": 2, "accumulated_value": 80.0},
+        {"second": 3, "accumulated_value": 80.0},
+    ]
+
+    ctx_aware_payload = read_json(
+        output_dir / "gateway" / "ctx-aware-log" / "ctx-aware-timeseries.json"
+    )
+    assert ctx_aware_payload["started_at"] == "2026-01-01T00:00:05Z"
+    assert ctx_aware_payload["sample_count"] == 2
+    assert ctx_aware_payload["samples"][0]["second"] == 1.0
+    assert ctx_aware_payload["samples"][1]["ongoing_agent_count"] == 2
+
+    slo_aware_payload = read_json(
+        output_dir / "gateway" / "slo-aware-log" / "slo-aware-events.json"
+    )
+    assert slo_aware_payload["slo_aware_event_count"] == 1
+    assert slo_aware_payload["unique_agent_count"] == 1
+    assert slo_aware_payload["events"][0]["api_token_hash"] == "hash-c"
+    assert slo_aware_payload["events"][0]["time_offset_s"] == 2.0
+
+    freq_control_payload = read_json(
+        output_dir / "freq-control" / "freq-control-summary.json"
+    )
+    assert freq_control_payload["query_point_count"] == 1
+    assert freq_control_payload["decision_point_count"] == 1
+    assert freq_control_payload["control_error_point_count"] == 1
+    assert freq_control_payload["port_profile_ids"] == [0]
+    assert freq_control_payload["query_points"][0]["time_offset_s"] == 3.0
+    assert freq_control_payload["decision_points"][0]["target_frequency_mhz"] == 1300
+
+    slo_decision_payload = read_json(
+        output_dir / "slo-decision" / "slo-decision-summary.json"
+    )
+    assert slo_decision_payload["slo_decision_point_count"] == 1
+    assert slo_decision_payload["slo_decision_change_count"] == 1
+    assert slo_decision_payload["decision_points"][0]["time_offset_s"] == 2.0
+    assert slo_decision_payload["decision_points"][0]["target_frequency_mhz"] == 1300
 
     job_throughput_manifest = read_json(
         output_dir / "visualization" / "job-throughput" / "figures-manifest.json"
@@ -1015,6 +1733,58 @@ def test_select_post_processed_rewrites_supported_outputs(tmp_path: Path) -> Non
         / "visualization"
         / "agent-output-throughput"
         / "agent-output-throughput-vs-output-tokens.png"
+    ).is_file()
+
+    request_throughput_manifest = read_json(
+        output_dir / "visualization" / "request-throughput" / "figures-manifest.json"
+    )
+    assert request_throughput_manifest["figure_count"] == 2
+    assert [
+        figure["figure_file_name"] for figure in request_throughput_manifest["figures"]
+    ] == [
+        "request-throughput.png",
+        "request-throughput-status-200.png",
+    ]
+
+    ctx_aware_manifest = read_json(
+        output_dir / "visualization" / "gateway-ctx-aware" / "figures-manifest.json"
+    )
+    assert ctx_aware_manifest["figure_count"] == 1
+    assert Path(ctx_aware_manifest["figure_path"]).name == "ctx-aware-over-time.png"
+
+    slo_aware_manifest = read_json(
+        output_dir / "visualization" / "gateway-slo-aware" / "figures-manifest.json"
+    )
+    assert slo_aware_manifest["figure_count"] == 2
+    assert [figure["figure_file_name"] for figure in slo_aware_manifest["figures"]] == [
+        "slo-aware-over-time.png",
+        "slo-aware-stored-throughput.png",
+    ]
+
+    freq_control_manifest = read_json(
+        output_dir / "visualization" / "freq-control" / "figures-manifest.json"
+    )
+    assert freq_control_manifest["figure_count"] == 1
+    assert Path(freq_control_manifest["figure_path"]).name == "freq-control-over-time.png"
+
+    slo_decision_manifest = read_json(
+        output_dir / "visualization" / "slo-decision" / "figures-manifest.json"
+    )
+    assert slo_decision_manifest["figure_count"] == 1
+    assert Path(slo_decision_manifest["figure_path"]).name == "slo-decision-over-time.png"
+
+    stacked_per_agent_manifest = read_json(
+        output_dir / "visualization" / "stacked-per-agent" / "figures-manifest.json"
+    )
+    assert (
+        Path(stacked_per_agent_manifest["materialized_data_path"]).name
+        == "stacked-per-agent.window-120s.start-0.end-full.json"
+    )
+    assert (
+        output_dir
+        / "visualization"
+        / "stacked-per-agent"
+        / "stacked-per-agent.window-120s.start-0.end-full.png"
     ).is_file()
 
     selection_summary = read_json(output_dir / "selection-summary.json")
@@ -1050,12 +1820,74 @@ def test_select_post_processed_rewrites_supported_outputs(tmp_path: Path) -> Non
         "visualization/agent-output-throughput/figures-manifest.json"
         in selection_summary["generated_visualization_manifests"]
     )
+    assert (
+        "visualization/request-throughput/request-throughput.png"
+        in selection_summary["written_non_json_files"]
+    )
+    assert (
+        "visualization/request-throughput/request-throughput-status-200.png"
+        in selection_summary["written_non_json_files"]
+    )
+    assert (
+        "visualization/request-throughput/figures-manifest.json"
+        in selection_summary["generated_visualization_manifests"]
+    )
+    assert (
+        "visualization/gateway-ctx-aware/ctx-aware-over-time.png"
+        in selection_summary["written_non_json_files"]
+    )
+    assert (
+        "visualization/gateway-ctx-aware/figures-manifest.json"
+        in selection_summary["generated_visualization_manifests"]
+    )
+    assert (
+        "visualization/gateway-slo-aware/slo-aware-over-time.png"
+        in selection_summary["written_non_json_files"]
+    )
+    assert (
+        "visualization/gateway-slo-aware/slo-aware-stored-throughput.png"
+        in selection_summary["written_non_json_files"]
+    )
+    assert (
+        "visualization/gateway-slo-aware/figures-manifest.json"
+        in selection_summary["generated_visualization_manifests"]
+    )
+    assert (
+        "visualization/freq-control/freq-control-over-time.png"
+        in selection_summary["written_non_json_files"]
+    )
+    assert (
+        "visualization/freq-control/figures-manifest.json"
+        in selection_summary["generated_visualization_manifests"]
+    )
+    assert (
+        "visualization/slo-decision/slo-decision-over-time.png"
+        in selection_summary["written_non_json_files"]
+    )
+    assert (
+        "visualization/slo-decision/figures-manifest.json"
+        in selection_summary["generated_visualization_manifests"]
+    )
+    assert (
+        "visualization/stacked-per-agent/stacked-per-agent.window-120s.start-0.end-full.json"
+        in selection_summary["written_json_files"]
+    )
+    assert (
+        "visualization/stacked-per-agent/stacked-per-agent.window-120s.start-0.end-full.png"
+        in selection_summary["written_non_json_files"]
+    )
+    assert (
+        "visualization/stacked-per-agent/figures-manifest.json"
+        in selection_summary["generated_visualization_manifests"]
+    )
     assert selection_summary["skipped_visualizations"] == [
         {
             "name": "gateway-stack",
             "reason": "Selected output is missing one or more required stacked histogram inputs",
         }
     ]
+    assert selection_summary["skipped_json_files"] == []
+    assert selection_summary["skipped_non_json_files"] == []
     assert (
         "global/trial-timing-summary.json"
         in selection_summary["written_json_files"]
