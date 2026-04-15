@@ -1,0 +1,15 @@
+# Install these after syncing requirements.lock.txt.
+# Reproduce the matching source tree by checking out commit:
+# 9a073a3347942fa737ea0e84a98c6ef1289375e3
+-e ./con-driver
+-e ./freq-controller
+-e ./freq-controller-linespace
+-e ./freq-controller-linespace-instance
+-e ./freq-controller-linespace-instance-slo
+-e ./freq-controller-linespace-multi
+-e ./freq-controller-linespace-slo
+-e ./freq-controller-seg
+-e ./gateway
+-e ./gateway_lite
+-e ./gateway_multi
+-e ./zeus-power-reader
