@@ -1,0 +1,79 @@
+MI2104X embedded TP1 service stack starting on k005-010.hpcfund at Sat Apr 11 06:32:24 PM CDT 2026
+Run ID: 292635
+Resolved model key 'qwen3_14b' -> 'Qwen/Qwen3-14B-FP8' (served as 'Qwen3-14B-FP8')
+Launching AMD SMI power daemon socket=/tmp/amdsmi-power-reader.292635.sock
+Launching shared Jaeger on ui=16686 otlp=4317
+Launching vLLM profile=0 port=11451 gpu=0
+Launching vLLM profile=1 port=24123 gpu=1
+Launching vLLM profile=2 port=31987 gpu=2
+Launching vLLM profile=3 port=40823 gpu=3
+Launching gateway-ctx profile=0 raw=11457 parsed=18171
+Launching gateway-ctx profile=1 raw=24157 parsed=28171
+Launching gateway-ctx profile=2 raw=31955 parsed=38171
+Launching gateway-ctx profile=3 raw=40857 parsed=48171
+Services are ready.
+  amd-smi-power-socket: /tmp/amdsmi-power-reader.292635.sock
+  jaeger: http://127.0.0.1:16686
+  profile 0: gpu=0 vLLM=http://127.0.0.1:11451 gateway-ctx=http://127.0.0.1:11457 gateway-ctx-parse=http://127.0.0.1:18171
+  profile 1: gpu=1 vLLM=http://127.0.0.1:24123 gateway-ctx=http://127.0.0.1:24157 gateway-ctx-parse=http://127.0.0.1:28171
+  profile 2: gpu=2 vLLM=http://127.0.0.1:31987 gateway-ctx=http://127.0.0.1:31955 gateway-ctx-parse=http://127.0.0.1:38171
+  profile 3: gpu=3 vLLM=http://127.0.0.1:40823 gateway-ctx=http://127.0.0.1:40857 gateway-ctx-parse=http://127.0.0.1:48171
+Logs:
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2104x-embedded-TP1/logs/amd-smi-power-daemon.292635.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2104x-embedded-TP1/logs/jaeger.292635.shared.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2104x-embedded-TP1/logs/vllm.292635.p0.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2104x-embedded-TP1/logs/gateway-ctx.292635.p0.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2104x-embedded-TP1/logs/vllm.292635.p1.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2104x-embedded-TP1/logs/gateway-ctx.292635.p1.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2104x-embedded-TP1/logs/vllm.292635.p2.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2104x-embedded-TP1/logs/gateway-ctx.292635.p2.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2104x-embedded-TP1/logs/vllm.292635.p3.log
+  /work1/talati/yichaoy/vllm-otel/servers/servers-amdhpc-mi2104x-embedded-TP1/logs/gateway-ctx.292635.p3.log
+Launching experiment profile=0 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi2104x-embedded-TP1/sweep-qps-docker-power-clean-amd/generated/20260411T233201Z/run_replay.sh
+Launching experiment profile=1 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi2104x-embedded-TP1/sweep-qps-docker-power-clean-amd/generated/20260411T233201Z/run_replay.sh
+Launching experiment profile=2 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi2104x-embedded-TP1/sweep-qps-docker-power-clean-amd/generated/20260411T233201Z/run_replay.sh
+Launching experiment profile=3 script=/work1/talati/yichaoy/vllm-otel/experiments/amd-embeded/servers-amdhpc-mi2104x-embedded-TP1/sweep-qps-docker-power-clean-amd/generated/20260411T233201Z/run_replay.sh
+Experiment phase finished with exit code 0 at Sat Apr 11 09:40:22 PM CDT 2026
+Stopping gateway-ctx profile=0 (pid=2484398)
+Stopping gateway-ctx profile=1 (pid=2484399)
+Stopping gateway-ctx profile=2 (pid=2484400)
+Stopping gateway-ctx profile=3 (pid=2484401)
+Stopping vllm profile=0 (pid=2476127)
+Stopping vllm profile=1 (pid=2476128)
+Stopping vllm profile=2 (pid=2476129)
+Stopping vllm profile=3 (pid=2476130)
+Stopping amd-smi-power-daemon (pid=2476054)
+Stopping jaeger (pid=2476058)
+
+----------------------------------------------------------------------
+Omnistat Report Card for Job Id: 292635
+----------------------------------------------------------------------
+
+Job Overview (Num Nodes = 1, Machine = HPC Fund)
+ --> Start time = 2026-04-11 18:32:49
+ --> End   time = 2026-04-11 21:43:49
+ --> Duration   = 11460 secs
+
+GPU Statistics:
+
+           | Utilization (%)  |  Memory Use (%)  | Temperature (C)  |    Power (W)     | Energy (kWh) |
+     GPU # |    Max     Mean  |    Max     Mean  |    Max     Mean  |    Max     Mean  |    Total     |
+    ---------------------------------------------------------------------------------------------------
+         0 |  100.00   94.01  |   89.12   88.11  |   58.00   53.62  |  205.00  140.67  |   4.49e-01   |
+         1 |  100.00   93.76  |   89.12   88.11  |   57.00   53.38  |  190.00  143.01  |   4.56e-01   |
+         2 |  100.00   93.78  |   89.12   88.11  |   58.00   54.69  |  195.00  143.98  |   4.59e-01   |
+         3 |  100.00   94.07  |   89.12   88.11  |   59.00   55.59  |  200.00  150.46  |   4.80e-01   |
+
+Approximate Total GPU Energy Consumed = 1.84e+00 kWh
+
+Host Statistics:
+
+    # CPUs | CPU Utilization (%)  |    Memory Use (%)    |
+           |    Max       Mean    |    Max       Mean    |
+    ------------------------------------------------------
+       128 |   12.92      9.21    |   42.35     31.12    |
+
+--
+Query interval = 30.000 secs
+Query execution time = 0.5 secs
+Version = 1.10.0
