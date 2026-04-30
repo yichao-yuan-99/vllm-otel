@@ -3,7 +3,7 @@
   "context_max_tokens": 527664.0,
   "experiment_count": 3,
   "implementation_count": 3,
-  "metric_count": 5,
+  "metric_count": 6,
   "implementations": [
     {
       "implementation_key": "uncontrolled",
@@ -53,6 +53,14 @@
       "metric_unit": "tokens/s",
       "y_axis_label": "P5 Output Throughput (tokens/s)",
       "formula": "agent_output_throughput_tokens_per_s_summary.percentiles['5']; fallback: interpolated 5th percentile of agents[].output_throughput_tokens_per_s"
+    },
+    {
+      "metric_key": "pct_agents_above_20_output_throughput_tokens_per_s",
+      "metric_label": "Agents Above 20 Tokens/s",
+      "panel_title": "Agents Above 20 Tokens/s",
+      "metric_unit": "%",
+      "y_axis_label": "Agents Above 20 Tokens/s (%)",
+      "formula": "count(agents[].output_throughput_tokens_per_s > 20) / count(agents[].output_throughput_tokens_per_s) * 100"
     },
     {
       "metric_key": "average_job_throughput_jobs_per_s",
@@ -108,6 +116,13 @@
                   "sample_count": 454,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 100.0,
+                  "qualified_count": 454,
+                  "sample_count": 454,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.04186,
                   "sample_count": 10800,
@@ -119,6 +134,7 @@
                 "average_power_w": 342.074019,
                 "average_context_usage_pct": 18.540118,
                 "p5_output_throughput_tokens_per_s": 40.924944,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 100.0,
                 "average_job_throughput_jobs_per_s": 0.04186
               }
             },
@@ -153,6 +169,13 @@
                   "sample_count": 454,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 99.118943,
+                  "qualified_count": 450,
+                  "sample_count": 454,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.041297,
                   "sample_count": 10800,
@@ -164,6 +187,7 @@
                 "average_power_w": 207.331482,
                 "average_context_usage_pct": 28.021074,
                 "p5_output_throughput_tokens_per_s": 22.009944,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 99.118943,
                 "average_job_throughput_jobs_per_s": 0.041297
               }
             },
@@ -198,6 +222,13 @@
                   "sample_count": 454,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 99.559471,
+                  "qualified_count": 452,
+                  "sample_count": 454,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.041561,
                   "sample_count": 10800,
@@ -209,6 +240,7 @@
                 "average_power_w": 205.885916,
                 "average_context_usage_pct": 25.967022,
                 "p5_output_throughput_tokens_per_s": 26.386168,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 99.559471,
                 "average_job_throughput_jobs_per_s": 0.041561
               }
             }
@@ -250,6 +282,13 @@
                   "sample_count": 666,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 99.84985,
+                  "qualified_count": 665,
+                  "sample_count": 666,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.061079,
                   "sample_count": 10800,
@@ -261,6 +300,7 @@
                 "average_power_w": 367.933564,
                 "average_context_usage_pct": 27.730057,
                 "p5_output_throughput_tokens_per_s": 35.697532,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 99.84985,
                 "average_job_throughput_jobs_per_s": 0.061079
               }
             },
@@ -295,6 +335,13 @@
                   "sample_count": 665,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 84.06015,
+                  "qualified_count": 559,
+                  "sample_count": 665,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.060558,
                   "sample_count": 10800,
@@ -306,6 +353,7 @@
                 "average_power_w": 222.429675,
                 "average_context_usage_pct": 43.860892,
                 "p5_output_throughput_tokens_per_s": 18.255335,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 84.06015,
                 "average_job_throughput_jobs_per_s": 0.060558
               }
             },
@@ -313,45 +361,53 @@
               "implementation_key": "steer",
               "implementation_label": "STEER",
               "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance",
-              "run_dir": null,
-              "run_dir_name": null,
-              "candidate_run_count": 0,
+              "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance/swebench-verified/mini-swe-agent/split/exclude-unranked/qps0_06/20260415T162020Z",
+              "run_dir_name": "20260415T162020Z",
+              "candidate_run_count": 1,
               "metrics": {
                 "average_energy_per_finished_agent_kj": {
-                  "value": 0.0,
-                  "value_raw_j": 0.0,
-                  "total_energy_estimate_j": 0.0,
-                  "average_power_w": 0.0,
-                  "duration_s": 0.0,
-                  "workers_completed": 0
+                  "value": 3.984557,
+                  "value_raw_j": 3984.556912,
+                  "total_energy_estimate_j": 2601915.6636,
+                  "average_power_w": 240.918117,
+                  "duration_s": 10800.0,
+                  "workers_completed": 653
                 },
                 "average_power_w": {
-                  "value": 0.0,
-                  "source": "missing"
+                  "value": 240.918117,
+                  "source": "power_stats_w.avg"
                 },
                 "average_context_usage_pct": {
-                  "value": 0.0,
-                  "average_context_tokens": 0.0,
-                  "point_count": 0,
+                  "value": 34.610675,
+                  "average_context_tokens": 182628.07006,
+                  "point_count": 10800,
                   "context_max_tokens": 527664.0
                 },
                 "p5_output_throughput_tokens_per_s": {
-                  "value": 0.0,
-                  "sample_count": 0,
-                  "source": "missing"
+                  "value": 26.880946,
+                  "sample_count": 665,
+                  "source": "summary.percentiles.5"
+                },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 99.849624,
+                  "qualified_count": 664,
+                  "sample_count": 665,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
                 },
                 "average_job_throughput_jobs_per_s": {
-                  "value": 0.0,
-                  "sample_count": 0,
-                  "source": "missing"
+                  "value": 0.060917,
+                  "sample_count": 10800,
+                  "source": "throughput_points[].throughput_jobs_per_s"
                 }
               },
               "metric_values": {
-                "average_energy_per_finished_agent_kj": 0.0,
-                "average_power_w": 0.0,
-                "average_context_usage_pct": 0.0,
-                "p5_output_throughput_tokens_per_s": 0.0,
-                "average_job_throughput_jobs_per_s": 0.0
+                "average_energy_per_finished_agent_kj": 3.984557,
+                "average_power_w": 240.918117,
+                "average_context_usage_pct": 34.610675,
+                "p5_output_throughput_tokens_per_s": 26.880946,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 99.849624,
+                "average_job_throughput_jobs_per_s": 0.060917
               }
             }
           ]
@@ -367,7 +423,7 @@
               "source_root": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean",
               "run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean/swebench-verified/mini-swe-agent/split/exclude-unranked/qps0_08/20260321T143624Z",
               "run_dir_name": "20260321T143624Z",
-              "candidate_run_count": 1,
+              "candidate_run_count": 2,
               "metrics": {
                 "average_energy_per_finished_agent_kj": {
                   "value": 4.591757,
@@ -392,6 +448,13 @@
                   "sample_count": 1009,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 99.801784,
+                  "qualified_count": 1007,
+                  "sample_count": 1009,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.079909,
                   "sample_count": 12600,
@@ -403,6 +466,7 @@
                 "average_power_w": 366.247271,
                 "average_context_usage_pct": 41.259336,
                 "p5_output_throughput_tokens_per_s": 31.009549,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 99.801784,
                 "average_job_throughput_jobs_per_s": 0.079909
               }
             },
@@ -437,6 +501,13 @@
                   "sample_count": 861,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 35.772358,
+                  "qualified_count": 308,
+                  "sample_count": 861,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.077634,
                   "sample_count": 10800,
@@ -448,6 +519,7 @@
                 "average_power_w": 229.15938,
                 "average_context_usage_pct": 68.792605,
                 "p5_output_throughput_tokens_per_s": 15.868603,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 35.772358,
                 "average_job_throughput_jobs_per_s": 0.077634
               }
             },
@@ -482,6 +554,13 @@
                   "sample_count": 861,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 99.767712,
+                  "qualified_count": 859,
+                  "sample_count": 861,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.078913,
                   "sample_count": 10800,
@@ -493,6 +572,7 @@
                 "average_power_w": 284.611512,
                 "average_context_usage_pct": 46.799019,
                 "p5_output_throughput_tokens_per_s": 28.126416,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 99.767712,
                 "average_job_throughput_jobs_per_s": 0.078913
               }
             }
@@ -544,6 +624,13 @@
                   "sample_count": 330,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 100.0,
+                  "qualified_count": 330,
+                  "sample_count": 330,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.030224,
                   "sample_count": 10800,
@@ -555,6 +642,7 @@
                 "average_power_w": 333.181919,
                 "average_context_usage_pct": 21.634087,
                 "p5_output_throughput_tokens_per_s": 45.115374,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 100.0,
                 "average_job_throughput_jobs_per_s": 0.030224
               }
             },
@@ -589,6 +677,13 @@
                   "sample_count": 330,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 90.0,
+                  "qualified_count": 297,
+                  "sample_count": 330,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.030228,
                   "sample_count": 10800,
@@ -600,6 +695,7 @@
                 "average_power_w": 206.705514,
                 "average_context_usage_pct": 42.274808,
                 "p5_output_throughput_tokens_per_s": 19.309585,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 90.0,
                 "average_job_throughput_jobs_per_s": 0.030228
               }
             },
@@ -634,6 +730,13 @@
                   "sample_count": 330,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 99.69697,
+                  "qualified_count": 329,
+                  "sample_count": 330,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.030208,
                   "sample_count": 10800,
@@ -645,6 +748,7 @@
                 "average_power_w": 223.565637,
                 "average_context_usage_pct": 29.524691,
                 "p5_output_throughput_tokens_per_s": 26.106501,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 99.69697,
                 "average_job_throughput_jobs_per_s": 0.030208
               }
             }
@@ -686,6 +790,13 @@
                   "sample_count": 452,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 100.0,
+                  "qualified_count": 452,
+                  "sample_count": 452,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.041395,
                   "sample_count": 10800,
@@ -697,6 +808,7 @@
                 "average_power_w": 348.050546,
                 "average_context_usage_pct": 28.350803,
                 "p5_output_throughput_tokens_per_s": 35.806377,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 100.0,
                 "average_job_throughput_jobs_per_s": 0.041395
               }
             },
@@ -731,6 +843,13 @@
                   "sample_count": 452,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 23.672566,
+                  "qualified_count": 107,
+                  "sample_count": 452,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.03576,
                   "sample_count": 10800,
@@ -742,6 +861,7 @@
                 "average_power_w": 252.22071,
                 "average_context_usage_pct": 117.719913,
                 "p5_output_throughput_tokens_per_s": 1.273915,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 23.672566,
                 "average_job_throughput_jobs_per_s": 0.03576
               }
             },
@@ -776,6 +896,13 @@
                   "sample_count": 452,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 100.0,
+                  "qualified_count": 452,
+                  "sample_count": 452,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.041311,
                   "sample_count": 10800,
@@ -787,6 +914,7 @@
                 "average_power_w": 248.964128,
                 "average_context_usage_pct": 35.931869,
                 "p5_output_throughput_tokens_per_s": 26.175437,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 100.0,
                 "average_job_throughput_jobs_per_s": 0.041311
               }
             }
@@ -828,6 +956,13 @@
                   "sample_count": 559,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 99.821109,
+                  "qualified_count": 558,
+                  "sample_count": 559,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.050691,
                   "sample_count": 10800,
@@ -839,6 +974,7 @@
                 "average_power_w": 368.205268,
                 "average_context_usage_pct": 44.498126,
                 "p5_output_throughput_tokens_per_s": 28.579751,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 99.821109,
                 "average_job_throughput_jobs_per_s": 0.050691
               }
             },
@@ -873,6 +1009,13 @@
                   "sample_count": 559,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 15.384615,
+                  "qualified_count": 86,
+                  "sample_count": 559,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.044218,
                   "sample_count": 10800,
@@ -884,6 +1027,7 @@
                 "average_power_w": 274.320792,
                 "average_context_usage_pct": 150.576724,
                 "p5_output_throughput_tokens_per_s": 1.250338,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 15.384615,
                 "average_job_throughput_jobs_per_s": 0.044218
               }
             },
@@ -918,6 +1062,13 @@
                   "sample_count": 559,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 94.812165,
+                  "qualified_count": 530,
+                  "sample_count": 559,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.050706,
                   "sample_count": 10800,
@@ -929,6 +1080,7 @@
                 "average_power_w": 293.28431,
                 "average_context_usage_pct": 51.765308,
                 "p5_output_throughput_tokens_per_s": 19.943127,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 94.812165,
                 "average_job_throughput_jobs_per_s": 0.050706
               }
             }
@@ -980,6 +1132,13 @@
                   "sample_count": 184,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 100.0,
+                  "qualified_count": 184,
+                  "sample_count": 184,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.01604,
                   "sample_count": 10800,
@@ -991,6 +1150,7 @@
                 "average_power_w": 337.756259,
                 "average_context_usage_pct": 27.836459,
                 "p5_output_throughput_tokens_per_s": 43.902938,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 100.0,
                 "average_job_throughput_jobs_per_s": 0.01604
               }
             },
@@ -1025,6 +1185,13 @@
                   "sample_count": 184,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 97.282609,
+                  "qualified_count": 179,
+                  "sample_count": 184,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.015636,
                   "sample_count": 10800,
@@ -1036,6 +1203,7 @@
                 "average_power_w": 205.063789,
                 "average_context_usage_pct": 43.675103,
                 "p5_output_throughput_tokens_per_s": 20.308759,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 97.282609,
                 "average_job_throughput_jobs_per_s": 0.015636
               }
             },
@@ -1070,6 +1238,13 @@
                   "sample_count": 184,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 99.456522,
+                  "qualified_count": 183,
+                  "sample_count": 184,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.015976,
                   "sample_count": 10800,
@@ -1081,6 +1256,7 @@
                 "average_power_w": 232.867498,
                 "average_context_usage_pct": 34.027407,
                 "p5_output_throughput_tokens_per_s": 27.448649,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 99.456522,
                 "average_job_throughput_jobs_per_s": 0.015976
               }
             }
@@ -1122,6 +1298,13 @@
                   "sample_count": 223,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 100.0,
+                  "qualified_count": 223,
+                  "sample_count": 223,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.020394,
                   "sample_count": 10800,
@@ -1133,6 +1316,7 @@
                 "average_power_w": 365.200101,
                 "average_context_usage_pct": 48.381538,
                 "p5_output_throughput_tokens_per_s": 32.184088,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 100.0,
                 "average_job_throughput_jobs_per_s": 0.020394
               }
             },
@@ -1167,6 +1351,13 @@
                   "sample_count": 223,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 51.121076,
+                  "qualified_count": 114,
+                  "sample_count": 223,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.01562,
                   "sample_count": 10800,
@@ -1178,6 +1369,7 @@
                 "average_power_w": 239.184068,
                 "average_context_usage_pct": 91.562148,
                 "p5_output_throughput_tokens_per_s": 1.873824,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 51.121076,
                 "average_job_throughput_jobs_per_s": 0.01562
               }
             },
@@ -1212,6 +1404,13 @@
                   "sample_count": 223,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 100.0,
+                  "qualified_count": 223,
+                  "sample_count": 223,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.020384,
                   "sample_count": 10800,
@@ -1223,6 +1422,7 @@
                 "average_power_w": 291.001912,
                 "average_context_usage_pct": 52.544659,
                 "p5_output_throughput_tokens_per_s": 28.623619,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 100.0,
                 "average_job_throughput_jobs_per_s": 0.020384
               }
             }
@@ -1264,6 +1464,13 @@
                   "sample_count": 283,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 100.0,
+                  "qualified_count": 283,
+                  "sample_count": 283,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.025277,
                   "sample_count": 10800,
@@ -1275,6 +1482,7 @@
                 "average_power_w": 374.725961,
                 "average_context_usage_pct": 58.945252,
                 "p5_output_throughput_tokens_per_s": 31.07358,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 100.0,
                 "average_job_throughput_jobs_per_s": 0.025277
               }
             },
@@ -1309,6 +1517,13 @@
                   "sample_count": 283,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 39.929329,
+                  "qualified_count": 113,
+                  "sample_count": 283,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.017507,
                   "sample_count": 10800,
@@ -1320,6 +1535,7 @@
                 "average_power_w": 245.883035,
                 "average_context_usage_pct": 121.994337,
                 "p5_output_throughput_tokens_per_s": 1.263849,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 39.929329,
                 "average_job_throughput_jobs_per_s": 0.017507
               }
             },
@@ -1354,6 +1570,13 @@
                   "sample_count": 283,
                   "source": "summary.percentiles.5"
                 },
+                "pct_agents_above_20_output_throughput_tokens_per_s": {
+                  "value": 100.0,
+                  "qualified_count": 283,
+                  "sample_count": 283,
+                  "threshold_tokens_per_s": 20.0,
+                  "source": "agents.output_throughput_tokens_per_s"
+                },
                 "average_job_throughput_jobs_per_s": {
                   "value": 0.025253,
                   "sample_count": 10800,
@@ -1365,6 +1588,7 @@
                 "average_power_w": 323.755964,
                 "average_context_usage_pct": 62.992847,
                 "p5_output_throughput_tokens_per_s": 27.88233,
+                "pct_agents_above_20_output_throughput_tokens_per_s": 100.0,
                 "average_job_throughput_jobs_per_s": 0.025253
               }
             }
@@ -1373,25 +1597,14 @@
       ]
     }
   ],
-  "missing_entries": [
-    {
-      "implementation_key": "steer",
-      "implementation_label": "STEER",
-      "experiment_id": "A",
-      "dataset_slug": "swebench-verified",
-      "agent_slug": "mini-swe-agent",
-      "qps_slug": "qps0_06",
-      "scope": "qps-dir",
-      "reason": "QPS directory does not exist",
-      "path": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance/swebench-verified/mini-swe-agent/split/exclude-unranked/qps0_06"
-    }
-  ],
-  "missing_entry_count": 1,
+  "missing_entries": [],
+  "missing_entry_count": 0,
   "notes": [
     "Newest timestamp directory is selected for each (implementation, dataset, agent, qps) combination.",
     "Missing directories, files, or fields are logged and plotted as 0.",
     "The on-disk terminal benchmark path uses 'terminal-bench-2.0/terminus-2'.",
-    "For experiment B at qps0_05, the STEER run is read from the ctx-aware result root."
+    "For experiment B at qps0_05, the STEER run is read from the ctx-aware result root.",
+    "For experiment A at qps0_08, the uncontrolled run is pinned to timestamp 20260321T143624Z."
   ],
   "output_path": "/srv/local/scratch/yichaoy2/work/vllm-otel/figures/energy-context-latency/data/energy-context-latency.json",
   "missing_log_path": "/srv/local/scratch/yichaoy2/work/vllm-otel/figures/energy-context-latency/data/energy-context-latency.missing.log"

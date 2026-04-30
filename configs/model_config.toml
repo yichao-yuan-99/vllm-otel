@@ -9,6 +9,21 @@ weight_vram_gb = 15
 context_window = 131072
 extra_args = []
 
+[models.ministral_14b]
+vllm_model_name = "mistralai/Ministral-3-14B-Instruct-2512"
+served_model_name = "Ministral-3-14B-Instruct-2512"
+weight_vram_gb = 16
+context_window = 262144
+extra_args = []
+
+[models.qwen3_6_35b]
+vllm_model_name = "Qwen/Qwen3.6-35B-A3B"
+served_model_name = "Qwen3.6-35B-A3B"
+weight_vram_gb = 80
+context_window = 262144
+extra_args = []
+
+
 # NOTE: weight_vram_gb values should be set to observed model memory usage.
 [models.qwen3_coder_30b]
 vllm_model_name = "Qwen/Qwen3-Coder-30B-A3B-Instruct"

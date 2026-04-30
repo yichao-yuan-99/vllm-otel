@@ -107,6 +107,12 @@ def _y_axis_formatter(metric_unit: str, ticker: Any) -> Any:
     return ticker.FuncFormatter(lambda value, _: f"{value:,.0f}")
 
 
+def _display_y_axis_label(metric_key: str, y_axis_label: str) -> str:
+    if metric_key == "average_completed_agent_llm_time_s":
+        return "Average Completed-Agent\nLLM Time (s)"
+    return y_axis_label
+
+
 def main() -> int:
     args = _parse_args()
     input_path = Path(args.input).expanduser().resolve()
@@ -162,11 +168,11 @@ def main() -> int:
     plt.rcParams.update(
         {
             "font.family": "DejaVu Serif",
-            "font.size": 10.5,
-            "axes.titlesize": 12.6,
-            "axes.labelsize": 10.5,
-            "xtick.labelsize": 9.2,
-            "ytick.labelsize": 9.2,
+            "font.size": 17.0,
+            "axes.titlesize": 20.5,
+            "axes.labelsize": 17.0,
+            "xtick.labelsize": 15.5,
+            "ytick.labelsize": 15.5,
             "axes.spines.top": False,
             "axes.spines.right": False,
         }
@@ -179,25 +185,6 @@ def main() -> int:
         squeeze=False,
     )
     axes_list = list(axes[0])
-
-    subtitle_parts = [f"{len(cases)} source runs"]
-    raw_qps_slugs = payload.get("source_qps_slugs")
-    if isinstance(raw_qps_slugs, list):
-        qps_slugs = [slug for slug in raw_qps_slugs if isinstance(slug, str) and slug]
-        if qps_slugs:
-            subtitle_parts.append(f"qps: {', '.join(qps_slugs)}")
-    subtitle_parts.append("bar height = arithmetic mean of the source figure data")
-
-    figure.suptitle(args.title, x=0.065, y=0.985, ha="left", fontweight="semibold")
-    figure.text(
-        0.065,
-        0.94,
-        " | ".join(subtitle_parts),
-        ha="left",
-        va="bottom",
-        fontsize=9.2,
-        color="#334155",
-    )
 
     for axis, metric in zip(axes_list, metrics):
         metric_key = str(metric["metric_key"])
@@ -228,10 +215,13 @@ def main() -> int:
             values,
             color=colors,
             width=0.64,
-            linewidth=0.0,
+            edgecolor="#0f172a",
+            linewidth=1.2,
         )
-        axis.set_title(str(metric["panel_title"]), loc="left", fontweight="semibold")
-        axis.set_ylabel(str(metric["y_axis_label"]))
+        axis.set_ylabel(
+            _display_y_axis_label(metric_key, str(metric["y_axis_label"])),
+            labelpad=10,
+        )
         axis.set_xticks(x_positions, labels, rotation=18, ha="right")
         axis.yaxis.set_major_formatter(_y_axis_formatter(metric_unit, ticker))
         axis.grid(True, axis="y", linestyle="--", linewidth=0.7, alpha=0.55)
@@ -247,12 +237,13 @@ def main() -> int:
                 _format_metric_value(metric_unit, value),
                 ha="center",
                 va="bottom",
-                fontsize=9.1,
+                fontsize=15.0,
                 color="#0f172a",
             )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.9))
+    figure.tight_layout()
+    figure.subplots_adjust(wspace=0.62)
     figure.savefig(output_path, dpi=args.dpi, bbox_inches="tight")
     plt.close(figure)
 

@@ -1,0 +1,79 @@
+{
+  "figure_name": "slo-compare",
+  "created_at_utc": "20260415T231827Z",
+  "dataset": "dabstep",
+  "agent": "mini-swe-agent",
+  "qps": 0.03,
+  "metrics": [
+    {
+      "metric_key": "p5_output_throughput_tokens_per_s",
+      "label": "p5 Output Throughput",
+      "unit": "tokens/s"
+    },
+    {
+      "metric_key": "average_power_w",
+      "label": "Average Power",
+      "unit": "W"
+    }
+  ],
+  "variant_count": 4,
+  "variants": [
+    {
+      "variant_key": "no_freq_control",
+      "label": "No Freq Control",
+      "base_path": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean/dabstep/mini-swe-agent/split/exclude-unranked/qps0_03",
+      "selected_run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean/dabstep/mini-swe-agent/split/exclude-unranked/qps0_03/20260410T142848Z",
+      "metrics": {
+        "p5_output_throughput_tokens_per_s": 45.115374,
+        "average_power_w": 333.181919
+      },
+      "metric_sources": {
+        "p5_output_throughput_tokens_per_s": "agent_output_throughput_tokens_per_s_summary.percentiles['5']",
+        "average_power_w": "power_stats_w.avg"
+      }
+    },
+    {
+      "variant_key": "freq_control_no_slo",
+      "label": "Freq Control\nSLO 20",
+      "base_path": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance/dabstep/mini-swe-agent/split/exclude-unranked/qps0_03/20260412T014805Z",
+      "selected_run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance/dabstep/mini-swe-agent/split/exclude-unranked/qps0_03/20260412T014805Z",
+      "metrics": {
+        "p5_output_throughput_tokens_per_s": 26.106501,
+        "average_power_w": 223.565637
+      },
+      "metric_sources": {
+        "p5_output_throughput_tokens_per_s": "agent_output_throughput_tokens_per_s_summary.percentiles['5']",
+        "average_power_w": "power_stats_w.avg"
+      }
+    },
+    {
+      "variant_key": "freq_control_slo_35",
+      "label": "Freq Control\nSLO 35",
+      "base_path": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance-slo/dabstep/mini-swe-agent/split/exclude-unranked/qps0_03/35",
+      "selected_run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance-slo/dabstep/mini-swe-agent/split/exclude-unranked/qps0_03/35/20260412T055419Z",
+      "metrics": {
+        "p5_output_throughput_tokens_per_s": 35.441495,
+        "average_power_w": 255.395932
+      },
+      "metric_sources": {
+        "p5_output_throughput_tokens_per_s": "agent_output_throughput_tokens_per_s_summary.percentiles['5']",
+        "average_power_w": "power_stats_w.avg"
+      }
+    },
+    {
+      "variant_key": "freq_control_slo_45",
+      "label": "Freq Control\nSLO 45",
+      "base_path": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance-slo/dabstep/mini-swe-agent/split/exclude-unranked/qps0_03/45",
+      "selected_run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance-slo/dabstep/mini-swe-agent/split/exclude-unranked/qps0_03/45/20260412T020056Z",
+      "metrics": {
+        "p5_output_throughput_tokens_per_s": 41.292977,
+        "average_power_w": 312.095162
+      },
+      "metric_sources": {
+        "p5_output_throughput_tokens_per_s": "agent_output_throughput_tokens_per_s_summary.percentiles['5']",
+        "average_power_w": "power_stats_w.avg"
+      }
+    }
+  ],
+  "missing_log_path": "/srv/local/scratch/yichaoy2/work/vllm-otel/figures/slo-compare/data/slo-compare.missing.log"
+}

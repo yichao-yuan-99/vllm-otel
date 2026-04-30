@@ -229,6 +229,31 @@ class EnergyContextLatencyFigureTest(unittest.TestCase):
                 include_power=False,
             )
             _make_run(
+                uncontrolled_root,
+                dataset_slug="swebench-verified",
+                agent_slug="mini-swe-agent",
+                qps_slug="qps0_08",
+                run_dir_name="20260321T143624Z",
+                power_avg_w=80.0,
+                duration_s=10.0,
+                finished_agent_count=4,
+                p5_throughput_tokens_per_s=31.0,
+                context_values=[200.0, 400.0],
+                job_throughput_values=[0.6, 0.8],
+            )
+            _make_run(
+                uncontrolled_root,
+                dataset_slug="swebench-verified",
+                agent_slug="mini-swe-agent",
+                qps_slug="qps0_08",
+                run_dir_name="20260415T170342Z",
+                workers_completed=82,
+                include_power=False,
+                include_context=False,
+                include_throughput=False,
+                include_job_throughput=False,
+            )
+            _make_run(
                 fixed_freq_root,
                 dataset_slug="terminal-bench-2.0",
                 agent_slug="terminus-2",
@@ -257,6 +282,7 @@ class EnergyContextLatencyFigureTest(unittest.TestCase):
                 p5_throughput_tokens_per_s=25.0,
                 context_values=[1000.0, 2000.0, 3000.0],
                 job_throughput_values=[0.07, 0.09, 0.11],
+                include_throughput=False,
             )
 
             output_path = tmp_path / "energy-context-latency.json"
@@ -284,7 +310,7 @@ class EnergyContextLatencyFigureTest(unittest.TestCase):
             self.assertEqual(payload["figure_name"], "energy-context-latency")
             self.assertEqual(payload["experiment_count"], 3)
             self.assertEqual(payload["implementation_count"], 3)
-            self.assertEqual(payload["metric_count"], 5)
+            self.assertEqual(payload["metric_count"], 6)
 
             experiment_a = payload["experiments"][0]
             qps_004 = experiment_a["qps"][0]
@@ -317,6 +343,10 @@ class EnergyContextLatencyFigureTest(unittest.TestCase):
                 55.0,
             )
             self.assertAlmostEqual(
+                uncontrolled_entry["metric_values"]["pct_agents_above_20_output_throughput_tokens_per_s"],
+                75.0,
+            )
+            self.assertAlmostEqual(
                 uncontrolled_entry["metric_values"]["average_job_throughput_jobs_per_s"],
                 0.4,
             )
@@ -336,8 +366,29 @@ class EnergyContextLatencyFigureTest(unittest.TestCase):
                 places=6,
             )
             self.assertAlmostEqual(
+                fixed_freq_entry["metric_values"]["pct_agents_above_20_output_throughput_tokens_per_s"],
+                100.0,
+            )
+            self.assertAlmostEqual(
                 fixed_freq_entry["metric_values"]["average_job_throughput_jobs_per_s"],
                 0.12,
+            )
+
+            qps_008 = experiment_a["qps"][2]
+            pinned_entry = qps_008["implementations"][0]
+            self.assertEqual(pinned_entry["run_dir_name"], "20260321T143624Z")
+            self.assertEqual(pinned_entry["candidate_run_count"], 2)
+            self.assertAlmostEqual(
+                pinned_entry["metric_values"]["average_energy_per_finished_agent_kj"],
+                0.2,
+            )
+            self.assertAlmostEqual(
+                pinned_entry["metric_values"]["p5_output_throughput_tokens_per_s"],
+                31.0,
+            )
+            self.assertAlmostEqual(
+                pinned_entry["metric_values"]["pct_agents_above_20_output_throughput_tokens_per_s"],
+                100.0,
             )
 
             experiment_c = payload["experiments"][2]
@@ -355,16 +406,29 @@ class EnergyContextLatencyFigureTest(unittest.TestCase):
                 qps_025["implementations"][2]["metric_values"]["p5_output_throughput_tokens_per_s"],
                 0.0,
             )
+            self.assertEqual(
+                qps_025["implementations"][2]["metric_values"]["pct_agents_above_20_output_throughput_tokens_per_s"],
+                0.0,
+            )
 
             missing_log = missing_log_path.read_text(encoding="utf-8")
             self.assertIn("reason=Required file does not exist", missing_log)
             self.assertIn("metric=average_energy_per_finished_agent_kj", missing_log)
             self.assertIn("metric=average_power_w", missing_log)
+            self.assertIn(
+                "metric=pct_agents_above_20_output_throughput_tokens_per_s",
+                missing_log,
+            )
+            self.assertNotIn(
+                "implementation=uncontrolled | experiment=A | dataset=swebench-verified | "
+                "agent=mini-swe-agent | qps=qps0_08",
+                missing_log,
+            )
             self.assertIn("experiment=C", missing_log)
             self.assertIn("qps=qps0_025", missing_log)
             self.assertGreater(payload["missing_entry_count"], 0)
 
-    def test_plot_energy_context_latency_writes_five_outputs(self) -> None:
+    def test_plot_energy_context_latency_writes_six_outputs(self) -> None:
         if importlib.util.find_spec("matplotlib") is None:
             self.skipTest("matplotlib is not installed")
 
@@ -449,9 +513,17 @@ class EnergyContextLatencyFigureTest(unittest.TestCase):
             )
 
             output_paths = sorted(output_dir.glob("*.png"))
-            self.assertEqual(len(output_paths), 5)
+            self.assertEqual(len(output_paths), 6)
             self.assertTrue(
                 any(path.name.endswith(".average_power_w.png") for path in output_paths)
+            )
+            self.assertTrue(
+                any(
+                    path.name.endswith(
+                        ".pct_agents_above_20_output_throughput_tokens_per_s.png"
+                    )
+                    for path in output_paths
+                )
             )
             for output_path in output_paths:
                 self.assertTrue(output_path.is_file())

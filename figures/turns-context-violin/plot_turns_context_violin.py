@@ -65,7 +65,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--title",
-        default="Maximum Context Usage Distribution by Benchmark and Agent (Violin + Boxplot)",
+        default="",
         help="Figure title.",
     )
     parser.add_argument(
@@ -77,8 +77,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--figure-height",
         type=float,
-        default=9.2,
-        help="Figure height in inches (default: 9.2).",
+        default=7.36,
+        help="Figure height in inches (default: 7.36).",
     )
     parser.add_argument(
         "--jitter-width",
@@ -186,6 +186,14 @@ def _style_violin(violin: Any, *, color: str) -> None:
         body.set_zorder(1.5)
 
 
+def _display_benchmark_label(label: str) -> str:
+    if label == "SWE-bench Verified":
+        return "SWE-bench\nVerified"
+    if label == "Terminal-Bench 2.0":
+        return "Terminal-\nBench 2.0"
+    return label
+
+
 def main() -> int:
     args = _parse_args()
     input_path = Path(args.input).expanduser().resolve()
@@ -286,22 +294,26 @@ def main() -> int:
     plt.rcParams.update(
         {
             "font.family": "DejaVu Serif",
-            "font.size": 10.5,
-            "axes.titlesize": 16,
-            "axes.labelsize": 12,
-            "xtick.labelsize": 9.5,
-            "ytick.labelsize": 10,
+            "font.size": 16.5,
+            "axes.titlesize": 24.0,
+            "axes.labelsize": 20.0,
+            "xtick.labelsize": 22.0,
+            "ytick.labelsize": 22.0,
             "axes.spines.top": False,
             "axes.spines.right": False,
         }
     )
 
     figure, axis = plt.subplots(figsize=(args.figure_width, args.figure_height))
-    figure.subplots_adjust(left=0.07, right=0.97, top=0.79, bottom=0.22)
+    figure.subplots_adjust(left=0.13, right=0.97, top=0.88, bottom=0.17)
     axis.set_axisbelow(True)
 
     for separator in separators:
-        axis.axvline(separator, color="#dddddd", linewidth=1.0, zorder=0)
+        axis.axhline(separator, color="#dddddd", linewidth=1.0, zorder=0)
+
+    axis.set_ylim(min(x_positions) - 0.8, max(x_positions) + 0.8)
+    axis.invert_yaxis()
+    axis.tick_params(axis="y", length=0, pad=8)
 
     for x_position, panel in zip(x_positions, panels):
         context_usages = list(panel["max_context_usages"])
@@ -311,6 +323,7 @@ def main() -> int:
             [context_usages],
             positions=[x_position],
             widths=0.95,
+            vert=False,
             showmeans=False,
             showmedians=False,
             showextrema=False,
@@ -321,6 +334,7 @@ def main() -> int:
             [context_usages],
             positions=[x_position],
             widths=0.38,
+            vert=False,
             showfliers=False,
             patch_artist=True,
             boxprops={
@@ -336,114 +350,73 @@ def main() -> int:
         )
 
         axis.scatter(
+            context_usages,
             _jittered_positions(
                 label=f"{panel['benchmark']}::{panel['agent_type']}",
                 center=x_position,
                 count=len(context_usages),
                 jitter_width=args.jitter_width,
             ),
-            context_usages,
-            s=24,
+            s=40,
             c="#666666",
             alpha=0.34,
             edgecolors="#4f4f4f",
-            linewidths=0.45,
+            linewidths=0.6,
             zorder=3.1,
         )
 
         stats = panel["stats"]
         mean = _float_or_none(stats.get("mean")) if isinstance(stats, dict) else None
-        median = _float_or_none(stats.get("median")) if isinstance(stats, dict) else None
-        sample_count = _int_or_none(stats.get("sample_count")) if isinstance(stats, dict) else None
 
         if mean is not None:
             axis.scatter(
-                [x_position],
                 [mean],
-                s=100,
+                [x_position],
+                s=150,
                 marker="D",
                 c=MEAN_MARKER_COLOR,
                 edgecolors="white",
-                linewidths=0.9,
+                linewidths=1.1,
                 zorder=4.2,
             )
 
-        annotation_parts: list[str] = []
-        if sample_count is not None:
-            annotation_parts.append(f"n={sample_count}")
-        if median is not None:
-            annotation_parts.append(f"med={median:g}")
-        if annotation_parts:
-            blended = transforms.blended_transform_factory(axis.transData, axis.transAxes)
-            axis.text(
-                x_position,
-                1.015,
-                " | ".join(annotation_parts),
-                transform=blended,
-                ha="center",
-                va="bottom",
-                fontsize=8.5,
-                color="#5a5a5a",
-            )
-
     if args.y_scale == "log":
-        axis.set_yscale("log")
-        axis.yaxis.set_major_locator(ticker.LogLocator(base=10.0, subs=(1.0, 2.0, 5.0)))
-        axis.yaxis.set_major_formatter(ticker.FuncFormatter(_format_context_tick))
-        axis.yaxis.set_minor_formatter(ticker.NullFormatter())
+        axis.set_xscale("log")
+        axis.xaxis.set_major_locator(ticker.LogLocator(base=10.0, subs=(1.0, 2.0, 5.0)))
+        axis.xaxis.set_major_formatter(ticker.FuncFormatter(_format_context_tick))
+        axis.xaxis.set_minor_formatter(ticker.NullFormatter())
     else:
-        axis.yaxis.set_major_locator(ticker.MaxNLocator(nbins=8))
+        axis.xaxis.set_major_locator(ticker.MaxNLocator(nbins=7))
 
-    axis.grid(axis="y", which="major", color="#d7d7d7", linewidth=1.0)
-    axis.grid(axis="y", which="minor", color="#ececec", linewidth=0.6, alpha=0.6)
-    axis.set_xlim(min(x_positions) - 0.8, max(x_positions) + 0.8)
-    axis.set_ylim(
+    axis.grid(axis="x", which="major", color="#d7d7d7", linewidth=1.0)
+    axis.grid(axis="x", which="minor", color="#ececec", linewidth=0.6, alpha=0.6)
+    axis.set_xlim(
         min_context * (0.85 if args.y_scale == "linear" else 0.9),
         max_context * (1.18 if args.y_scale == "linear" else 1.30),
     )
 
-    axis.set_xticks(x_positions)
-    axis.set_xticklabels([str(panel["agent_label"]) for panel in panels])
-    axis.tick_params(axis="x", length=0, pad=8)
-    axis.set_ylabel("Maximum context usage per job (tokens)")
+    axis.set_yticks(x_positions)
+    axis.set_yticklabels([])
+    axis.set_ylabel("")
+    axis.set_xlabel("Maximum Context Usage per Job (tokens)", fontsize=24.0)
 
-    group_transform = transforms.blended_transform_factory(axis.transData, axis.transAxes)
+    group_transform = transforms.blended_transform_factory(axis.transAxes, axis.transData)
     for benchmark, center in benchmark_centers.items():
         axis.text(
+            -0.055,
             center,
-            -0.16,
-            benchmark_labels[benchmark],
+            _display_benchmark_label(benchmark_labels[benchmark]),
             transform=group_transform,
             ha="center",
-            va="top",
-            fontsize=10.5,
+            va="center",
+            fontsize=21.0,
             fontweight="semibold",
             color="#333333",
+            rotation=90,
         )
 
-    axis.set_title(args.title, loc="left", fontweight="semibold", pad=26.0)
-    total_job_count = _int_or_none(payload.get("total_job_count")) or sum(
-        len(panel["max_context_usages"]) for panel in panels
-    )
-    subtitle_parts = [
-        f"{len(panels)} columns",
-        f"{total_job_count} jobs",
-        "violin = kernel density",
-        "box = median and IQR",
-        "diamond = mean",
-        "points = per-job max context usage",
-        f"y-scale = {args.y_scale}",
-    ]
-    axis.text(
-        0.0,
-        1.085,
-        " | ".join(subtitle_parts),
-        transform=axis.transAxes,
-        ha="left",
-        va="bottom",
-        fontsize=10,
-        color="#5a5a5a",
-    )
+    if args.title:
+        axis.set_title(args.title, loc="left", fontweight="semibold", pad=20.0)
 
     unique_agents: list[tuple[str, str]] = []
     seen_agents: set[str] = set()
@@ -465,11 +438,15 @@ def main() -> int:
         for index, (agent_type, agent_label) in enumerate(unique_agents)
     ]
     if legend_handles:
-        axis.legend(
+        figure.legend(
             handles=legend_handles,
             title="Agent",
-            loc="upper right",
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.98),
+            ncol=len(legend_handles),
             frameon=False,
+            fontsize=18.0,
+            title_fontsize=20.0,
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

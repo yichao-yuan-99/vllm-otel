@@ -4,7 +4,7 @@ subplots:
 - Top subplot left y-axis: average energy cost per finished replay.
 - Top subplot right y-axis: average power in the selected window.
 - Bottom subplot left y-axis: average throughput.
-- Bottom subplot right y-axis: average time spent in LLM.
+- Bottom subplot right y-axis: average time spent per LLM request.
 
 The intended source data is:
 
@@ -23,13 +23,13 @@ original requirement and adds a request-level LLM-time metric:
 
 - `average_throughput = finished_replay_count_in_window / window_duration_s`
 - `average_energy_cost = average_power_in_window * window_duration_s / finished_replay_count_in_window`
-- `average_time_spent_in_llm = mean(gen_ai.latency.time_in_model_inference for requests completed in the window with a numeric value)`
+- `average_time_spent_in_each_llm_request = mean(gen_ai.latency.time_in_model_inference for requests completed in the window with a numeric value)`
 
 where:
 
 - `average_power_in_window` is the arithmetic mean of the sampled `power_w` values inside the selected window from `post-processed/power/power-summary.json`
 - `finished_replay_count_in_window` is counted directly from `replay/summary.json` using worker `finished_at` timestamps that land inside the selected window and inside the run's analyzed duration
-- `average_time_spent_in_llm` is computed from `post-processed/gateway/llm-requests/llm-requests.json` using requests whose `request_end_offset_s` lands inside the selected window
+- `average_time_spent_in_each_llm_request` is computed from `post-processed/gateway/llm-requests/llm-requests.json` using requests whose `request_end_offset_s` lands inside the selected window
 
 The materialized CSV also stores the trapezoidal integral energy for the same window as a reference column, but this plot uses the average-power-times-duration metric above. The sibling `freq-vs-average-energy-integral/` directory can use the integral-based metric instead.
 

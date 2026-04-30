@@ -98,7 +98,7 @@ Optional custom labels:
 
 ```bash
 python3 figures/isolate-capacity-qps/materialize_isolate_capacity_qps.py \
-  --source-labels "TRAIL 0.5" "TRAIL 0.6" "TRAIL + LMCache 0.6"
+  --source-labels "vLLM" "vLLM (recomputation)" "vLLM (LMCache)"
 ```
 
 By default this writes a gitignored JSON like:

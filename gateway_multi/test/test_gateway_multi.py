@@ -260,7 +260,7 @@ def test_lowest_usage_assignment_uses_ongoing_context_usage(tmp_path: Path) -> N
     assert third.json()["backend_port_profile_id"] == "0"
 
 
-def test_balanced_assignment_prefers_lightly_used_active_backends_over_idle_ones(
+def test_balanced_assignment_prefers_backends_with_ongoing_agents_over_idle_ones(
     tmp_path: Path,
 ) -> None:
     control_client, _, _ = build_multi_clients(
@@ -279,8 +279,29 @@ def test_balanced_assignment_prefers_lightly_used_active_backends_over_idle_ones
     third = control_client.post("/agent/start", json={"api_token": "token-c"})
     assert [first.json()["backend_port_profile_id"], second.json()["backend_port_profile_id"], third.json()["backend_port_profile_id"]] == [
         "0",
+        "0",
+        "0",
+    ]
+
+
+def test_balanced_assignment_prefers_lightly_used_active_backends_over_idle_ones(
+    tmp_path: Path,
+) -> None:
+    control_client, _, multi_service = build_multi_clients(
+        profile_ids=("0", "1", "2"),
+        assignment_policy="round_robin",
+    )
+    output_dir = tmp_path / "balanced-prefers-active"
+
+    response = control_client.post("/job/start", json={"output_location": str(output_dir)})
+    assert response.status_code == 200
+    assert response.json()["assignment_policy"] == "round_robin"
+
+    first = control_client.post("/agent/start", json={"api_token": "token-a"})
+    second = control_client.post("/agent/start", json={"api_token": "token-b"})
+    assert [first.json()["backend_port_profile_id"], second.json()["backend_port_profile_id"]] == [
+        "0",
         "1",
-        "2",
     ]
 
     assert control_client.post(
@@ -302,10 +323,14 @@ def test_balanced_assignment_prefers_lightly_used_active_backends_over_idle_ones
         },
     ).status_code == 200
 
-    fourth = control_client.post("/agent/start", json={"api_token": "token-d"})
-    assert fourth.status_code == 200
-    assert fourth.json()["assignment_policy"] == "balanced"
-    assert fourth.json()["backend_port_profile_id"] == "0"
+    with multi_service._lock:
+        multi_service.assignment_policy = "balanced"
+        multi_service.balanced_usage_threshold_tokens = 300
+
+    third = control_client.post("/agent/start", json={"api_token": "token-c"})
+    assert third.status_code == 200
+    assert third.json()["assignment_policy"] == "balanced"
+    assert third.json()["backend_port_profile_id"] == "0"
 
 
 def test_balanced_assignment_falls_back_to_lowest_usage_when_no_backend_is_under_threshold(
@@ -327,8 +352,8 @@ def test_balanced_assignment_falls_back_to_lowest_usage_when_no_backend_is_under
     third = control_client.post("/agent/start", json={"api_token": "token-c"})
     assert [first.json()["backend_port_profile_id"], second.json()["backend_port_profile_id"], third.json()["backend_port_profile_id"]] == [
         "0",
-        "1",
-        "2",
+        "0",
+        "0",
     ]
 
     assert control_client.post(
@@ -353,7 +378,275 @@ def test_balanced_assignment_falls_back_to_lowest_usage_when_no_backend_is_under
     fourth = control_client.post("/agent/start", json={"api_token": "token-d"})
     assert fourth.status_code == 200
     assert fourth.json()["assignment_policy"] == "balanced"
-    assert fourth.json()["backend_port_profile_id"] == "2"
+    assert fourth.json()["backend_port_profile_id"] == "1"
+
+
+def test_lowest_profile_leq_prefers_first_profile_at_or_below_threshold(
+    tmp_path: Path,
+) -> None:
+    control_client, _, _ = build_multi_clients(
+        profile_ids=("13", "2"),
+        assignment_policy="lowest_profile_leq",
+        balanced_usage_threshold_tokens=110,
+    )
+    output_dir = tmp_path / "lowest-profile-leq-at-threshold"
+
+    response = control_client.post("/job/start", json={"output_location": str(output_dir)})
+    assert response.status_code == 200
+    assert response.json()["assignment_policy"] == "lowest_profile_leq"
+    assert response.json()["control_port_profile_id"] == "13"
+
+    first = control_client.post("/agent/start", json={"api_token": "token-a"})
+    assert first.status_code == 200
+    assert first.json()["backend_port_profile_id"] == "2"
+
+    assert control_client.post(
+        "/v1/chat/completions",
+        headers={"x-api-key": "token-a"},
+        json={
+            "model": "Qwen3-Coder-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "hi"}],
+            "test_usage": {"prompt_tokens": 100, "completion_tokens": 10},
+        },
+    ).status_code == 200
+
+    second = control_client.post("/agent/start", json={"api_token": "token-b"})
+    assert second.status_code == 200
+    assert second.json()["assignment_policy"] == "lowest_profile_leq"
+    assert second.json()["backend_port_profile_id"] == "2"
+
+
+def test_lowest_profile_leq_falls_back_to_lowest_usage_when_all_backends_exceed_threshold(
+    tmp_path: Path,
+) -> None:
+    control_client, _, _ = build_multi_clients(
+        profile_ids=("13", "2"),
+        assignment_policy="lowest_profile_leq",
+        balanced_usage_threshold_tokens=100,
+    )
+    output_dir = tmp_path / "lowest-profile-leq-fallback"
+
+    response = control_client.post("/job/start", json={"output_location": str(output_dir)})
+    assert response.status_code == 200
+    assert response.json()["assignment_policy"] == "lowest_profile_leq"
+
+    first = control_client.post("/agent/start", json={"api_token": "token-a"})
+    assert first.status_code == 200
+    assert first.json()["backend_port_profile_id"] == "2"
+    assert control_client.post(
+        "/v1/chat/completions",
+        headers={"x-api-key": "token-a"},
+        json={
+            "model": "Qwen3-Coder-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "hi"}],
+            "test_usage": {"prompt_tokens": 100, "completion_tokens": 10},
+        },
+    ).status_code == 200
+
+    second = control_client.post("/agent/start", json={"api_token": "token-b"})
+    assert second.status_code == 200
+    assert second.json()["backend_port_profile_id"] == "13"
+    assert control_client.post(
+        "/v1/chat/completions",
+        headers={"x-api-key": "token-b"},
+        json={
+            "model": "Qwen3-Coder-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "hi"}],
+            "test_usage": {"prompt_tokens": 200, "completion_tokens": 5},
+        },
+    ).status_code == 200
+
+    third = control_client.post("/agent/start", json={"api_token": "token-c"})
+    assert third.status_code == 200
+    assert third.json()["assignment_policy"] == "lowest_profile_leq"
+    assert third.json()["backend_port_profile_id"] == "2"
+
+
+def test_lowest_profile_leq_reloc_reassigns_before_forward_after_request_threshold(
+    tmp_path: Path,
+) -> None:
+    control_client, _, _ = build_multi_clients(
+        profile_ids=("0", "1"),
+        assignment_policy="lowest_profile_leq_reloc",
+        balanced_usage_threshold_tokens=100,
+    )
+    output_dir = tmp_path / "lowest-profile-leq-reloc"
+
+    response = control_client.post("/job/start", json={"output_location": str(output_dir)})
+    assert response.status_code == 200
+    assert response.json()["assignment_policy"] == "lowest_profile_leq_reloc"
+
+    first = control_client.post("/agent/start", json={"api_token": "token-a"})
+    assert first.status_code == 200
+    assert first.json()["backend_port_profile_id"] == "0"
+    assert control_client.post(
+        "/v1/chat/completions",
+        headers={"x-api-key": "token-a"},
+        json={
+            "model": "Qwen3-Coder-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "hi"}],
+            "test_usage": {"prompt_tokens": 100, "completion_tokens": 10},
+        },
+    ).status_code == 200
+
+    second = control_client.post("/agent/start", json={"api_token": "token-b"})
+    assert second.status_code == 200
+    assert second.json()["backend_port_profile_id"] == "1"
+
+    for _ in range(8):
+        response = control_client.post(
+            "/v1/chat/completions",
+            headers={"x-api-key": "token-b"},
+            json={
+                "model": "Qwen3-Coder-30B-A3B-Instruct",
+                "messages": [{"role": "user", "content": "hi"}],
+                "test_usage": {"prompt_tokens": 220, "completion_tokens": 5},
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["backend_port_profile_id"] == "1"
+
+    ninth = control_client.post(
+        "/v1/chat/completions",
+        headers={"x-api-key": "token-b"},
+        json={
+            "model": "Qwen3-Coder-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "hi"}],
+            "test_usage": {"prompt_tokens": 220, "completion_tokens": 5},
+        },
+    )
+    assert ninth.status_code == 200
+    assert ninth.json()["backend_port_profile_id"] == "0"
+
+    assert control_client.post("/agent/end", json={"api_token": "token-a", "return_code": 0}).status_code == 200
+    assert control_client.post("/agent/end", json={"api_token": "token-b", "return_code": 0}).status_code == 200
+
+    response = control_client.post("/job/end", json={"status": "completed"})
+    assert response.status_code == 200
+
+    token_b_artifact = next(
+        artifact
+        for artifact in response.json()["artifacts"]
+        if artifact["backend_port_profile_id"] == "0" and artifact["request_count"] == 9
+    )
+    artifact_path = Path(token_b_artifact["path"])
+    lifecycle_records = load_artifact_jsonl(artifact_path, "events/lifecycle.jsonl")
+    assignment_events = [
+        record for record in lifecycle_records if record["event_type"] == "port_profile_assignment"
+    ]
+    assert [event["metadata"]["port_profile_id"] for event in assignment_events] == ["1", "0"]
+    assert assignment_events[0]["metadata"]["previous_port_profile_id"] is None
+    assert assignment_events[1]["metadata"]["reason"] == "request_reassignment"
+    assert assignment_events[1]["metadata"]["previous_port_profile_id"] == "1"
+
+    request_records = load_artifact_jsonl(artifact_path, "requests/model_inference.jsonl")
+    assert [record["backend_port_profile_id"] for record in request_records[:-1]] == ["1"] * 8
+    assert request_records[-1]["backend_port_profile_id"] == "0"
+
+
+def test_lowest_profile_leq_reloc_2_reassigns_to_lowest_nonzero_usage_backend(
+    tmp_path: Path,
+) -> None:
+    control_client, _, multi_service = build_multi_clients(
+        profile_ids=("0", "1", "2"),
+        assignment_policy="lowest_profile_leq_reloc_2",
+        balanced_usage_threshold_tokens=100,
+    )
+    output_dir = tmp_path / "lowest-profile-leq-reloc-2"
+
+    response = control_client.post("/job/start", json={"output_location": str(output_dir)})
+    assert response.status_code == 200
+    assert response.json()["assignment_policy"] == "lowest_profile_leq_reloc_2"
+
+    first = control_client.post("/agent/start", json={"api_token": "token-a"})
+    assert first.status_code == 200
+    assert first.json()["backend_port_profile_id"] == "0"
+    assert control_client.post(
+        "/v1/chat/completions",
+        headers={"x-api-key": "token-a"},
+        json={
+            "model": "Qwen3-Coder-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "hi"}],
+            "test_usage": {"prompt_tokens": 100, "completion_tokens": 10},
+        },
+    ).status_code == 200
+
+    second = control_client.post("/agent/start", json={"api_token": "token-b"})
+    assert second.status_code == 200
+    assert second.json()["backend_port_profile_id"] == "1"
+    assert control_client.post(
+        "/v1/chat/completions",
+        headers={"x-api-key": "token-b"},
+        json={
+            "model": "Qwen3-Coder-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "hi"}],
+            "test_usage": {"prompt_tokens": 110, "completion_tokens": 10},
+        },
+    ).status_code == 200
+
+    third = control_client.post("/agent/start", json={"api_token": "token-c"})
+    assert third.status_code == 200
+    assert third.json()["backend_port_profile_id"] == "2"
+
+    backend_zero = multi_service.get_backend("0").service
+    backend_one = multi_service.get_backend("1").service
+    with backend_zero._lock:
+        backend_zero.active_runs["token-a"].current_context_tokens = 0
+        backend_zero.active_runs["token-a"].has_usable_context_usage = True
+    with backend_one._lock:
+        backend_one.active_runs["token-b"].current_context_tokens = 60
+        backend_one.active_runs["token-b"].has_usable_context_usage = True
+
+    for _ in range(8):
+        response = control_client.post(
+            "/v1/chat/completions",
+            headers={"x-api-key": "token-c"},
+            json={
+                "model": "Qwen3-Coder-30B-A3B-Instruct",
+                "messages": [{"role": "user", "content": "hi"}],
+                "test_usage": {"prompt_tokens": 220, "completion_tokens": 5},
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["backend_port_profile_id"] == "2"
+
+    ninth = control_client.post(
+        "/v1/chat/completions",
+        headers={"x-api-key": "token-c"},
+        json={
+            "model": "Qwen3-Coder-30B-A3B-Instruct",
+            "messages": [{"role": "user", "content": "hi"}],
+            "test_usage": {"prompt_tokens": 220, "completion_tokens": 5},
+        },
+    )
+    assert ninth.status_code == 200
+    assert ninth.json()["backend_port_profile_id"] == "1"
+
+    assert control_client.post("/agent/end", json={"api_token": "token-a", "return_code": 0}).status_code == 200
+    assert control_client.post("/agent/end", json={"api_token": "token-b", "return_code": 0}).status_code == 200
+    assert control_client.post("/agent/end", json={"api_token": "token-c", "return_code": 0}).status_code == 200
+
+    response = control_client.post("/job/end", json={"status": "completed"})
+    assert response.status_code == 200
+
+    token_c_artifact = next(
+        artifact
+        for artifact in response.json()["artifacts"]
+        if artifact["backend_port_profile_id"] == "1" and artifact["request_count"] == 9
+    )
+    artifact_path = Path(token_c_artifact["path"])
+    lifecycle_records = load_artifact_jsonl(artifact_path, "events/lifecycle.jsonl")
+    assignment_events = [
+        record for record in lifecycle_records if record["event_type"] == "port_profile_assignment"
+    ]
+    assert [event["metadata"]["port_profile_id"] for event in assignment_events] == ["2", "1"]
+    assert assignment_events[0]["metadata"]["previous_port_profile_id"] is None
+    assert assignment_events[1]["metadata"]["reason"] == "request_reassignment"
+    assert assignment_events[1]["metadata"]["previous_port_profile_id"] == "2"
+
+    request_records = load_artifact_jsonl(artifact_path, "requests/model_inference.jsonl")
+    assert [record["backend_port_profile_id"] for record in request_records[:-1]] == ["2"] * 8
+    assert request_records[-1]["backend_port_profile_id"] == "1"
 
 
 def test_lowest_profile_without_pending_prefers_lowest_profile_and_pending_fallback(
@@ -695,6 +988,9 @@ def test_policy_endpoint_only_allows_changes_when_no_job_is_running(tmp_path: Pa
         "balanced_usage_threshold_tokens": DEFAULT_BALANCED_USAGE_THRESHOLD_TOKENS,
         "supported_assignment_policies": [
             "balanced",
+            "lowest_profile_leq",
+            "lowest_profile_leq_reloc",
+            "lowest_profile_leq_reloc_2",
             "lowest_profile_without_pending",
             "lowest_usage",
             "round_robin",
@@ -802,6 +1098,63 @@ def test_runtime_settings_accept_lowest_profile_without_pending_policy(
 
     settings = load_runtime_settings(config_path, allow_missing=False)
     assert settings.assignment_policy == "lowest_profile_without_pending"
+
+
+def test_runtime_settings_accept_lowest_profile_leq_policy(tmp_path: Path) -> None:
+    config_path = tmp_path / "gateway-multi-lowest-profile-leq.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "schema_version = 1",
+                "",
+                "[run]",
+                'port_profile_ids = [0, 1]',
+                'assignment_policy = "lowest_profile_leq"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_runtime_settings(config_path, allow_missing=False)
+    assert settings.assignment_policy == "lowest_profile_leq"
+
+
+def test_runtime_settings_accept_lowest_profile_leq_reloc_policy(tmp_path: Path) -> None:
+    config_path = tmp_path / "gateway-multi-lowest-profile-leq-reloc.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "schema_version = 1",
+                "",
+                "[run]",
+                'port_profile_ids = [0, 1]',
+                'assignment_policy = "lowest_profile_leq_reloc"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_runtime_settings(config_path, allow_missing=False)
+    assert settings.assignment_policy == "lowest_profile_leq_reloc"
+
+
+def test_runtime_settings_accept_lowest_profile_leq_reloc_2_policy(tmp_path: Path) -> None:
+    config_path = tmp_path / "gateway-multi-lowest-profile-leq-reloc-2.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "schema_version = 1",
+                "",
+                "[run]",
+                'port_profile_ids = [0, 1]',
+                'assignment_policy = "lowest_profile_leq_reloc_2"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_runtime_settings(config_path, allow_missing=False)
+    assert settings.assignment_policy == "lowest_profile_leq_reloc_2"
 
 
 def test_lowest_profile_without_pending_requires_ctx_aware_before_job_start(

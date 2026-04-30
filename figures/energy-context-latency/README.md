@@ -16,14 +16,14 @@ For a certain, `dataset`, `agent`, and `qps`, the corresponding data is in `/srv
 Exception: for B (`dabstep` + `mini-swe-agent`) at `qps0_05`, use `/srv/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance-ctx-aware/dabstep/mini-swe-agent/split/exclude-unranked/qps0_05/<the-newest-timestamp>`.
 
 
-We want to draw five plots, each as a bar chart with 3 subplots.
+We want to draw six plots, each as a bar chart with 3 subplots.
 Each subplot corresponds to one dataset-agent combination.
 Each subplot contains 3 clusters of bars, each corresponding to one QPS (listed below).
 Each cluster of bars contains 3 bars, each corresponding to one implementation.
 
 The qps for A is 0.04,0.06,0.08, for B is 0.03,0.04,0.05, for C is 0.015,0.02,0.025.
 
-The five plots correspond to different metrics.
+The six plots correspond to different metrics.
 
 The first one is the average energy consumption for each agent, which is calculated by 1. reading `workers_completed` from `replay/summary.json`; 2. multiplying the average power by the job duration to get the total energy cost; and 3. dividing the total energy cost by `workers_completed` to get the per-agent energy cost.
 
@@ -33,7 +33,9 @@ The third one is the average context usage. This corresponds to the average valu
 
 The fourth one is the 5th percentile tokens-per-second value in files like `/srv/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean/dabstep/mini-swe-agent/split/exclude-unranked/qps0_03/20260410T142848Z/post-processed/agent-output-throughput/agent-output-throughput.json`.
 
-The fifth one is the average job throughput value shown in figures like `/srv/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean/swebench-verified/mini-swe-agent/split/exclude-unranked/qps0_02/20260321T143624Z/post-processed/visualization/job-throughput/job-throughput.png`, which corresponds to the arithmetic mean of `throughput_points[].throughput_jobs_per_s` in `post-processed/job-throughput/job-throughput-timeseries.json`.
+The fifth one is the percentage of agents whose `output_throughput_tokens_per_s` is greater than `20` in that same `post-processed/agent-output-throughput/agent-output-throughput.json` file.
+
+The sixth one is the average job throughput value shown in figures like `/srv/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean/swebench-verified/mini-swe-agent/split/exclude-unranked/qps0_02/20260321T143624Z/post-processed/visualization/job-throughput/job-throughput.png`, which corresponds to the arithmetic mean of `throughput_points[].throughput_jobs_per_s` in `post-processed/job-throughput/job-throughput-timeseries.json`.
 
 
 Make a log for want ever data you cannot find
@@ -57,6 +59,9 @@ timestamp directory in a fixed nested directory:
 When selecting a fixed-frequency run, use the newest timestamp that contains
 that nested directory, even if a newer timestamp exists without it.
 
+For experiment A (`swebench-verified` + `mini-swe-agent`) at `qps0_08` in the
+uncontrolled root, pin the run selection to `20260321T143624Z`.
+
 ## Outputs
 
 The materialization step writes:
@@ -71,6 +76,7 @@ The plotting step writes one figure per metric to
 - `energy-context-latency.average_power_w.<format>`
 - `energy-context-latency.average_context_usage_pct.<format>`
 - `energy-context-latency.p5_output_throughput_tokens_per_s.<format>`
+- `energy-context-latency.pct_agents_above_20_output_throughput_tokens_per_s.<format>`
 - `energy-context-latency.average_job_throughput_jobs_per_s.<format>`
 
 ## Commands
@@ -81,7 +87,7 @@ Materialize the comparison dataset and missing-data log:
 python3 figures/energy-context-latency/materialize_energy_context_latency.py
 ```
 
-Render the five clustered bar charts:
+Render the six clustered bar charts:
 
 ```bash
 python3 figures/energy-context-latency/plot_energy_context_latency.py \

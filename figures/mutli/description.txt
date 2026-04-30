@@ -1,0 +1,3 @@
+Average Total Power and Per-Instance Power Split Across Multi-Instance Policies
+
+This figure compares the aggregate GPU power draw of three multi-instance policies and then breaks down how the controlled policies distribute that power across the four GPU instances. The left panel highlights the overall system-level power difference, while the two pie charts show whether the scheduler concentrates work on a subset of instances or spreads load more evenly.

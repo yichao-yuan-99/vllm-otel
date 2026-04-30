@@ -392,14 +392,18 @@ def start(
         "--policy",
         help=(
             "Agent assignment policy. Supported values: balanced, round_robin, "
-            "lowest_usage, lowest_profile_without_pending."
+            "lowest_usage, lowest_profile_leq, lowest_profile_leq_reloc, "
+            "lowest_profile_leq_reloc_2, "
+            "lowest_profile_without_pending."
         ),
     ),
     balanced_usage_threshold_tokens: int | None = typer.Option(
         None,
         "--balanced-usage-threshold-tokens",
         help=(
-            "Context-token threshold used by the balanced assignment policy. "
+            "Context-token threshold used by the balanced and "
+            "lowest_profile_leq / lowest_profile_leq_reloc / "
+            "lowest_profile_leq_reloc_2 assignment policies. "
             f"Defaults to run.balanced_usage_threshold_tokens or "
             f"{DEFAULT_BALANCED_USAGE_THRESHOLD_TOKENS}."
         ),

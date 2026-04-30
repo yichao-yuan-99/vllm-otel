@@ -1,0 +1,65 @@
+{
+  "figure_name": "con-ctrl-compare",
+  "created_at_utc": "20260416T013958Z",
+  "dataset": "dabstep",
+  "agent": "mini-swe-agent",
+  "qps": 0.05,
+  "metrics": [
+    {
+      "metric_key": "p5_output_throughput_tokens_per_s",
+      "label": "Per Agent P5 Throughput",
+      "unit": "tokens/s"
+    },
+    {
+      "metric_key": "average_job_throughput_jobs_per_s",
+      "label": "System Job Throughput",
+      "unit": "jobs/s"
+    }
+  ],
+  "variant_count": 3,
+  "variants": [
+    {
+      "variant_key": "no_freq_control",
+      "label": "No Freq Control",
+      "base_path": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean/dabstep/mini-swe-agent/split/exclude-unranked/qps0_05",
+      "selected_run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean/dabstep/mini-swe-agent/split/exclude-unranked/qps0_05/20260413T140439Z",
+      "metrics": {
+        "p5_output_throughput_tokens_per_s": 28.579751,
+        "average_job_throughput_jobs_per_s": 0.050691
+      },
+      "metric_sources": {
+        "p5_output_throughput_tokens_per_s": "agent_output_throughput_tokens_per_s_summary.percentiles['5']",
+        "average_job_throughput_jobs_per_s": "mean(throughput_points[].throughput_jobs_per_s)"
+      }
+    },
+    {
+      "variant_key": "kairos_no_thrashing_avoidance",
+      "label": "KAIROS\nNo Thrash Avoid.",
+      "base_path": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance/dabstep/mini-swe-agent/split/exclude-unranked/qps0_05/20260413T135808Z",
+      "selected_run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance/dabstep/mini-swe-agent/split/exclude-unranked/qps0_05/20260413T135808Z",
+      "metrics": {
+        "p5_output_throughput_tokens_per_s": 2.336905,
+        "average_job_throughput_jobs_per_s": 0.046445
+      },
+      "metric_sources": {
+        "p5_output_throughput_tokens_per_s": "agent_output_throughput_tokens_per_s_summary.percentiles['5']",
+        "average_job_throughput_jobs_per_s": "mean(throughput_points[].throughput_jobs_per_s)"
+      }
+    },
+    {
+      "variant_key": "kairos_with_thrashing_avoidance",
+      "label": "KAIROS\nThrash Avoid.",
+      "base_path": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance-ctx-aware/dabstep/mini-swe-agent/split/exclude-unranked/qps0_05/20260413T235024Z",
+      "selected_run_dir": "/srv/local/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean-freq-ctrl-linespace-instance-ctx-aware/dabstep/mini-swe-agent/split/exclude-unranked/qps0_05/20260413T235024Z",
+      "metrics": {
+        "p5_output_throughput_tokens_per_s": 19.943127,
+        "average_job_throughput_jobs_per_s": 0.050706
+      },
+      "metric_sources": {
+        "p5_output_throughput_tokens_per_s": "agent_output_throughput_tokens_per_s_summary.percentiles['5']",
+        "average_job_throughput_jobs_per_s": "mean(throughput_points[].throughput_jobs_per_s)"
+      }
+    }
+  ],
+  "missing_log_path": "/srv/local/scratch/yichaoy2/work/vllm-otel/figures/con-ctrl-compare/data/con-ctrl-compare.missing.log"
+}

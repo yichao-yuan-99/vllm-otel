@@ -1,0 +1,2 @@
+Throughput Robustness and Energy Cost Across Control Strategies
+This figure combines the energy-context-latency comparison into two paired summaries. For each benchmark-agent experiment and QPS cluster, grouped bars show the primary metric while aligned dotted square-marker overlays show the secondary metric, making it easier to compare throughput robustness, power draw, and per-agent energy at once.

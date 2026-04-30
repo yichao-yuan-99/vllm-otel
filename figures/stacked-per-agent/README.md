@@ -45,6 +45,13 @@ Agent layers use:
 - default ordering: first active time, then `agent_key`
 - a stable color assignment derived from that fixed order
 
+For dense runs, you can instead assign distinct colors only to the top `N` agents
+ranked by active duration in the selected analysis window and reuse one shared color
+for the rest. In that mode, highlighted agents are stacked below the shared-color
+group, and highlighted agents are ordered by `first_active_s` descending so the
+latest-starting highlighted agent is lowest in `y`. That ordering is applied
+within each individual bar, not just in the global agent list.
+
 **Step 1**
 Materialize 120-second stacked-bar windows into `data/`:
 
@@ -68,6 +75,15 @@ Optional custom bar width:
 python3 figures/stacked-per-agent/materialize_stacked_per_agent.py \
   --run-dir /srv/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean/swebench-verified/mini-swe-agent/split/exclude-unranked/qps0_08/20260321T143624Z \
   --window-size-s 60
+```
+
+Highlight only the top 8 longest-running agents with unique colors:
+
+```bash
+python3 figures/stacked-per-agent/materialize_stacked_per_agent.py \
+  --run-dir /srv/scratch/yichaoy2/work/vllm-otel/results/replay/sweep-qps-docker-power-clean/swebench-verified/mini-swe-agent/split/exclude-unranked/qps0_08/20260321T143624Z \
+  --unique-color-top-n-by-active-duration 8 \
+  --shared-color-hex '#CBD5E1'
 ```
 
 By default this writes a gitignored JSON like:

@@ -37,14 +37,33 @@ behavior as `gateway_ctx`, but changes the topology:
 
 Currently the supported policies are:
 
-- `balanced`: if any backend already has ongoing context usage strictly between
-  `0` and `balanced_usage_threshold_tokens`, assign the new agent to the one
-  with the lowest usage inside that subset; otherwise fall back to
-  `lowest_usage`
+- `balanced`: if any backend already has one or more ongoing agents and its
+  ongoing context usage is below `balanced_usage_threshold_tokens`, assign the
+  new agent to the one with the lowest usage inside that subset; otherwise
+  fall back to `lowest_usage`
 - `round_robin`: assign agents evenly across backend profiles in order
 - `lowest_usage`: assign each incoming agent to the backend with the lowest
   total `context_tokens` across ongoing agents; ties fall back to round-robin
   order across the tied backends
+- `lowest_profile_leq`: scan backend profiles in ascending `port_profile_id`
+  order and pick the first backend whose ongoing context usage is at or below
+  `balanced_usage_threshold_tokens`; if every backend is above that threshold,
+  fall back to `lowest_usage`
+- `lowest_profile_leq_reloc`: start with the same assignment rule as
+  `lowest_profile_leq`, then track each agent's number of requests since its
+  last assignment; on each new request, if that counter is above `8`, the
+  gateway finds the lowest-usage backend with a lower `port_profile_id` than
+  the current one and reassigns the agent there when that lower-profile
+  backend's ongoing context usage is less than or equal to half of the current
+  backend's usage; after a reassignment, the per-agent counter resets to `0`
+- `lowest_profile_leq_reloc_2`: start with the same assignment rule as
+  `lowest_profile_leq`, then track each agent's number of requests since its
+  last assignment; on each new request, if that counter is above `8`, the
+  gateway finds the backend with the lowest non-zero ongoing context usage
+  across every other profile and reassigns the agent there when that usage is
+  less than or equal to half of the current backend's usage; zero-usage
+  backends are ignored, and after a reassignment the per-agent counter resets
+  to `0`
 - `lowest_profile_without_pending`: scan backend profiles in ascending
   `port_profile_id` order and pick the first backend with no pending agents; if
   every backend already has pending agents, pick the backend with the smallest
@@ -81,8 +100,10 @@ You can inspect and update the active assignment policy over HTTP:
 }
 ```
 
-`balanced_usage_threshold_tokens` is optional on `POST /policy` and only affects
-the `balanced` policy. If omitted, the gateway keeps the existing threshold.
+`balanced_usage_threshold_tokens` is optional on `POST /policy` and affects the
+threshold-based `balanced`, `lowest_profile_leq`, and
+`lowest_profile_leq_reloc`, and `lowest_profile_leq_reloc_2` policies. If
+omitted, the gateway keeps the existing threshold.
 
 ## Ctx-Aware Mode
 
@@ -160,6 +181,9 @@ python3 -m gateway_multi start --config gateway_multi/config.toml --policy balan
 python3 -m gateway_multi start --config gateway_multi/config.toml --policy balanced --balanced-usage-threshold-tokens 263856
 python3 -m gateway_multi start --config gateway_multi/config.toml --policy round_robin
 python3 -m gateway_multi start --config gateway_multi/config.toml --policy lowest_usage
+python3 -m gateway_multi start --config gateway_multi/config.toml --policy lowest_profile_leq
+python3 -m gateway_multi start --config gateway_multi/config.toml --policy lowest_profile_leq_reloc
+python3 -m gateway_multi start --config gateway_multi/config.toml --policy lowest_profile_leq_reloc_2
 python3 -m gateway_multi start --config gateway_multi/config.toml --policy lowest_profile_without_pending
 ```
 

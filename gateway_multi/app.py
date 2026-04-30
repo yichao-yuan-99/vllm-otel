@@ -57,6 +57,7 @@ from gateway_multi.runtime_config import (
 )
 
 SUPPORTED_ASSIGNMENT_POLICIES = set(RUNTIME_SUPPORTED_ASSIGNMENT_POLICIES)
+RELOCATION_REQUEST_COUNT_THRESHOLD = 8
 
 
 def normalize_assignment_policy(value: str) -> str:
@@ -236,6 +237,12 @@ class BackendGatewayService(GatewayService):
         for agent in payload["agents"]:
             agent["backend_port_profile_id"] = self.backend_port_profile_id
         return payload
+
+    def get_ongoing_agent_count(self) -> int:
+        with self._lock:
+            return sum(
+                1 for run in self.active_runs.values() if run.schedule_state == "ongoing"
+            )
 
     def get_ongoing_context_tokens(self) -> int:
         with self._lock:
@@ -512,6 +519,8 @@ class GatewayMultiService:
         self._lock = Lock()
         self._next_backend_index = 0
         self._active_backend_by_token: dict[str, BackendBinding] = {}
+        self._request_count_since_assignment_by_token: dict[str, int] = {}
+        self._inflight_proxy_requests_by_token: dict[str, int] = {}
 
     @property
     def control_backend(self) -> BackendBinding:
@@ -542,6 +551,12 @@ class GatewayMultiService:
             for index, backend in enumerate(self.backends)
         ]
 
+    def _sorted_backends_by_profile_id(self) -> list[BackendBinding]:
+        return sorted(
+            self.backends,
+            key=lambda backend: _port_profile_sort_key(backend.profile.profile_id),
+        )
+
     def _select_lowest_usage_backend(
         self,
         backend_usages: Sequence[tuple[int, int, BackendBinding]],
@@ -559,6 +574,114 @@ class GatewayMultiService:
                 return self.backends[candidate_index]
         raise RuntimeError("failed to choose a backend from the lowest-usage candidates")
 
+    def _select_lowest_profile_leq_backend(self) -> BackendBinding:
+        for backend in self._sorted_backends_by_profile_id():
+            if (
+                backend.service.get_ongoing_context_tokens()
+                <= self.balanced_usage_threshold_tokens
+            ):
+                return backend
+        return self._select_lowest_usage_backend(self._backend_ongoing_context_usages())
+
+    def _select_lowest_profile_leq_reloc_candidate_backend(
+        self,
+        current_backend: BackendBinding,
+    ) -> BackendBinding | None:
+        current_sort_key = _port_profile_sort_key(current_backend.profile.profile_id)
+        lower_backends = [
+            backend
+            for backend in self.backends
+            if _port_profile_sort_key(backend.profile.profile_id) < current_sort_key
+        ]
+        if not lower_backends:
+            return None
+        current_usage = current_backend.service.get_ongoing_context_tokens()
+        target_backend = min(
+            lower_backends,
+            key=lambda backend: (
+                backend.service.get_ongoing_context_tokens(),
+                _port_profile_sort_key(backend.profile.profile_id),
+            ),
+        )
+        if (
+            target_backend.service.get_ongoing_context_tokens()
+            <= current_usage / 2
+        ):
+            return target_backend
+        return None
+
+    def _select_lowest_profile_leq_reloc_2_candidate_backend(
+        self,
+        current_backend: BackendBinding,
+    ) -> BackendBinding | None:
+        current_usage = current_backend.service.get_ongoing_context_tokens()
+        if current_usage <= 0:
+            return None
+        candidate_states = [
+            (usage, backend)
+            for backend in self.backends
+            if backend.profile.profile_id != current_backend.profile.profile_id
+            for usage in [backend.service.get_ongoing_context_tokens()]
+            if usage > 0
+        ]
+        if not candidate_states:
+            return None
+        target_usage, target_backend = min(
+            candidate_states,
+            key=lambda item: (
+                item[0],
+                _port_profile_sort_key(item[1].profile.profile_id),
+            ),
+        )
+        if target_usage <= current_usage / 2:
+            return target_backend
+        return None
+
+    def _relocate_agent_locked(
+        self,
+        api_token: str,
+        *,
+        source_backend: BackendBinding,
+        destination_backend: BackendBinding,
+        reason: str,
+    ) -> bool:
+        if source_backend.profile.profile_id == destination_backend.profile.profile_id:
+            return False
+        source_service = source_backend.service
+        destination_service = destination_backend.service
+        ordered_services = sorted(
+            [source_service, destination_service],
+            key=lambda service: _port_profile_sort_key(service.backend_port_profile_id),
+        )
+        first_lock = ordered_services[0]._lock
+        second_lock = ordered_services[1]._lock
+        with first_lock:
+            with second_lock:
+                run = source_service.active_runs.get(api_token)
+                if run is None:
+                    return False
+                if run.active_request_count > 0 or run.queued_request_count > 0:
+                    return False
+                if api_token in destination_service.active_runs:
+                    raise RuntimeError("destination backend already has the active agent")
+
+                del source_service.active_runs[api_token]
+                destination_service.active_runs[api_token] = run
+                destination_service._annotate_active_run_metadata(api_token)
+                source_service._rebalance_ctx_aware_locked()
+                destination_service._rebalance_ctx_aware_locked()
+
+        self._active_backend_by_token[api_token] = destination_backend
+        destination_service.record_port_profile_assignment(
+            api_token,
+            assignment_policy=self.assignment_policy,
+            reason=reason,
+            previous_port_profile_id=source_backend.profile.profile_id,
+        )
+        source_service._wake_ctx_aware_scheduler()
+        destination_service._wake_ctx_aware_scheduler()
+        return True
+
     def _select_backend_for_new_agent(self) -> BackendBinding:
         if self.assignment_policy == "round_robin":
             return self.backends[self._next_backend_index % len(self.backends)]
@@ -567,20 +690,37 @@ class GatewayMultiService:
                 self._backend_ongoing_context_usages()
             )
         if self.assignment_policy == "balanced":
-            backend_usages = self._backend_ongoing_context_usages()
+            backend_states = [
+                (
+                    backend.service.get_ongoing_agent_count(),
+                    backend.service.get_ongoing_context_tokens(),
+                    index,
+                    backend,
+                )
+                for index, backend in enumerate(self.backends)
+            ]
             active_under_threshold = [
-                item
-                for item in backend_usages
-                if 0 < item[0] < self.balanced_usage_threshold_tokens
+                (usage, index, backend)
+                for ongoing_agent_count, usage, index, backend in backend_states
+                if ongoing_agent_count > 0
+                and usage < self.balanced_usage_threshold_tokens
             ]
             if active_under_threshold:
                 return self._select_lowest_usage_backend(active_under_threshold)
-            return self._select_lowest_usage_backend(backend_usages)
-        if self.assignment_policy == "lowest_profile_without_pending":
-            ordered_backends = sorted(
-                self.backends,
-                key=lambda backend: _port_profile_sort_key(backend.profile.profile_id),
+            return self._select_lowest_usage_backend(
+                [
+                    (usage, index, backend)
+                    for _ongoing_agent_count, usage, index, backend in backend_states
+                ]
             )
+        if self.assignment_policy in {
+            "lowest_profile_leq",
+            "lowest_profile_leq_reloc",
+            "lowest_profile_leq_reloc_2",
+        }:
+            return self._select_lowest_profile_leq_backend()
+        if self.assignment_policy == "lowest_profile_without_pending":
+            ordered_backends = self._sorted_backends_by_profile_id()
             pending_states = [
                 (
                     backend.service.get_pending_assignment_state(),
@@ -831,6 +971,8 @@ class GatewayMultiService:
                 )
             self._next_backend_index = 0
             self._active_backend_by_token = {}
+            self._request_count_since_assignment_by_token = {}
+            self._inflight_proxy_requests_by_token = {}
             for backend in self.backends:
                 payload = backend.service.start_job(normalized_output)
                 job_log_path = payload.get("ctx_aware_job_log_path")
@@ -864,6 +1006,7 @@ class GatewayMultiService:
                 backend,
                 reason="initial_assignment",
             )
+            self._request_count_since_assignment_by_token[api_token] = 0
             self._next_backend_index += 1
             payload["assignment_policy"] = self.assignment_policy
             return payload
@@ -876,6 +1019,8 @@ class GatewayMultiService:
         payload = await backend.service.end_agent(api_token, return_code)
         with self._lock:
             self._active_backend_by_token.pop(api_token, None)
+            self._request_count_since_assignment_by_token.pop(api_token, None)
+            self._inflight_proxy_requests_by_token.pop(api_token, None)
         payload["assignment_policy"] = self.assignment_policy
         return payload
 
@@ -893,18 +1038,63 @@ class GatewayMultiService:
     ) -> ForwardResult:
         with self._lock:
             backend = self._active_backend_by_token.get(api_token)
-        if backend is None:
-            raise KeyError("agent not started")
-        return await backend.service.proxy_request(
-            api_token=api_token,
-            method=method,
-            path=path,
-            headers=headers,
-            body=body,
-            request_payload=request_payload,
-            response_transformer=response_transformer,
-            disconnect_waiter=disconnect_waiter,
-        )
+            if backend is None:
+                raise KeyError("agent not started")
+            inflight_proxy_requests = (
+                self._inflight_proxy_requests_by_token.get(api_token, 0) + 1
+            )
+            self._inflight_proxy_requests_by_token[api_token] = inflight_proxy_requests
+            request_count_since_assignment = (
+                self._request_count_since_assignment_by_token.get(api_token, 0) + 1
+            )
+            self._request_count_since_assignment_by_token[api_token] = (
+                request_count_since_assignment
+            )
+            if (
+                self.assignment_policy
+                in {"lowest_profile_leq_reloc", "lowest_profile_leq_reloc_2"}
+                and inflight_proxy_requests == 1
+                and request_count_since_assignment > RELOCATION_REQUEST_COUNT_THRESHOLD
+            ):
+                relocation_backend: BackendBinding | None = None
+                if self.assignment_policy == "lowest_profile_leq_reloc":
+                    relocation_backend = (
+                        self._select_lowest_profile_leq_reloc_candidate_backend(backend)
+                    )
+                elif self.assignment_policy == "lowest_profile_leq_reloc_2":
+                    relocation_backend = (
+                        self._select_lowest_profile_leq_reloc_2_candidate_backend(backend)
+                    )
+                if relocation_backend is not None and self._relocate_agent_locked(
+                    api_token,
+                    source_backend=backend,
+                    destination_backend=relocation_backend,
+                    reason="request_reassignment",
+                ):
+                    backend = relocation_backend
+                    self._request_count_since_assignment_by_token[api_token] = 0
+        try:
+            return await backend.service.proxy_request(
+                api_token=api_token,
+                method=method,
+                path=path,
+                headers=headers,
+                body=body,
+                request_payload=request_payload,
+                response_transformer=response_transformer,
+                disconnect_waiter=disconnect_waiter,
+            )
+        finally:
+            with self._lock:
+                remaining_inflight_requests = (
+                    self._inflight_proxy_requests_by_token.get(api_token, 0) - 1
+                )
+                if remaining_inflight_requests > 0:
+                    self._inflight_proxy_requests_by_token[api_token] = (
+                        remaining_inflight_requests
+                    )
+                else:
+                    self._inflight_proxy_requests_by_token.pop(api_token, None)
 
     def end_job(self, status: str) -> dict[str, Any]:
         with self._lock:
@@ -942,6 +1132,8 @@ class GatewayMultiService:
 
         with self._lock:
             self._active_backend_by_token = {}
+            self._request_count_since_assignment_by_token = {}
+            self._inflight_proxy_requests_by_token = {}
 
         return {
             "status": "ok",

@@ -53,6 +53,7 @@ Start one environment:
 python3 servers/servers-docker/client.py start -m qwen3_coder_30b -p 0 -l h100_nvl_gpu23 -b
 python3 servers/servers-docker/client.py start -m qwen3_coder_30b -p 0 -l h100_nvl_gpu23 --gateway-ctx -b
 python3 servers/servers-docker/client.py start -m qwen3_coder_30b -p 0 -l h100_nvl_gpu23 --lmcache 100 -b
+python3 servers/servers-docker/client.py start -m qwen3_coder_30b -p 0 -l h100_nvl_gpu23 --image yichaoyuan/vllm-vllm-openai:v0.19.0-otel-lp -b
 python3 servers/servers-docker/client.py start -m qwen3_coder_30b_fp8 -p 2 -l h100_nvl_gpu2_single --gpu-memory-utilization 0.75 -b
 ```
 
@@ -78,7 +79,9 @@ Optional `--gpu-memory-utilization <value>` (`0 < value <= 1`) appends
 `--gpu-memory-utilization <value>` to the vLLM startup args and overrides any
 model-config value for that same flag.
 
-Change the Docker tags in `servers/servers-docker/service_images.toml` if you need a different Jaeger or vLLM image.
+`start --image <repo/name:tag>` overrides only the vLLM image for that launch.
+Without `--image`, `client.py` still uses `servers/servers-docker/service_images.toml`.
+Change the Docker tags in `servers/servers-docker/service_images.toml` if you want different defaults for Jaeger or vLLM.
 
 Operate environment:
 

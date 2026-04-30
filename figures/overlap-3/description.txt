@@ -1,0 +1,3 @@
+Overlaid Throughput Histograms Across Three Frequency-Control Variants
+
+This figure compares the no-frequency-control baseline against three KAIROS variants using overlaid per-agent output-throughput histograms. Each row shares the same bin grid and axis scales so the distribution shift from the baseline to each frequency-control setting is directly visible.

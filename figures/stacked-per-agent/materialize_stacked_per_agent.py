@@ -16,6 +16,7 @@ THIS_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = THIS_DIR / "data"
 DEFAULT_OUTPUT_STEM = "stacked-per-agent"
 DEFAULT_INPUT_REL_PATH = Path("post-processed/gateway/stack-context/context-usage-ranges.json")
+DEFAULT_SHARED_COLOR_HEX = "#CBD5E1"
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,25 @@ def _parse_args() -> argparse.Namespace:
             "Optional output path. Default: "
             "figures/stacked-per-agent/data/"
             "stacked-per-agent.window-<window>.start-<start>.end-<end|full>.json"
+        ),
+    )
+    parser.add_argument(
+        "--unique-color-top-n-by-active-duration",
+        type=int,
+        default=None,
+        help=(
+            "Assign distinct colors only to the top N agents ranked by total active "
+            "duration in the selected analysis window. Remaining agents use "
+            "--shared-color-hex. Default: assign a distinct color to every agent."
+        ),
+    )
+    parser.add_argument(
+        "--shared-color-hex",
+        default=DEFAULT_SHARED_COLOR_HEX,
+        help=(
+            "Shared color used by agents outside the highlighted top-N set when "
+            "--unique-color-top-n-by-active-duration is provided "
+            f"(default: {DEFAULT_SHARED_COLOR_HEX})."
         ),
     )
     return parser.parse_args()
@@ -156,6 +176,17 @@ def _materialize_agent_color(agent_index: int) -> str:
         int(round(green * 255.0)),
         int(round(blue * 255.0)),
     )
+
+
+def _normalize_color_hex(color_hex: str) -> str:
+    normalized = color_hex.strip()
+    if len(normalized) == 7 and normalized.startswith("#"):
+        try:
+            int(normalized[1:], 16)
+        except ValueError as exc:
+            raise ValueError(f"Invalid hex color: {color_hex}") from exc
+        return normalized.upper()
+    raise ValueError(f"Invalid hex color: {color_hex}")
 
 
 def _load_range_entries(
@@ -301,6 +332,33 @@ def _selected_integral_by_agent(
     return selected_integral_by_agent_key
 
 
+def _selected_active_duration_by_agent(
+    *,
+    active_segments: list[dict[str, Any]],
+    analysis_start_s: float,
+    analysis_end_s: float,
+) -> dict[str, float]:
+    selected_active_duration_by_agent_key: dict[str, float] = {}
+    for segment in active_segments:
+        clipped = _clip_range(
+            range_start_s=float(segment["range_start_s"]),
+            range_end_s=float(segment["range_end_s"]),
+            analysis_start_s=analysis_start_s,
+            analysis_end_s=analysis_end_s,
+        )
+        if clipped is None:
+            continue
+        clipped_start_s, clipped_end_s = clipped
+        active_duration_s = clipped_end_s - clipped_start_s
+        if active_duration_s <= 0.0:
+            continue
+        agent_key = str(segment["agent_key"])
+        selected_active_duration_by_agent_key[agent_key] = (
+            selected_active_duration_by_agent_key.get(agent_key, 0.0) + active_duration_s
+        )
+    return selected_active_duration_by_agent_key
+
+
 def _sort_agent_stats(
     *,
     agent_stats_by_key: dict[str, AgentStats],
@@ -313,6 +371,111 @@ def _sort_agent_stats(
         return visible_agents
     visible_agents.sort(key=lambda item: (item.first_active_s, item.agent_key))
     return visible_agents
+
+
+def _color_by_agent_key(
+    *,
+    ordered_agents: list[AgentStats],
+    selected_active_duration_by_agent_key: dict[str, float],
+    unique_color_top_n_by_active_duration: int | None,
+    shared_color_hex: str,
+) -> dict[str, str]:
+    if unique_color_top_n_by_active_duration is None:
+        return {
+            agent.agent_key: _materialize_agent_color(agent_index)
+            for agent_index, agent in enumerate(ordered_agents)
+        }
+
+    color_by_agent_key: dict[str, str] = {}
+    for agent in ordered_agents:
+        color_by_agent_key[agent.agent_key] = shared_color_hex
+
+    highlighted_agents = _highlighted_agents_in_stack_order(
+        ordered_agents=ordered_agents,
+        selected_active_duration_by_agent_key=selected_active_duration_by_agent_key,
+        unique_color_top_n_by_active_duration=unique_color_top_n_by_active_duration,
+    )
+    for highlighted_color_index, agent in enumerate(highlighted_agents):
+        color_by_agent_key[agent.agent_key] = _materialize_agent_color(highlighted_color_index)
+    return color_by_agent_key
+
+
+def _highlighted_agent_keys(
+    *,
+    ordered_agents: list[AgentStats],
+    selected_active_duration_by_agent_key: dict[str, float],
+    unique_color_top_n_by_active_duration: int,
+) -> set[str]:
+    top_n = max(0, min(unique_color_top_n_by_active_duration, len(ordered_agents)))
+    ordered_position_by_agent_key = {
+        agent.agent_key: agent_index for agent_index, agent in enumerate(ordered_agents)
+    }
+    ranked_agents = sorted(
+        ordered_agents,
+        key=lambda agent: (
+            -selected_active_duration_by_agent_key.get(agent.agent_key, 0.0),
+            ordered_position_by_agent_key[agent.agent_key],
+        ),
+    )
+    return {agent.agent_key for agent in ranked_agents[:top_n]}
+
+
+def _highlighted_agents_in_stack_order(
+    *,
+    ordered_agents: list[AgentStats],
+    selected_active_duration_by_agent_key: dict[str, float],
+    unique_color_top_n_by_active_duration: int | None,
+) -> list[AgentStats]:
+    if unique_color_top_n_by_active_duration is None:
+        return ordered_agents
+
+    highlighted_agent_keys = _highlighted_agent_keys(
+        ordered_agents=ordered_agents,
+        selected_active_duration_by_agent_key=selected_active_duration_by_agent_key,
+        unique_color_top_n_by_active_duration=unique_color_top_n_by_active_duration,
+    )
+    if not highlighted_agent_keys:
+        return ordered_agents
+
+    ordered_position_by_agent_key = {
+        agent.agent_key: agent_index for agent_index, agent in enumerate(ordered_agents)
+    }
+    highlighted_agents = [
+        agent for agent in ordered_agents if agent.agent_key in highlighted_agent_keys
+    ]
+    highlighted_agents.sort(
+        key=lambda agent: (
+            -agent.first_active_s,
+            ordered_position_by_agent_key[agent.agent_key],
+        )
+    )
+    return highlighted_agents
+
+
+def _stack_rank_by_agent_key(
+    *,
+    ordered_agents: list[AgentStats],
+    selected_active_duration_by_agent_key: dict[str, float],
+    unique_color_top_n_by_active_duration: int | None,
+) -> dict[str, int]:
+    if unique_color_top_n_by_active_duration is None:
+        return {agent.agent_key: agent_index for agent_index, agent in enumerate(ordered_agents)}
+
+    highlighted_agent_keys = _highlighted_agent_keys(
+        ordered_agents=ordered_agents,
+        selected_active_duration_by_agent_key=selected_active_duration_by_agent_key,
+        unique_color_top_n_by_active_duration=unique_color_top_n_by_active_duration,
+    )
+    highlighted_agents = _highlighted_agents_in_stack_order(
+        ordered_agents=ordered_agents,
+        selected_active_duration_by_agent_key=selected_active_duration_by_agent_key,
+        unique_color_top_n_by_active_duration=unique_color_top_n_by_active_duration,
+    )
+    non_highlighted_agents = [
+        agent for agent in ordered_agents if agent.agent_key not in highlighted_agent_keys
+    ]
+    stacked_agents = highlighted_agents + non_highlighted_agents
+    return {agent.agent_key: stack_rank for stack_rank, agent in enumerate(stacked_agents)}
 
 
 def _build_windows(
@@ -346,6 +509,8 @@ def materialize_windows(
     analysis_start_s: float,
     analysis_end_s: float | None,
     agent_order: str,
+    unique_color_top_n_by_active_duration: int | None = None,
+    shared_color_hex: str = DEFAULT_SHARED_COLOR_HEX,
 ) -> dict[str, Any]:
     payload, entries = _load_range_entries(input_path)
     active_segments = _active_segments(entries)
@@ -364,9 +529,20 @@ def materialize_windows(
             "analysis window end must be greater than start: "
             f"start={analysis_start_s}, end={resolved_analysis_end_s}"
         )
+    if unique_color_top_n_by_active_duration is not None and unique_color_top_n_by_active_duration < 0:
+        raise ValueError(
+            "unique_color_top_n_by_active_duration must be non-negative: "
+            f"{unique_color_top_n_by_active_duration}"
+        )
+    normalized_shared_color_hex = _normalize_color_hex(shared_color_hex)
 
     agent_stats_by_key = _build_full_agent_stats(active_segments)
     selected_integral_by_agent_key = _selected_integral_by_agent(
+        active_segments=active_segments,
+        analysis_start_s=analysis_start_s,
+        analysis_end_s=resolved_analysis_end_s,
+    )
+    selected_active_duration_by_agent_key = _selected_active_duration_by_agent(
         active_segments=active_segments,
         analysis_start_s=analysis_start_s,
         analysis_end_s=resolved_analysis_end_s,
@@ -383,6 +559,17 @@ def materialize_windows(
         agent_stats_by_key=agent_stats_by_key,
         visible_agent_keys=visible_agent_keys,
         agent_order=agent_order,
+    )
+    color_by_agent_key = _color_by_agent_key(
+        ordered_agents=ordered_agents,
+        selected_active_duration_by_agent_key=selected_active_duration_by_agent_key,
+        unique_color_top_n_by_active_duration=unique_color_top_n_by_active_duration,
+        shared_color_hex=normalized_shared_color_hex,
+    )
+    stack_rank_by_agent_key = _stack_rank_by_agent_key(
+        ordered_agents=ordered_agents,
+        selected_active_duration_by_agent_key=selected_active_duration_by_agent_key,
+        unique_color_top_n_by_active_duration=unique_color_top_n_by_active_duration,
     )
     windows = _build_windows(
         analysis_start_s=analysis_start_s,
@@ -407,6 +594,11 @@ def materialize_windows(
                 "gateway_profile_id": agent.gateway_profile_id,
                 "first_active_s": round(agent.first_active_s, 6),
                 "last_active_end_s": round(agent.last_active_end_s, 6),
+                "stack_rank": stack_rank_by_agent_key[agent.agent_key],
+                "analysis_active_duration_s": round(
+                    selected_active_duration_by_agent_key.get(agent.agent_key, 0.0),
+                    6,
+                ),
                 "analysis_total_integral_value": round(
                     selected_integral_by_agent_key.get(agent.agent_key, 0.0),
                     6,
@@ -416,7 +608,7 @@ def materialize_windows(
                     / (resolved_analysis_end_s - analysis_start_s),
                     6,
                 ),
-                "color_hex": _materialize_agent_color(agent_index),
+                "color_hex": color_by_agent_key[agent.agent_key],
             }
         )
 
@@ -466,7 +658,14 @@ def materialize_windows(
 
         contributions_payload: list[dict[str, Any]] = []
         total_integral_value = 0.0
-        for agent_index in sorted(sparse_entries):
+        sorted_agent_indexes = sorted(
+            sparse_entries,
+            key=lambda agent_index: (
+                agents_payload[agent_index]["stack_rank"],
+                agent_index,
+            ),
+        )
+        for agent_index in sorted_agent_indexes:
             integral_value = sparse_entries[agent_index]
             if integral_value <= 0.0:
                 continue
@@ -507,6 +706,18 @@ def materialize_windows(
         "analysis_window_start_s": round(analysis_start_s, 6),
         "analysis_window_end_s": round(resolved_analysis_end_s, 6),
         "analysis_window_duration_s": round(resolved_analysis_end_s - analysis_start_s, 6),
+        "color_policy": {
+            "unique_color_top_n_by_active_duration": unique_color_top_n_by_active_duration,
+            "shared_color_hex": normalized_shared_color_hex,
+            "highlighted_agents_stack_below_shared_color_agents": (
+                unique_color_top_n_by_active_duration is not None
+            ),
+            "highlighted_agents_order": (
+                "first-active-descending"
+                if unique_color_top_n_by_active_duration is not None
+                else None
+            ),
+        },
         "agent_count": len(agents_payload),
         "window_count": len(windows_payload),
         "agents": agents_payload,
@@ -530,6 +741,8 @@ def main() -> int:
         analysis_start_s=args.start_s,
         analysis_end_s=args.end_s,
         agent_order=args.agent_order,
+        unique_color_top_n_by_active_duration=args.unique_color_top_n_by_active_duration,
+        shared_color_hex=args.shared_color_hex,
     )
     output_path = (
         Path(args.output).expanduser().resolve()

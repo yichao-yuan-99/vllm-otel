@@ -1,0 +1,3 @@
+Horizontal Turn Count and Agent Duration Distributions Across Qwen3-Coder-30B Benchmark and Agent Runs
+
+This figure combines the existing turn-count and duration violin views into a single transposed comparison for six selected runs under `results/qwen3-coder-30b`. Each benchmark-agent pair becomes one shared row, making it easy to compare interaction length and runtime side by side while still showing full distribution shape, central tendency, and raw per-job outliers.

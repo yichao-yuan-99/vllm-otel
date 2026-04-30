@@ -17,6 +17,9 @@ SUPPORTED_ASSIGNMENT_POLICIES = {
     "balanced",
     "round_robin",
     "lowest_usage",
+    "lowest_profile_leq",
+    "lowest_profile_leq_reloc",
+    "lowest_profile_leq_reloc_2",
     "lowest_profile_without_pending",
 }
 

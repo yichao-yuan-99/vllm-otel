@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Materialize clustered-bar comparison data for power, energy, context, and latency."""
+"""Materialize clustered-bar comparison data for energy, power, context, and throughput."""
 
 from __future__ import annotations
 
@@ -44,6 +44,7 @@ JOB_THROUGHPUT_REL_PATH = Path(
 REPLAY_SUMMARY_REL_PATH = Path("replay/summary.json")
 RUN_DIR_NAME_PATTERN = re.compile(r"^\d{8}T\d{6}Z$")
 FIXED_FREQ_NESTED_RUN_DIR_NAME = "core-345-810"
+OUTPUT_THROUGHPUT_THRESHOLD_TOKENS_PER_S = 20.0
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,14 @@ class MetricSpec:
     metric_unit: str
     y_axis_label: str
     formula: str
+
+
+@dataclass(frozen=True)
+class RunSelectionOverride:
+    implementation_key: str
+    experiment_id: str
+    qps_slug: str
+    run_dir_name: str
 
 
 METRIC_SPECS = (
@@ -112,12 +121,33 @@ METRIC_SPECS = (
         ),
     ),
     MetricSpec(
+        metric_key="pct_agents_above_20_output_throughput_tokens_per_s",
+        metric_label="Agents Above 20 Tokens/s",
+        panel_title="Agents Above 20 Tokens/s",
+        metric_unit="%",
+        y_axis_label="Agents Above 20 Tokens/s (%)",
+        formula=(
+            "count(agents[].output_throughput_tokens_per_s > 20) / "
+            "count(agents[].output_throughput_tokens_per_s) * 100"
+        ),
+    ),
+    MetricSpec(
         metric_key="average_job_throughput_jobs_per_s",
         metric_label="Average Job Throughput",
         panel_title="Average Job Throughput",
         metric_unit="jobs/s",
         y_axis_label="Average Job Throughput (jobs/s)",
         formula="mean(throughput_points[].throughput_jobs_per_s)",
+    ),
+)
+
+
+RUN_SELECTION_OVERRIDES = (
+    RunSelectionOverride(
+        implementation_key="uncontrolled",
+        experiment_id="A",
+        qps_slug="qps0_08",
+        run_dir_name="20260321T143624Z",
     ),
 )
 
@@ -315,6 +345,22 @@ def _source_root_for(
     return implementation.source_root
 
 
+def _run_selection_override_for(
+    *,
+    implementation: ImplementationSpec,
+    experiment: ExperimentSpec,
+    qps_slug: str,
+) -> RunSelectionOverride | None:
+    for override in RUN_SELECTION_OVERRIDES:
+        if (
+            override.implementation_key == implementation.implementation_key
+            and override.experiment_id == experiment.experiment_id
+            and override.qps_slug == qps_slug
+        ):
+            return override
+    return None
+
+
 def _record_missing(
     missing_entries: list[dict[str, Any]],
     *,
@@ -424,6 +470,42 @@ def _discover_latest_run_dir(
             path=qps_dir,
         )
         return None, 0
+
+    override = _run_selection_override_for(
+        implementation=implementation,
+        experiment=experiment,
+        qps_slug=qps_slug,
+    )
+    if override is not None:
+        selected_timestamp_dir = (qps_dir / override.run_dir_name).resolve()
+        if selected_timestamp_dir.is_dir():
+            if implementation.implementation_key != "fixed_freq":
+                return selected_timestamp_dir, len(run_dirs)
+            nested_run_dir = (selected_timestamp_dir / FIXED_FREQ_NESTED_RUN_DIR_NAME).resolve()
+            if nested_run_dir.is_dir():
+                return nested_run_dir, len(run_dirs)
+            _record_missing(
+                missing_entries,
+                implementation=implementation,
+                experiment=experiment,
+                qps_slug=qps_slug,
+                scope="run-dir",
+                reason=(
+                    "Pinned timestamp run directory exists but is missing the "
+                    "nested fixed-freq run directory"
+                ),
+                path=selected_timestamp_dir,
+            )
+        else:
+            _record_missing(
+                missing_entries,
+                implementation=implementation,
+                experiment=experiment,
+                qps_slug=qps_slug,
+                scope="run-dir",
+                reason="Pinned timestamp run directory does not exist",
+                path=selected_timestamp_dir,
+            )
 
     if implementation.implementation_key != "fixed_freq":
         return run_dirs[-1], len(run_dirs)
@@ -784,6 +866,23 @@ def _percentile_from_sorted(sorted_values: list[float], quantile: float) -> floa
     return lower_value + ((upper_value - lower_value) * fraction)
 
 
+def _extract_throughput_agent_values(
+    throughput_payload: dict[str, Any] | None,
+) -> list[float] | None:
+    if throughput_payload is None:
+        return None
+    raw_agents = throughput_payload.get("agents")
+    if not isinstance(raw_agents, list):
+        return None
+    return [
+        throughput
+        for raw_agent in raw_agents
+        if isinstance(raw_agent, dict)
+        for throughput in [_float_or_none(raw_agent.get("output_throughput_tokens_per_s"))]
+        if throughput is not None
+    ]
+
+
 def _build_throughput_metric(
     *,
     throughput_payload: dict[str, Any] | None,
@@ -816,8 +915,8 @@ def _build_throughput_metric(
                 "source": "summary.percentiles.5",
             }
 
-    raw_agents = throughput_payload.get("agents")
-    if not isinstance(raw_agents, list):
+    values = _extract_throughput_agent_values(throughput_payload)
+    if values is None:
         _record_missing(
             missing_entries,
             implementation=implementation,
@@ -833,13 +932,6 @@ def _build_throughput_metric(
             "source": "missing",
         }
 
-    values = [
-        throughput
-        for raw_agent in raw_agents
-        if isinstance(raw_agent, dict)
-        for throughput in [_float_or_none(raw_agent.get("output_throughput_tokens_per_s"))]
-        if throughput is not None
-    ]
     if not values:
         _record_missing(
             missing_entries,
@@ -860,6 +952,74 @@ def _build_throughput_metric(
     return {
         "value": 0.0 if percentile_value is None else round(percentile_value, 6),
         "sample_count": len(values),
+        "source": "agents.output_throughput_tokens_per_s",
+    }
+
+
+def _build_agents_above_threshold_throughput_metric(
+    *,
+    throughput_payload: dict[str, Any] | None,
+    implementation: ImplementationSpec,
+    experiment: ExperimentSpec,
+    qps_slug: str,
+    missing_entries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if throughput_payload is None:
+        return {
+            "value": 0.0,
+            "qualified_count": 0,
+            "sample_count": 0,
+            "threshold_tokens_per_s": OUTPUT_THROUGHPUT_THRESHOLD_TOKENS_PER_S,
+            "source": "missing",
+        }
+
+    values = _extract_throughput_agent_values(throughput_payload)
+    if values is None:
+        _record_missing(
+            missing_entries,
+            implementation=implementation,
+            experiment=experiment,
+            qps_slug=qps_slug,
+            scope="metric",
+            reason="Throughput payload is missing agents[]",
+            metric_key="pct_agents_above_20_output_throughput_tokens_per_s",
+        )
+        return {
+            "value": 0.0,
+            "qualified_count": 0,
+            "sample_count": 0,
+            "threshold_tokens_per_s": OUTPUT_THROUGHPUT_THRESHOLD_TOKENS_PER_S,
+            "source": "missing",
+        }
+
+    if not values:
+        _record_missing(
+            missing_entries,
+            implementation=implementation,
+            experiment=experiment,
+            qps_slug=qps_slug,
+            scope="metric",
+            reason="Throughput payload has no numeric output_throughput_tokens_per_s values",
+            metric_key="pct_agents_above_20_output_throughput_tokens_per_s",
+        )
+        return {
+            "value": 0.0,
+            "qualified_count": 0,
+            "sample_count": 0,
+            "threshold_tokens_per_s": OUTPUT_THROUGHPUT_THRESHOLD_TOKENS_PER_S,
+            "source": "missing",
+        }
+
+    qualified_count = sum(
+        1
+        for value in values
+        if value > OUTPUT_THROUGHPUT_THRESHOLD_TOKENS_PER_S
+    )
+    return {
+        "value": round((qualified_count / len(values)) * 100.0, 6),
+        "qualified_count": qualified_count,
+        "sample_count": len(values),
+        "threshold_tokens_per_s": OUTPUT_THROUGHPUT_THRESHOLD_TOKENS_PER_S,
         "source": "agents.output_throughput_tokens_per_s",
     }
 
@@ -955,7 +1115,10 @@ def _build_implementation_entry(
         experiment=experiment,
         qps_slug=qps_slug,
         missing_entries=missing_entries,
-        metric_keys=("p5_output_throughput_tokens_per_s",),
+        metric_keys=(
+            "p5_output_throughput_tokens_per_s",
+            "pct_agents_above_20_output_throughput_tokens_per_s",
+        ),
     )
     power_payload = _load_optional_json(
         run_dir=run_dir,
@@ -1022,6 +1185,13 @@ def _build_implementation_entry(
             missing_entries=missing_entries,
         ),
         "p5_output_throughput_tokens_per_s": _build_throughput_metric(
+            throughput_payload=throughput_payload,
+            implementation=implementation,
+            experiment=experiment,
+            qps_slug=qps_slug,
+            missing_entries=missing_entries,
+        ),
+        "pct_agents_above_20_output_throughput_tokens_per_s": _build_agents_above_threshold_throughput_metric(
             throughput_payload=throughput_payload,
             implementation=implementation,
             experiment=experiment,
@@ -1137,6 +1307,10 @@ def _build_payload(
             (
                 "For experiment B at qps0_05, the STEER run is read from the "
                 "ctx-aware result root."
+            ),
+            (
+                "For experiment A at qps0_08, the uncontrolled run is pinned to "
+                "timestamp 20260321T143624Z."
             ),
         ],
     }

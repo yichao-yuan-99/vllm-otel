@@ -1197,6 +1197,15 @@ def _load_image_config() -> dict[str, str]:
     }
 
 
+def _resolve_service_images(*, vllm_image: str | None = None) -> dict[str, str]:
+    images = _load_image_config()
+    if vllm_image is None:
+        return images
+    resolved = dict(images)
+    resolved["vllm_image_name"] = vllm_image
+    return resolved
+
+
 def _resolve_default_key(default_key: str | None, values: dict[str, Any], *, label: str) -> str:
     if default_key:
         if default_key not in values:
@@ -1329,7 +1338,7 @@ def _default_selection() -> dict[str, Any]:
     default_model, models = _load_models_config()
     default_port_profile, port_profiles = _load_port_profiles()
     default_launch_profile, launch_profiles = _load_launch_profiles()
-    images = _load_image_config()
+    images = _resolve_service_images()
 
     model_key = _resolve_default_key(default_model, models, label="model")
     port_key = _resolve_default_key(default_port_profile, port_profiles, label="port profile")
@@ -2281,13 +2290,20 @@ def _validate_start_selection(
     model_key: str,
     port_profile_id: int,
     launch_profile_key: str,
+    vllm_image: str | None = None,
     lmcache: int | None = None,
     gpu_memory_utilization: float | None = None,
     gateway_ctx: bool = False,
     enforce_weight_limit: bool = True,
 ) -> tuple[bool, dict[str, Any]]:
+    normalized_vllm_image: str | None = None
+    if vllm_image is not None:
+        try:
+            normalized_vllm_image = _parse_non_empty_string(vllm_image, "--image")
+        except ValueError as exc:
+            return False, _payload(ok=False, code=415, message=str(exc))
     try:
-        images = _load_image_config()
+        images = _resolve_service_images(vllm_image=normalized_vllm_image)
         _, models = _load_models_config()
         _, port_profiles = _load_port_profiles()
         _, launch_profiles = _load_launch_profiles()
@@ -2335,6 +2351,7 @@ def _validate_start_selection(
         "model_key": model_key,
         "port_profile_id": port_key,
         "launch_profile_key": launch_profile_key,
+        "vllm_image_override": normalized_vllm_image,
         "lmcache": normalized_lmcache,
         "gpu_memory_utilization": normalized_gpu_memory_utilization,
         "gateway_ctx": bool(gateway_ctx),
@@ -2707,6 +2724,7 @@ def _start_impl(
     model_key: str,
     port_profile_id: int,
     launch_profile_key: str,
+    vllm_image: str | None,
     lmcache: int | None,
     gpu_memory_utilization: float | None,
     gateway_ctx: bool,
@@ -2725,6 +2743,7 @@ def _start_impl(
         model_key=model_key,
         port_profile_id=port_profile_id,
         launch_profile_key=launch_profile_key,
+        vllm_image=vllm_image,
         lmcache=lmcache,
         gpu_memory_utilization=gpu_memory_utilization,
         gateway_ctx=gateway_ctx,
@@ -2849,6 +2868,7 @@ def _start_impl(
                 "model_key": selection["model_key"],
                 "port_profile_id": selection["port_profile_id"],
                 "launch_profile_key": selection["launch_profile_key"],
+                "vllm_image_override": selection.get("vllm_image_override"),
                 "lmcache": selection.get("lmcache"),
                 "gpu_memory_utilization": selection.get("gpu_memory_utilization"),
                 "gateway_ctx": bool(selection.get("gateway_ctx")),
@@ -3160,6 +3180,14 @@ def start(
     model: str = typer.Option(..., "--model", "-m", help="Model key from configs/model_config.toml."),
     port_profile: int = typer.Option(..., "--port-profile", "-p", help="Port profile numeric ID."),
     launch_profile: str = typer.Option(..., "--launch-profile", "-l", help="Launch profile key."),
+    image: str | None = typer.Option(
+        None,
+        "--image",
+        help=(
+            "Override the vLLM Docker image for this start command only. "
+            "Defaults to images.vllm from servers/servers-docker/service_images.toml."
+        ),
+    ),
     gateway_ctx: bool = typer.Option(
         False,
         "--gateway-ctx",
@@ -3204,6 +3232,7 @@ def start(
                 model_key=model,
                 port_profile_id=port_profile,
                 launch_profile_key=launch_profile,
+                vllm_image=image,
                 lmcache=lmcache,
                 gpu_memory_utilization=gpu_memory_utilization,
                 gateway_ctx=gateway_ctx,

@@ -30,9 +30,9 @@ DEFAULT_SOURCE_DIRS = (
     "qps0_6/20260331T212051Z",
 )
 DEFAULT_SOURCE_LABELS = (
-    "TRAIL 0.5",
-    "TRAIL 0.6",
-    "TRAIL + LMCache 0.6",
+    "vLLM",
+    "vLLM (recomputation)",
+    "vLLM (LMCache)",
 )
 
 
@@ -203,6 +203,15 @@ def _format_case_slug(case_slug: str | None) -> str:
 
 
 def _default_source_label(*, case_slug: str | None, qps_slug: str | None) -> str:
+    explicit_label_overrides = {
+        ("trail", "qps0_5"): "vLLM",
+        ("trail", "qps0_6"): "vLLM (recomputation)",
+        ("trail-lmcache", "qps0_6"): "vLLM (LMCache)",
+    }
+    override_label = explicit_label_overrides.get((case_slug, qps_slug))
+    if override_label is not None:
+        return override_label
+
     case_label = _format_case_slug(case_slug)
     formatted_qps = _format_qps_slug(qps_slug)
     if formatted_qps is None:

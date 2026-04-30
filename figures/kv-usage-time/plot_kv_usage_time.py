@@ -46,8 +46,8 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--title",
-        default="KV Cache Usage Over Time (Smoothed)",
-        help="Figure title.",
+        default="",
+        help="Optional figure title. Empty by default.",
     )
     parser.add_argument(
         "--figure-width",
@@ -58,8 +58,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--figure-height",
         type=float,
-        default=6.2,
-        help="Figure height in inches (default: 6.2).",
+        default=4.133333333333334,
+        help="Figure height in inches (default: 4.133333333333334).",
     )
     parser.add_argument(
         "--dpi",
@@ -88,6 +88,36 @@ def _default_output_path(input_path: Path) -> Path:
     return (DEFAULT_OUTPUT_DIR / f"{input_path.stem}.pdf").resolve()
 
 
+def _series_display_label(raw_item: dict[str, Any], index: int) -> str:
+    frequency_mhz = _float_or_none(raw_item.get("frequency_mhz"))
+    if frequency_mhz is not None:
+        if frequency_mhz.is_integer():
+            frequency_label = str(int(frequency_mhz))
+        else:
+            frequency_label = f"{frequency_mhz:g}"
+        return f"max freq. {frequency_label}"
+
+    label = raw_item.get("series_label")
+    if not isinstance(label, str) or not label:
+        run_slug = raw_item.get("run_slug")
+        if isinstance(run_slug, str) and run_slug:
+            return run_slug
+        return f"series-{index+1}"
+    return label
+
+
+def _series_matches_frequency(raw_item: dict[str, Any], frequency_mhz: int) -> bool:
+    parsed_frequency = _float_or_none(raw_item.get("frequency_mhz"))
+    if parsed_frequency is not None:
+        return math.isclose(parsed_frequency, float(frequency_mhz))
+
+    run_slug = raw_item.get("run_slug")
+    if isinstance(run_slug, str) and run_slug.endswith(f"-{frequency_mhz}"):
+        return True
+
+    return False
+
+
 def main() -> int:
     args = _parse_args()
     input_path = Path(args.input).expanduser().resolve()
@@ -108,20 +138,21 @@ def main() -> int:
     plt.rcParams.update(
         {
             "font.family": "DejaVu Serif",
-            "font.size": 11,
-            "axes.titlesize": 13,
-            "axes.labelsize": 11,
-            "xtick.labelsize": 10,
-            "ytick.labelsize": 10,
-            "axes.spines.top": False,
-            "axes.spines.right": False,
+            "font.size": 15,
+            "axes.titlesize": 18,
+            "axes.labelsize": 17,
+            "xtick.labelsize": 14,
+            "ytick.labelsize": 14,
+            "legend.fontsize": 15,
+            "axes.spines.top": True,
+            "axes.spines.right": True,
         }
     )
 
     figure, axis = plt.subplots(figsize=(args.figure_width, args.figure_height))
 
-    stats_lines: list[str] = []
     plotted_series_count = 0
+    freq_660_color: str | None = None
     for index, raw_item in enumerate(raw_series):
         if not isinstance(raw_item, dict):
             continue
@@ -143,9 +174,7 @@ def main() -> int:
         if not x_values_minutes:
             continue
 
-        label = raw_item.get("series_label")
-        if not isinstance(label, str) or not label:
-            label = raw_item.get("run_slug") if isinstance(raw_item.get("run_slug"), str) else f"series-{index+1}"
+        label = _series_display_label(raw_item, index)
 
         color = SERIES_COLORS[index % len(SERIES_COLORS)]
         axis.plot(
@@ -155,74 +184,42 @@ def main() -> int:
             linewidth=2.2,
             label=label,
         )
+        if _series_matches_frequency(raw_item, 660):
+            freq_660_color = color
         plotted_series_count += 1
-
-        stats = raw_item.get("stats")
-        if isinstance(stats, dict):
-            avg = _float_or_none(stats.get("avg"))
-            max_value = _float_or_none(stats.get("max"))
-            if avg is not None and max_value is not None:
-                stats_lines.append(
-                    f"{label}: avg {avg * 100.0:.1f}%, max {max_value * 100.0:.1f}%"
-                )
 
     if plotted_series_count == 0:
         raise ValueError(f"No plottable series were found in {input_path}")
 
-    axis.set_title(args.title, loc="left", fontweight="semibold")
-    subtitle_parts: list[str] = []
-    analysis_start_s = _float_or_none(payload.get("analysis_window_start_s"))
-    analysis_end_s = _float_or_none(payload.get("analysis_window_end_s"))
-    smooth_window_s = _float_or_none(payload.get("smooth_window_s"))
-    metric_name = payload.get("metric_name")
-    if analysis_start_s is not None and analysis_end_s is not None:
-        subtitle_parts.append(
-            f"window: {analysis_start_s:g}s to {analysis_end_s:g}s"
-        )
-    if isinstance(metric_name, str) and metric_name:
-        subtitle_parts.append(f"metric: {metric_name}")
-    if smooth_window_s is not None:
-        subtitle_parts.append(f"smoothed window: +/- {smooth_window_s:g}s")
-    subtitle_parts.append("y-axis shown as percent where 100% = full cache")
-    axis.text(
-        0.0,
-        1.02,
-        " | ".join(subtitle_parts),
-        transform=axis.transAxes,
-        ha="left",
-        va="bottom",
-        fontsize=9,
-        color="#334155",
-    )
+    if isinstance(args.title, str) and args.title.strip():
+        axis.set_title(args.title, loc="left", fontweight="semibold")
 
     axis.set_xlabel("Time From Start (minutes)")
-    axis.set_ylabel("KV Cache Usage (%)")
+    axis.set_ylabel("Context Cache Usage (%)")
     axis.grid(True, which="major", linestyle="--", linewidth=0.7, alpha=0.55)
     axis.grid(True, which="minor", linestyle=":", linewidth=0.5, alpha=0.4)
     axis.minorticks_on()
     axis.margins(x=0.0)
     axis.xaxis.set_major_locator(ticker.MaxNLocator(nbins=10))
+    left_spine = axis.spines["left"]
+    for side in ("top", "right"):
+        axis.spines[side].set_visible(True)
+        axis.spines[side].set_linewidth(left_spine.get_linewidth())
+        axis.spines[side].set_edgecolor(left_spine.get_edgecolor())
+    if freq_660_color is not None:
+        axis.text(
+            120.0,
+            90.0,
+            "thrashing regime",
+            color=freq_660_color,
+            fontsize=15,
+            ha="left",
+            va="center",
+        )
     axis.legend(loc="upper left", frameon=False)
 
-    if stats_lines:
-        axis.text(
-            0.99,
-            0.98,
-            "\n".join(stats_lines),
-            transform=axis.transAxes,
-            ha="right",
-            va="top",
-            fontsize=9,
-            bbox={
-                "boxstyle": "round,pad=0.32",
-                "facecolor": "#F8FAFC",
-                "edgecolor": "#CBD5E1",
-                "alpha": 0.96,
-            },
-        )
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.98))
+    figure.tight_layout()
     figure.savefig(output_path, dpi=args.dpi, bbox_inches="tight")
     plt.close(figure)
 

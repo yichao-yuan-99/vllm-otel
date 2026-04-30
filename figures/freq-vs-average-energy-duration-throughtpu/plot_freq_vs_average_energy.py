@@ -50,8 +50,8 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--title",
-        default="Frequency vs Energy, Throughput, and LLM Time",
-        help="Figure title.",
+        default=None,
+        help="Optional figure title.",
     )
     parser.add_argument(
         "--figure-width",
@@ -62,8 +62,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--figure-height",
         type=float,
-        default=7.8,
-        help="Figure height in inches (default: 7.8).",
+        default=3.9,
+        help="Figure height in inches (default: 3.9).",
     )
     parser.add_argument(
         "--dpi",
@@ -98,17 +98,6 @@ def _load_rows(path: Path) -> list[dict[str, Any]]:
 
 def _default_output_path(input_path: Path) -> Path:
     return (DEFAULT_OUTPUT_DIR / f"{input_path.stem}.pdf").resolve()
-
-
-def _shared_window_label(rows: list[dict[str, Any]]) -> str | None:
-    starts = {row.get("analysis_window_start_s", "").strip() for row in rows}
-    ends = {row.get("analysis_window_end_s", "").strip() for row in rows}
-    if len(starts) == 1 and len(ends) == 1:
-        start = next(iter(starts))
-        end = next(iter(ends))
-        if start and end:
-            return f"window: {start}s to {end}s"
-    return None
 
 
 def main() -> int:
@@ -180,6 +169,7 @@ def main() -> int:
     llm_axis = throughput_axis.twinx()
 
     energy_color = "#d97706"
+    energy_label_color = "#b45309"
     power_color = "#b91c1c"
     throughput_color = "#2563eb"
     llm_color = "#0f766e"
@@ -191,7 +181,7 @@ def main() -> int:
         linewidth=2.2,
         marker="o",
         markersize=6.5,
-        label="Avg energy / finished replay",
+        label="Avg energy / job",
     )
     power_axis.plot(
         x_values,
@@ -221,14 +211,14 @@ def main() -> int:
         linestyle="-.",
         marker="^",
         markersize=5.6,
-        label="Avg time in LLM",
+        label="Avg time / LLM request",
     )
 
-    energy_axis.set_ylabel("Average energy per finished replay (kJ)", color=energy_color)
+    energy_axis.set_ylabel("Average energy\nper job (kJ)", color=energy_label_color)
     power_axis.set_ylabel("Average power (W)", color=power_color)
     throughput_axis.set_xlabel("Frequency (MHz)")
-    throughput_axis.set_ylabel("Average throughput (jobs/s)", color=throughput_color)
-    llm_axis.set_ylabel("Average time spent in LLM (s)", color=llm_color)
+    throughput_axis.set_ylabel("Average throughput\n(jobs/s)", color=throughput_color)
+    llm_axis.set_ylabel("Average time spent\nper LLM request (s)", color=llm_color)
     energy_axis.tick_params(axis="y", colors=energy_color)
     power_axis.tick_params(axis="y", colors=power_color)
     throughput_axis.tick_params(axis="y", colors=throughput_color)
@@ -238,34 +228,26 @@ def main() -> int:
     energy_axis.set_axisbelow(True)
     throughput_axis.set_axisbelow(True)
     throughput_axis.set_xlim(max(x_values), min(x_values))
-    energy_axis.set_title("Energy and Average Power", loc="left", fontsize=11.5)
-    throughput_axis.set_title("Throughput and Average LLM Time", loc="left", fontsize=11.5)
-
-    title_lines = [args.title]
-    shared_window_label = _shared_window_label(rows)
-    if shared_window_label is not None:
-        title_lines.append(shared_window_label)
-    fig.suptitle("\n".join(title_lines))
+    if args.title:
+        fig.suptitle(args.title, y=0.995)
 
     energy_handles, energy_labels = energy_axis.get_legend_handles_labels()
     power_handles, power_labels = power_axis.get_legend_handles_labels()
     throughput_handles, throughput_labels = throughput_axis.get_legend_handles_labels()
     llm_handles, llm_labels = llm_axis.get_legend_handles_labels()
-    energy_axis.legend(
-        energy_handles + power_handles,
-        energy_labels + power_labels,
-        loc="upper left",
+    fig.legend(
+        energy_handles + power_handles + throughput_handles + llm_handles,
+        energy_labels + power_labels + throughput_labels + llm_labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.98 if not args.title else 0.94),
+        ncol=4,
         frameon=False,
-    )
-    throughput_axis.legend(
-        throughput_handles + llm_handles,
-        throughput_labels + llm_labels,
-        loc="upper left",
-        frameon=False,
+        columnspacing=1.5,
+        handletextpad=0.6,
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.86 if not args.title else 0.80))
     fig.savefig(output_path, dpi=args.dpi, bbox_inches="tight")
     plt.close(fig)
 

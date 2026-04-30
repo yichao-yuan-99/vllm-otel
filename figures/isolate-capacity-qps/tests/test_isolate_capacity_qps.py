@@ -193,7 +193,7 @@ class IsolateCapacityQpsFigureTest(unittest.TestCase):
             )
 
             trail_qps05_case = payload["cases"][0]
-            self.assertEqual(trail_qps05_case["case_label"], "TRAIL 0.5")
+            self.assertEqual(trail_qps05_case["case_label"], "vLLM")
             self.assertEqual(trail_qps05_case["source_input_kind"], "qps_dir")
             self.assertEqual(trail_qps05_case["run_dir_name"], "20260331T020202Z")
             self.assertEqual(trail_qps05_case["candidate_run_count"], 2)
@@ -217,7 +217,9 @@ class IsolateCapacityQpsFigureTest(unittest.TestCase):
             )
 
             trail_qps06_case = payload["cases"][1]
-            self.assertEqual(trail_qps06_case["case_label"], "TRAIL 0.6")
+            self.assertEqual(
+                trail_qps06_case["case_label"], "vLLM (recomputation)"
+            )
             self.assertEqual(trail_qps06_case["source_input_kind"], "run_dir")
             self.assertAlmostEqual(
                 trail_qps06_case["metric_values"]["average_throughput_jobs_per_s"],
@@ -231,7 +233,7 @@ class IsolateCapacityQpsFigureTest(unittest.TestCase):
             trail_lmcache_qps06_case = payload["cases"][2]
             self.assertEqual(
                 trail_lmcache_qps06_case["case_label"],
-                "TRAIL + LMCache 0.6",
+                "vLLM (LMCache)",
             )
             self.assertAlmostEqual(
                 trail_lmcache_qps06_case["metrics"]["average_completion_tokens"]["value"],
