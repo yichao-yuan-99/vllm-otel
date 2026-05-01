@@ -1,0 +1,8 @@
+Hardcoded MI3258X GLM 5.1 service starting on k002-001.hpcfund at Thu Apr 30 10:14:52 PM CDT 2026
+Run ID: 302912
+Resolved PORT_PROFILE_ID=2 to VLLM_PORT=31987, JAEGER_OTLP_LOGIN_PORT=32719, JAEGER_UI_LOGIN_PORT=35264
+Opening reverse tunnels to login
+Launching Jaeger
+Launching vLLM
+Stopping jaeger (pid=615090)
+Stopping ssh reverse tunnel (pid=615086)

@@ -91,3 +91,18 @@ extra_args = [
 reasoning_parser = "kimi_k2"
 tool_call_parser = "kimi_k2"
 context_window = 262144
+
+[models.kimi_k2_6]
+vllm_model_name = "moonshotai/Kimi-K2.6"
+served_model_name = "Kimi-K2.6"
+weight_vram_gb = 900
+extra_args = [
+  "--mm-encoder-tp-mode", "data",
+  "--generation-config", "vllm",
+  "--override-generation-config", "{\"temperature\":1.0,\"top_p\":0.95}",
+  "--trust-remote-code",
+  "--distributed_executor_backend", "ray"
+]
+reasoning_parser = "kimi_k2"
+tool_call_parser = "kimi_k2"
+context_window = 262144

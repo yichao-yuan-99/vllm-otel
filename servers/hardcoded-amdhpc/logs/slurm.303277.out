@@ -1,0 +1,17 @@
+Hardcoded MI3258X Kimi K2.6 service starting on k002-001.hpcfund at Fri May  1 02:36:22 PM CDT 2026
+Run ID: 303277
+Resolved PORT_PROFILE_ID=0 to VLLM_PORT=11451, JAEGER_OTLP_LOGIN_PORT=4317, JAEGER_UI_LOGIN_PORT=16686
+Opening reverse tunnels to login
+Launching Jaeger
+Preparing Python overlay for the vLLM image
+Launching vLLM
+Service is ready.
+  LOGIN_HOST=login
+  PORT_PROFILE_ID=0
+  VLLM_BASE_URL=http://127.0.0.1:11451
+  JAEGER_BASE_URL=http://127.0.0.1:16686
+  login-node-vllm: ssh login 'curl http://127.0.0.1:11451/v1/models'
+  login-node-jaeger: ssh login 'curl http://127.0.0.1:16686'
+  jaeger log: /home1/yichaoy/vllm-otel/servers/hardcoded-amdhpc/logs/jaeger.303277.log
+  vllm log: /home1/yichaoy/vllm-otel/servers/hardcoded-amdhpc/logs/vllm.303277.log
+Waiting for service exit or job cancellation.

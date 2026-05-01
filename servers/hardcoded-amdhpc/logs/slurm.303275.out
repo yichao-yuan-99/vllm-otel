@@ -1,0 +1,47 @@
+Hardcoded MI3258X Kimi K2.6 service starting on k002-001.hpcfund at Fri May  1 02:31:28 PM CDT 2026
+Run ID: 303275
+Resolved PORT_PROFILE_ID=0 to VLLM_PORT=11451, JAEGER_OTLP_LOGIN_PORT=4317, JAEGER_UI_LOGIN_PORT=16686
+Opening reverse tunnels to login
+Launching Jaeger
+Preparing Python overlay for the vLLM image
+Launching vLLM
+Stopping jaeger (pid=921836)
+Stopping vllm (pid=921941)
+Stopping ssh reverse tunnel (pid=921832)
+
+----------------------------------------------------------------------
+Omnistat Report Card for Job Id: 303275
+----------------------------------------------------------------------
+
+Job Overview (Num Nodes = 1, Machine = HPC Fund)
+ --> Start time = 2026-05-01 14:32:02
+ --> End   time = 2026-05-01 14:38:32
+ --> Duration   = 390 secs
+
+GPU Statistics:
+
+           | Utilization (%)  |  Memory Use (%)  | Temperature (C)  |    Power (W)     | Energy (kWh) |
+     GPU # |    Max     Mean  |    Max     Mean  |    Max     Mean  |    Max     Mean  |    Total     |
+    ---------------------------------------------------------------------------------------------------
+         0 |   16.00   12.36  |   30.83   24.32  |   60.00   59.14  |  247.00  226.93  |   2.49e-02   |
+         1 |   16.00   12.21  |   30.67   24.19  |   52.00   50.86  |  227.00  208.79  |   2.29e-02   |
+         2 |   18.00   13.14  |   30.84   24.32  |   53.00   52.07  |  235.00  216.43  |   2.37e-02   |
+         3 |   15.00   11.64  |   30.84   24.33  |   57.00   56.14  |  239.00  220.21  |   2.41e-02   |
+         4 |   15.00   11.79  |   30.78   24.28  |   55.00   54.21  |  233.00  214.57  |   2.35e-02   |
+         5 |   15.00   11.57  |   30.81   24.30  |   54.00   52.79  |  231.00  212.21  |   2.33e-02   |
+         6 |   17.00   12.57  |   30.79   24.28  |   52.00   51.07  |  229.00  211.36  |   2.32e-02   |
+         7 |   15.00   11.00  |   30.78   24.28  |   58.00   57.14  |  235.00  216.00  |   2.37e-02   |
+
+Approximate Total GPU Energy Consumed = 1.89e-01 kWh
+
+Host Statistics:
+
+    # CPUs | CPU Utilization (%)  |    Memory Use (%)    |
+           |    Max       Mean    |    Max       Mean    |
+    ------------------------------------------------------
+       256 |   17.87     15.33    |   19.07     13.13    |
+
+--
+Query interval = 30.000 secs
+Query execution time = 0.3 secs
+Version = 1.12.0
